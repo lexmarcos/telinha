@@ -372,8 +372,8 @@ function callMember(id) {
  * - Codificador de hardware: o Sunshine usa NVENC/QuickSync/VAAPI. Aqui quem
  *   transmite descobre qual codec a placa de vídeo codifica (powerEfficient) e
  *   avisa quem assiste, que põe esse codec na frente da resposta.
- * - Sem colchão no receptor: o Moonlight mostra o quadro assim que decodifica.
- *   Pedimos ao navegador o menor buffer de espera possível.
+ * - Teto de bitrate do tamanho do vídeo (o Sunshine limita o buffer a um
+ *   quadro): sem rajadas acima do necessário, menos perda e fila no repasse.
  * - Modo: fluidez mantém os quadros por segundo (jogos), nitidez mantém a
  *   resolução (texto, código). */
 
@@ -400,10 +400,6 @@ async function hardwareCodec(track) {
 function tuneReceiver(pc, codec) {
   if (!pc) return;
   pc.addEventListener("track", ({ receiver, transceiver }) => {
-    try {
-      if ("jitterBufferTarget" in receiver) receiver.jitterBufferTarget = 0;
-      else receiver.playoutDelayHint = 0;
-    } catch {}
     if (codec && receiver.track.kind === "video" && transceiver.setCodecPreferences) {
       const all = RTCRtpReceiver.getCapabilities("video")?.codecs ?? [];
       const rank = (c) => c.mimeType !== codec ? 2 : /packetization-mode=1/.test(c.sdpFmtpLine ?? "") || codec !== "video/H264" ? 0 : 1;
@@ -446,10 +442,12 @@ function targetSize() {
   return { width: Math.round((h * width) / height / 2) * 2, height: h };
 }
 
-// Orçamento por pessoa, proporcional aos pixels por segundo (~0,065 bit por pixel).
+// Orçamento por pessoa, proporcional aos pixels por segundo (~0,08 bit por pixel).
+// Medido: um teto do tamanho do vídeo reduz perda e fila no repasse; abaixo de
+// ~0,07 o codificador começa a baixar a resolução sozinho.
 function targetBitrate() {
   const { width, height } = targetSize();
-  return Math.min(20e6, Math.max(2.5e6, width * height * state.quality.fps * 0.065));
+  return Math.min(20e6, Math.max(2.5e6, width * height * state.quality.fps * 0.08));
 }
 
 async function applyQuality() {
