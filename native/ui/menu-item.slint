@@ -1,0 +1,47 @@
+// Item de menu: ícone + texto, largura toda. Responde no aperto (o fundo muda
+// na hora em que o botão desce, não quando sobe).
+
+import { Palette, Size, Radius, Space, Type, Motion } from "tokens.slint";
+
+export enum Tone { normal, primary, danger }
+
+export component MenuItem inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <Tone> tone: Tone.normal;
+    callback clicked();
+
+    property <color> fg: root.tone == Tone.primary ? Palette.phosphor : root.tone == Tone.danger ? Palette.tally : Palette.text;
+    height: Size.item-h;
+    border-radius: Radius.item;
+    background: touch.pressed ? Palette.phosphor.with-alpha(0.16) : touch.has-hover ? Palette.room-raised : Palette.room-raised.with-alpha(0);
+    animate background { duration: Motion.press; }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: Space.m - 2px;
+        padding-right: Space.m - 2px;
+        spacing: Space.m - 2px;
+        VerticalLayout {
+            alignment: center;
+            Image { source: root.icon; colorize: root.fg; width: Size.icon; height: Size.icon; }
+        }
+        Text {
+            text: root.label;
+            color: root.fg;
+            font-size: Type.body;
+            font-weight: root.tone == Tone.normal ? Type.regular : Type.semibold;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+// Separador entre grupos de itens.
+export component Divider inherits Rectangle {
+    height: Space.xs * 2 + 1px;
+    Rectangle { height: 1px; background: Palette.line; }
+}

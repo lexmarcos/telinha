@@ -1,0 +1,64 @@
+// O que o app (Rust) mostra e as ações que ele recebe. Os painéis leem e
+// chamam daqui; ninguém guarda estado próprio além do que é só visual.
+
+import { NoteTone } from "note.slint";
+import { DotData } from "dots.slint";
+
+export global AppState {
+    // Canal
+    in property <int> session; // 0 fora de canal, 1 conectando, 2 no canal
+    in property <string> code;
+    in property <bool> live;
+    in property <string> subtitle;
+    in property <[DotData]> dots;
+    in property <int> dots-extra;
+    in property <string> notice;
+    in property <NoteTone> notice-tone;
+
+    // Qualidade (marcadores dos segmentados vêm de molas: resolução, fps,
+    // prioridade, som, perfil do Discord, quem assiste)
+    in property <[string]> res-options;
+    in property <int> res-sel;
+    in property <int> fps-sel;
+    in property <int> prio-sel;
+    in property <int> audio-sel;
+    in property <[float]> thumbs: [0, 0, 0, 0, 0, 0];
+    in property <string> screen-note;
+    in property <string> prio-note;
+    in property <string> encoder-note;
+    in property <NoteTone> encoder-tone;
+    in property <string> upload-note;
+
+    // Entrar num canal
+    in-out property <string> join-text;
+    in property <bool> join-digits;
+    in-out property <string> name;
+    in property <bool> joining;
+
+    // Discord
+    in property <bool> discord-available;
+    in property <bool> discord-logged;
+    in property <string> discord-name;
+    in property <int> profile-sel;
+    in property <int> call-sel;
+
+    callback open(int); // 1 menu, 2 qualidade, 3 entrar, 4 Discord
+    callback create();
+    callback start-live();
+    callback stop-live();
+    callback copy-invite();
+    callback hide();
+    callback leave();
+    callback quit();
+    callback join-edited(string);
+    callback name-edited(string);
+    callback join-submit();
+    callback set-resolution(int);
+    callback set-fps(int);
+    callback set-priority(int);
+    callback set-audio(int);
+    callback set-profile(int);
+    callback set-call(int);
+    callback discord-login();
+    callback discord-logout();
+}

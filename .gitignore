@@ -3,3 +3,7 @@ node_modules/
 *.log
 tools/latency/*.jsonl
 tools/latency/fail-*.png
+native/target/
+native/.deps/
+native/dist/
+native/.env.build

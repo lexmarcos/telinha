@@ -1,0 +1,110 @@
+// A bolha: um tubo de TV redondo com o número do canal em matriz de pontos e
+// a luz vermelha de "no ar". É a única coisa sempre visível, então é onde está
+// a personalidade. Aperto, anel de "no ar" e hover vêm das molas do app.
+
+import { Palette, Size, Type, Motion } from "tokens.slint";
+import { Shadow } from "shadow.slint";
+
+export enum Face { empty, connecting, channel }
+
+export component Bubble inherits Rectangle {
+    in property <Face> face: Face.empty;
+    in property <string> code;
+    // Molas do app: 0..1 (o anel de "no ar" passa um pouco de 1 no quique).
+    in property <float> tally;
+    in property <float> press;
+    callback pointer-down();
+    callback pointer-up();
+    callback drag-start();
+    callback clicked();
+
+    width: Size.bubble;
+    height: Size.bubble;
+    property <length> outer: self.width / 2;
+    property <float> t: clamp(root.tally, 0, 1.2);
+
+    Rectangle {
+        transform-origin: { x: self.width / 2, y: self.height / 2 };
+        transform-scale: 1 - (1 - Motion.press-scale) * root.press;
+
+        Shadow { width: parent.width; height: parent.height; radius: root.outer; spread: 10px; offset-y: 4px; strength: 0.5; }
+        // Moldura do aparelho.
+        Rectangle {
+            border-radius: root.outer;
+            background: Palette.room;
+            border-width: 1px;
+            border-color: Palette.phosphor.with-alpha(touch.has-hover ? 0.38 : 0.18);
+            animate border-color { duration: Motion.hover; }
+        }
+        // Vidro do tubo: linhas de varredura e um reflexo no alto.
+        Rectangle {
+            width: Size.tube;
+            height: Size.tube;
+            border-radius: self.width / 2;
+            clip: true;
+            background: Palette.screen;
+            for i in 17: Rectangle { y: 1.5px + i * 3px; height: 1px; background: Palette.phosphor.with-alpha(0.035); }
+            Rectangle {
+                x: -7.3px; y: -14.6px; width: 37.4px; height: 37.4px;
+                border-radius: self.width / 2;
+                background: Palette.white.with-alpha(0.035);
+            }
+            if root.face != Face.channel: Rectangle {
+                // Sem canal: um "+" discreto convidando a clicar.
+                Rectangle { width: 14px; height: 2px; border-radius: 1px; background: Palette.phosphor.with-alpha(0.8); }
+                Rectangle { width: 2px; height: 14px; border-radius: 1px; background: Palette.phosphor.with-alpha(0.8); }
+            }
+            if root.face == Face.channel: Text {
+                text: root.code;
+                font-family: "Doto";
+                font-weight: 900;
+                font-size: Type.digits-bubble;
+                color: Palette.phosphor;
+            }
+        }
+        // Conectando: o único giro do app, um arco devagar em volta do tubo.
+        if root.face == Face.connecting: Path {
+            width: root.width;
+            height: root.height;
+            viewbox-width: 64;
+            viewbox-height: 64;
+            stroke: Palette.phosphor;
+            stroke-width: 2.5px;
+            transform-origin: { x: self.width / 2, y: self.height / 2 };
+            transform-rotation: Motion.reduced ? 0deg : animation-tick() / 1.4s * 360deg;
+            MoveTo { x: 32; y: 2.5; }
+            ArcTo { x: 61.5; y: 32; radius-x: 29.5; radius-y: 29.5; sweep: true; }
+        }
+        // No ar: anel vermelho chegando com quique + ponto de gravação.
+        if root.tally > 0.01: Rectangle {
+            border-radius: root.outer;
+            border-width: Size.tally-ring * root.t;
+            border-color: Palette.tally.with-alpha(clamp(root.t, 0, 1));
+        }
+        if root.tally > 0.01: Rectangle {
+            x: root.outer + root.outer * 0.68 - 5.5px * root.t;
+            y: root.outer - root.outer * 0.68 - 5.5px * root.t;
+            width: 11px * root.t;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: Palette.room;
+            Rectangle { width: 8px * root.t; height: self.width; border-radius: self.width / 2; background: Palette.tally; }
+        }
+    }
+
+    // Clique abre ou fecha o menu; arrastar (depois de 4 de movimento, para não
+    // confundir com clique) move a janela pelo gerenciador de janelas.
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.down { root.pointer-down(); }
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.up { root.pointer-up(); }
+        }
+        moved => {
+            if self.pressed && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
+                root.drag-start();
+            }
+        }
+        clicked => { root.clicked(); }
+    }
+}

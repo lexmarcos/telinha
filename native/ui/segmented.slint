@@ -1,0 +1,43 @@
+// Controle segmentado. O marcador desliza com a mola do app (`thumb` é a
+// posição animada, em índices; pode ser fracionária no meio do caminho).
+
+import { Palette, Size, Radius, Type, Motion } from "tokens.slint";
+
+export component Segmented {
+    in property <[string]> options;
+    in property <int> selected;
+    in property <float> thumb;
+    callback pick(int);
+
+    property <length> inset: 3px;
+    property <length> seg: (self.width - 2 * self.inset) / max(1, root.options.length);
+    height: Size.segment-h;
+
+    Rectangle { border-radius: Radius.track; background: Palette.room-raised; }
+    Rectangle {
+        x: root.inset + root.seg * clamp(root.thumb, 0, max(0, root.options.length - 1));
+        y: root.inset;
+        width: root.seg;
+        height: parent.height - 2 * root.inset;
+        border-radius: Radius.thumb;
+        background: Palette.phosphor.with-alpha(0.2);
+        // Luz no topo do marcador: o mesmo material dos painéis, em pequeno.
+        Rectangle {
+            x: Radius.thumb; y: 0; width: parent.width - 2 * Radius.thumb; height: 1px;
+            background: @linear-gradient(90deg, Palette.white.with-alpha(0) 0%, Palette.white.with-alpha(0.18) 50%, Palette.white.with-alpha(0) 100%);
+        }
+    }
+    for option[i] in root.options: TouchArea {
+        x: root.inset + i * root.seg;
+        width: root.seg;
+        mouse-cursor: pointer;
+        clicked => { root.pick(i); }
+        Text {
+            text: option;
+            font-size: Type.body - 1px;
+            font-weight: Type.semibold;
+            color: i == root.selected || parent.has-hover ? Palette.text : Palette.muted;
+            animate color { duration: Motion.hover; }
+        }
+    }
+}

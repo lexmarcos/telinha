@@ -1,0 +1,181 @@
+// Conteúdo dos painéis. Cada um é uma coluna; o app mede a altura dela e anima
+// a superfície até lá.
+
+import { Palette, Space, Radius } from "tokens.slint";
+import { AppState } from "state.slint";
+import { Header, Label } from "surface.slint";
+import { MenuItem, Divider, Tone } from "menu-item.slint";
+import { Segmented } from "segmented.slint";
+import { Pill, PillKind } from "pill.slint";
+import { Field } from "field.slint";
+import { Note, NoteTone } from "note.slint";
+
+component Gap inherits Rectangle { in property <length> size; height: root.size; }
+
+component NoticeLine inherits VerticalLayout {
+    if AppState.notice != "": Gap { size: Space.s; }
+    if AppState.notice != "": Note { text: AppState.notice; tone: AppState.notice-tone; }
+}
+
+export component MenuPanel inherits VerticalLayout {
+    spacing: 2px;
+    Header {
+        title: AppState.session == 2 ? (AppState.live ? "Transmitindo" : "No canal") : "Telinha";
+        subtitle: AppState.subtitle;
+    }
+    Gap { size: Space.s - 2px; }
+    if AppState.session != 2: MenuItem {
+        icon: @image-url("icons/plus.svg"); label: "Abrir um canal novo"; tone: Tone.primary;
+        clicked => { AppState.create(); }
+    }
+    if AppState.session != 2: MenuItem {
+        icon: @image-url("icons/enter.svg"); label: "Entrar num canal";
+        clicked => { AppState.open(3); }
+    }
+    if AppState.session == 2 && !AppState.live: MenuItem {
+        icon: @image-url("icons/screen.svg"); label: "Transmitir a tela"; tone: Tone.primary;
+        clicked => { AppState.start-live(); }
+    }
+    if AppState.session == 2 && AppState.live: MenuItem {
+        icon: @image-url("icons/stop.svg"); label: "Parar de transmitir"; tone: Tone.danger;
+        clicked => { AppState.stop-live(); }
+    }
+    if AppState.session == 2: MenuItem {
+        icon: @image-url("icons/tune.svg"); label: "Qualidade da transmissão";
+        clicked => { AppState.open(2); }
+    }
+    if AppState.session == 2: MenuItem {
+        icon: @image-url("icons/link.svg"); label: "Copiar convite";
+        clicked => { AppState.copy-invite(); }
+    }
+    Divider { }
+    if AppState.discord-available: MenuItem {
+        icon: @image-url("icons/profile.svg"); label: "Discord";
+        clicked => { AppState.open(4); }
+    }
+    MenuItem {
+        icon: @image-url("icons/tray.svg"); label: "Esconder na bandeja";
+        clicked => { AppState.hide(); }
+    }
+    if AppState.session == 2: MenuItem {
+        icon: @image-url("icons/leave.svg"); label: "Sair do canal";
+        clicked => { AppState.leave(); }
+    }
+    if AppState.session != 2: MenuItem {
+        icon: @image-url("icons/quit.svg"); label: "Fechar o Telinha";
+        clicked => { AppState.quit(); }
+    }
+    if AppState.notice != "": VerticalLayout {
+        padding-left: Space.s;
+        padding-right: Space.s;
+        padding-top: Space.s;
+        Note { text: AppState.notice; tone: AppState.notice-tone; }
+    }
+}
+
+export component QualityPanel inherits VerticalLayout {
+    Header { title: "Qualidade da transmissão"; back: true; go-back => { AppState.open(1); } }
+    Gap { size: Space.m; }
+    Label { text: "Resolução"; }
+    Gap { size: Space.s; }
+    Segmented { options: AppState.res-options; selected: AppState.res-sel; thumb: AppState.thumbs[0]; pick(i) => { AppState.set-resolution(i); } }
+    Gap { size: Space.xs + 2px; }
+    Note { text: AppState.screen-note; }
+    Gap { size: Space.m; }
+    Label { text: "Quadros por segundo"; }
+    Gap { size: Space.s; }
+    Segmented { options: ["30", "60"]; selected: AppState.fps-sel; thumb: AppState.thumbs[1]; pick(i) => { AppState.set-fps(i); } }
+    Gap { size: Space.m; }
+    Label { text: "Se a conexão apertar, priorizar"; }
+    Gap { size: Space.s; }
+    Segmented { options: ["Fluidez", "Nitidez"]; selected: AppState.prio-sel; thumb: AppState.thumbs[2]; pick(i) => { AppState.set-priority(i); } }
+    Gap { size: Space.xs + 2px; }
+    Note { text: AppState.prio-note; }
+    Gap { size: Space.m; }
+    Label { text: "Som"; }
+    Gap { size: Space.s; }
+    Segmented { options: ["Sem som", "Com som"]; selected: AppState.audio-sel; thumb: AppState.thumbs[3]; pick(i) => { AppState.set-audio(i); } }
+    Gap { size: Space.m; }
+    if AppState.encoder-note != "": Note { text: AppState.encoder-note; tone: AppState.encoder-tone; }
+    if AppState.encoder-note != "": Gap { size: Space.s; }
+    Rectangle {
+        border-radius: 12px;
+        background: Palette.room-raised;
+        VerticalLayout {
+            padding-left: Space.m;
+            padding-right: Space.m;
+            padding-top: Space.s + 2px;
+            padding-bottom: Space.s + 2px;
+            Note { text: AppState.upload-note; }
+        }
+    }
+}
+
+export component JoinPanel inherits VerticalLayout {
+    Header { title: "Entrar num canal"; back: true; go-back => { AppState.open(1); } }
+    Gap { size: Space.m; }
+    Label { text: "Número do canal ou link de convite"; }
+    Gap { size: Space.s; }
+    Field {
+        channel: true;
+        placeholder: "- - - -";
+        digits: AppState.join-digits;
+        value <=> AppState.join-text;
+        edited(t) => { AppState.join-edited(t); }
+        accepted => { AppState.join-submit(); }
+    }
+    Gap { size: Space.m; }
+    Label { text: "Seu nome"; }
+    Gap { size: Space.s; }
+    Field {
+        placeholder: "Como os amigos te chamam";
+        value <=> AppState.name;
+        edited(t) => { AppState.name-edited(t); }
+        accepted => { AppState.join-submit(); }
+    }
+    Gap { size: Space.l; }
+    Pill {
+        label: AppState.joining ? "Entrando" : "Entrar";
+        enabled: !AppState.joining;
+        clicked => { AppState.join-submit(); }
+    }
+    NoticeLine { }
+}
+
+export component DiscordPanel inherits VerticalLayout {
+    Header {
+        title: "Discord";
+        subtitle: AppState.discord-logged ? "Conectado como " + AppState.discord-name : "";
+        back: true;
+        go-back => { AppState.open(1); }
+    }
+    Gap { size: Space.m; }
+    Label { text: "No seu perfil"; }
+    Gap { size: Space.s; }
+    Segmented { options: ["Esconder", "Mostrar"]; selected: AppState.profile-sel; thumb: AppState.thumbs[4]; pick(i) => { AppState.set-profile(i); } }
+    Gap { size: Space.xs + 2px; }
+    Note { text: "Quem abre seu perfil vê que você está transmitindo, com um botão para assistir."; }
+    Gap { size: Space.m; }
+    Label { text: "Quem pode assistir"; }
+    Gap { size: Space.s; }
+    if !AppState.discord-logged: Note { text: "Entre com o Discord para deixar só quem está na sua call assistir."; }
+    if !AppState.discord-logged: Gap { size: Space.m; }
+    if !AppState.discord-logged: Pill { label: "Entrar com o Discord"; clicked => { AppState.discord-login(); } }
+    if AppState.discord-logged: Segmented {
+        options: ["Quem tiver o link", "Só a call"];
+        selected: AppState.call-sel;
+        thumb: AppState.thumbs[5];
+        pick(i) => { AppState.set-call(i); }
+    }
+    if AppState.discord-logged: Gap { size: Space.xs + 2px; }
+    if AppState.discord-logged: Note {
+        text: AppState.call-sel == 1
+            ? "Ao transmitir, o bot posta um Assistir no chat da sua call. Só quem está nela consegue abrir."
+            : "Qualquer pessoa com o link do canal assiste.";
+    }
+    if AppState.discord-logged && AppState.live: Gap { size: Space.xs + 2px; }
+    if AppState.discord-logged && AppState.live: Note { text: "Muda a partir da próxima transmissão."; tone: NoteTone.warn; }
+    if AppState.discord-logged: Gap { size: Space.m; }
+    if AppState.discord-logged: Pill { label: "Sair do Discord"; kind: PillKind.quiet; clicked => { AppState.discord-logout(); } }
+    NoticeLine { }
+}

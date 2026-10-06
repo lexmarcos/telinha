@@ -1,0 +1,26 @@
+// Sombra em camadas. O desenho por software não tem drop-shadow, então a
+// sombra é feita de anéis cada vez maiores e mais fracos, com o mesmo raio da
+// superfície. Fica embaixo da superfície e com a mesma geometria dela.
+
+import { Palette } from "tokens.slint";
+
+export component Shadow inherits Rectangle {
+    in property <length> radius;
+    // Até onde a sombra vai além da superfície e quanto desce.
+    in property <length> spread: 14px;
+    in property <length> offset-y: 6px;
+    // Opacidade somada das camadas (a parte mais escura, colada na borda).
+    in property <float> strength: 0.5;
+    property <int> layers: 7;
+
+    for i in layers: Rectangle {
+        property <length> grow: root.spread * (i + 1) / root.layers;
+        x: -self.grow;
+        y: -self.grow + root.offset-y * (i + 1) / root.layers;
+        width: root.width + 2 * self.grow;
+        height: root.height + 2 * self.grow;
+        border-radius: root.radius + self.grow;
+        // As camadas de fora são mais fracas: a sombra se desfaz em vez de terminar.
+        background: Palette.shadow.with-alpha(root.strength / root.layers * (1 - i / (root.layers + 1)));
+    }
+}

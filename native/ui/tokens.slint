@@ -1,0 +1,80 @@
+// Tokens do design system (DESIGN.md). Nenhum componente define cor, tamanho,
+// raio ou tempo próprios: tudo sai daqui.
+
+export global Palette {
+    out property <color> room: #0D1430;
+    out property <color> room-raised: #16204A;
+    out property <color> screen: #070B1D;
+    out property <color> phosphor: #CFE0FF;
+    out property <color> text: #EDF0FF;
+    out property <color> muted: #8C95BD;
+    out property <color> line: #C8D4FF24;
+    out property <color> tally: #FF4438;
+    out property <color> warn: #FFC56B;
+    out property <color> white: #FFFFFF;
+    out property <color> shadow: #000000;
+    // Avatares de quem assiste (os mesmos do site), escolhidos pelo nome.
+    out property <[color]> avatars: [#CFE0FF, #FFD9A8, #BFF0D4, #F5C6FF, #FFE48A, #A8ECFF, #FFC2C2];
+}
+
+export global Space {
+    out property <length> xs: 4px;
+    out property <length> s: 8px;
+    out property <length> m: 12px;
+    out property <length> l: 16px;
+    out property <length> xl: 24px;
+}
+
+export global Size {
+    out property <length> bubble: 64px;
+    out property <length> tube: 52px;
+    out property <length> tally-ring: 3px;
+    out property <length> dot: 18px;
+    out property <length> dot-overlap: 5px;
+    out property <int> dots-max: 5;
+    out property <length> panel-w: 264px;
+    out property <length> panel-pad: 14px;
+    out property <length> panel-gap: 10px;
+    out property <length> item-h: 36px;
+    out property <length> icon: 16px;
+    out property <length> segment-h: 32px;
+    out property <length> button-h: 36px;
+    // Folga em volta do conteúdo para a sombra caber dentro da janela.
+    out property <length> shadow-room: 18px;
+}
+
+export global Radius {
+    // Hierarquia: superfície grande > controle > marcador. Nunca um raio único.
+    out property <length> panel: 20px;
+    out property <length> item: 10px;
+    out property <length> track: 11px;
+    out property <length> thumb: 9px;
+    out property <length> field: 14px;
+}
+
+export global Type {
+    out property <length> title: 15px;
+    out property <length> body: 14px;
+    out property <length> label: 12px;
+    out property <length> note: 12px;
+    out property <length> digits-bubble: 17px;
+    out property <length> digits-field: 30px;
+    out property <length> dot: 8.5px;
+    // Tracking por tamanho: título um pouco fechado, rótulo pequeno um pouco aberto.
+    out property <length> title-tracking: -0.15px;
+    out property <length> label-tracking: 0.2px;
+    out property <int> regular: 400;
+    out property <int> semibold: 600;
+}
+
+export global Motion {
+    // Ligado pelo app quando o sistema pede menos animação: sem escala nem
+    // quique, só troca de opacidade.
+    in property <bool> reduced: false;
+    // Escala de onde o painel nasce e quanto a bolha encolhe no aperto.
+    out property <float> panel-from-scale: 0.92;
+    out property <float> press-scale: 0.94;
+    // Micro-resposta de itens e botões no aperto (o resto usa as molas do app).
+    out property <duration> press: 90ms;
+    out property <duration> hover: 120ms;
+}

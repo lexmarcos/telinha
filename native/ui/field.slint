@@ -1,0 +1,49 @@
+// Campo de texto. O do canal é a telinha do site: dígitos Doto acesos sobre o
+// vidro; um link de convite colado aparece em letra comum.
+
+import { Palette, Radius, Space, Type, Motion } from "tokens.slint";
+
+export component Field inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> value;
+    in property <bool> channel: false;
+    // O app diz se o conteúdo é só dígitos (aí usa a fonte Doto).
+    in property <bool> digits: false;
+    callback edited(string);
+    callback accepted();
+
+    property <bool> doto: root.channel && root.digits;
+    height: root.channel ? 56px : 38px;
+    border-radius: Radius.field;
+    background: root.channel ? Palette.screen : Palette.room-raised;
+    border-width: 1px;
+    border-color: input.has-focus ? Palette.phosphor.with-alpha(0.6) : Palette.line;
+    animate border-color { duration: Motion.hover; }
+
+    if root.value == "": Text {
+        x: Space.m;
+        width: parent.width - 2 * Space.m;
+        text: root.placeholder;
+        color: Palette.muted.with-alpha(0.6);
+        font-size: root.channel ? Type.body : Type.body;
+        horizontal-alignment: root.channel ? center : left;
+        vertical-alignment: center;
+    }
+    input := TextInput {
+        x: Space.m;
+        width: parent.width - 2 * Space.m;
+        height: parent.height;
+        text <=> root.value;
+        vertical-alignment: center;
+        horizontal-alignment: root.channel ? center : left;
+        single-line: true;
+        font-size: root.doto ? Type.digits-field : Type.body;
+        font-family: root.doto ? "Doto" : "";
+        font-weight: root.doto ? 900 : Type.regular;
+        color: root.channel ? Palette.phosphor : Palette.text;
+        selection-background-color: Palette.phosphor.with-alpha(0.3);
+        selection-foreground-color: Palette.text;
+        edited => { root.edited(self.text); }
+        accepted => { root.accepted(); }
+    }
+}

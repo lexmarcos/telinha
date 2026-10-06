@@ -1,0 +1,12 @@
+// Nota: explicação curta em texto de apoio, aviso em âmbar ou erro em vermelho.
+
+import { Palette, Type } from "tokens.slint";
+
+export enum NoteTone { info, warn, error }
+
+export component Note inherits Text {
+    in property <NoteTone> tone: NoteTone.info;
+    font-size: Type.note;
+    wrap: word-wrap;
+    color: root.tone == NoteTone.warn ? Palette.warn : root.tone == NoteTone.error ? Palette.tally : Palette.muted;
+}

@@ -1,0 +1,63 @@
+// Material dos painéis: sala escura quase opaca, luz fina no topo e sombra
+// larga para fora. Superfície grande = sombra maior. Nunca empilhar material
+// translúcido sobre material translúcido.
+
+import { Palette, Radius, Size, Space, Type, Motion } from "tokens.slint";
+import { Shadow } from "shadow.slint";
+
+export component Surface inherits Rectangle {
+    Shadow { width: parent.width; height: parent.height; radius: Radius.panel; spread: 16px; offset-y: 8px; strength: 0.6; }
+    Rectangle {
+        border-radius: Radius.panel;
+        background: Palette.room.with-alpha(0.96);
+        border-width: 1px;
+        border-color: Palette.line;
+    }
+    // Luz batendo na borda de cima do material.
+    Rectangle {
+        x: Radius.panel; y: 0; width: parent.width - 2 * Radius.panel; height: 1px;
+        background: @linear-gradient(90deg, Palette.white.with-alpha(0) 0%, Palette.white.with-alpha(0.16) 50%, Palette.white.with-alpha(0) 100%);
+    }
+    @children
+}
+
+// Botão só de ícone (a seta de voltar, sempre no mesmo lugar: à esquerda).
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    callback clicked();
+    width: 28px;
+    height: 28px;
+    border-radius: Radius.item;
+    background: touch.pressed ? Palette.phosphor.with-alpha(0.16) : touch.has-hover ? Palette.room-raised : Palette.room-raised.with-alpha(0);
+    animate background { duration: Motion.press; }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    Image { source: root.icon; colorize: Palette.text; width: Size.icon; height: Size.icon; }
+}
+
+// Cabeçalho do painel: título, linha de apoio e, em subpainéis, voltar.
+export component Header inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> back: false;
+    callback go-back();
+    spacing: Space.s;
+    if root.back: VerticalLayout {
+        alignment: center;
+        IconButton { icon: @image-url("icons/back.svg"); clicked => { root.go-back(); } }
+    }
+    VerticalLayout {
+        spacing: 2px;
+        alignment: center;
+        horizontal-stretch: 1;
+        Text { text: root.title; font-size: Type.title; font-weight: Type.semibold; letter-spacing: Type.title-tracking; color: Palette.text; }
+        if root.subtitle != "": Text { text: root.subtitle; font-size: Type.note; color: Palette.muted; wrap: word-wrap; }
+    }
+}
+
+// Nome de um grupo de controles ("Resolução").
+export component Label inherits Text {
+    font-size: Type.label;
+    font-weight: Type.semibold;
+    letter-spacing: Type.label-tracking;
+    color: Palette.muted;
+}

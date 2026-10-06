@@ -1,0 +1,46 @@
+// Pontinhos de quem assiste: círculos com as iniciais, na cor do avatar, numa
+// fileira embaixo da bolha. No máximo cinco e depois "+n". Quem está num
+// navegador que não recebe o modo nativo aparece apagado.
+
+import { Palette, Size, Type, Motion } from "tokens.slint";
+
+export struct DotData { initials: string, tint: color, supported: bool }
+
+export component Dots {
+    in property <[DotData]> dots;
+    in property <int> extra;
+    property <int> n: root.dots.length + (root.extra > 0 ? 1 : 0);
+    property <length> step: Size.dot - Size.dot-overlap;
+    width: root.n == 0 ? 0px : Size.dot + 2px + (root.n - 1) * root.step;
+    height: Size.dot + 2px;
+
+    for d[i] in root.dots: Rectangle {
+        x: i * root.step;
+        width: Size.dot + 2px;
+        height: self.width;
+        // Contorno da cor da sala separa um ponto do outro.
+        border-radius: self.width / 2;
+        background: Palette.room;
+        Rectangle {
+            width: Size.dot;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: d.tint.with-alpha(d.supported ? 1 : 0.4);
+            Text { text: d.initials; font-size: Type.dot; font-weight: Type.semibold; color: Palette.room; }
+        }
+    }
+    if root.extra > 0: Rectangle {
+        x: root.dots.length * root.step;
+        width: Size.dot + 2px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: Palette.room;
+        Rectangle {
+            width: Size.dot;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: Palette.room-raised;
+            Text { text: "+" + root.extra; font-size: Type.dot; font-weight: Type.semibold; color: Palette.text; }
+        }
+    }
+}

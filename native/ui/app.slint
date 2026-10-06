@@ -1,0 +1,115 @@
+// A janela da bolha: transparente, sem bordas, sempre no topo e só do tamanho
+// do conteúdo (para não roubar cliques de quem está embaixo).
+//
+// O app (Rust) cuida das molas e da posição; aqui fica só o desenho.
+
+import "../assets/fonts/Doto-Black.ttf";
+import { Palette, Size, Space, Radius, Motion } from "tokens.slint";
+import { AppState } from "state.slint";
+import { Bubble, Face } from "bubble.slint";
+import { Dots, DotData } from "dots.slint";
+import { Surface } from "surface.slint";
+import { MenuPanel, QualityPanel, JoinPanel, DiscordPanel } from "panels.slint";
+import { NoteTone } from "note.slint";
+
+export { AppState, Motion, DotData, NoteTone, Face, Palette }
+
+export component Bolha inherits Window {
+    in property <string> window-title: "Telinha";
+    // Molas do app.
+    in property <float> open;
+    in property <float> press;
+    in property <float> tally;
+    in property <float> content-fade: 1;
+    in property <length> panel-h;
+    // Painel: qual é (1 menu, 2 qualidade, 3 entrar, 4 Discord), se ocupa a
+    // janela, de que lado da bolha e quanto de altura a janela reserva.
+    in property <int> panel-kind;
+    in property <bool> panel-shown;
+    in property <bool> side-left;
+    in property <length> hold-h;
+    // Altura natural do conteúdo do painel (o app anima a superfície até ela).
+    out property <length> content-h: content.preferred-height + 2 * Size.panel-pad;
+
+    callback bubble-down();
+    callback bubble-up();
+    callback bubble-drag();
+    callback bubble-click();
+    callback escape();
+
+    title: root.window-title;
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    default-font-size: 14px;
+
+    property <length> pad: Size.shadow-room;
+    property <length> left-w: max(Size.bubble, dots.width);
+    property <length> left-h: Size.bubble + (AppState.dots.length > 0 ? Space.xs + 2px + dots.height : 0px);
+    property <length> panel-room: root.panel-shown ? Size.panel-gap + Size.panel-w : 0px;
+    property <length> left-x: root.panel-shown && root.side-left ? root.pad + root.panel-room : root.pad;
+    width: 2 * root.pad + root.left-w + root.panel-room;
+    height: 2 * root.pad + max(root.left-h, root.panel-shown ? root.hold-h : 0px);
+
+    keys := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Escape {
+                root.escape();
+                return accept;
+            }
+            reject
+        }
+
+        Bubble {
+            x: root.left-x + (root.left-w - Size.bubble) / 2;
+            y: root.pad;
+            face: AppState.session == 2 ? Face.channel : AppState.session == 1 ? Face.connecting : Face.empty;
+            code: AppState.code;
+            tally: root.tally;
+            press: root.press;
+            pointer-down => { root.bubble-down(); }
+            pointer-up => { root.bubble-up(); }
+            drag-start => { root.bubble-drag(); }
+            clicked => { root.bubble-click(); }
+        }
+        dots := Dots {
+            x: root.left-x + (root.left-w - self.width) / 2;
+            y: root.pad + Size.bubble + Space.xs + 2px;
+            dots: AppState.dots;
+            extra: AppState.dots-extra;
+        }
+
+        // O painel nasce da bolha: cresce a partir do canto do lado dela e volta
+        // pelo mesmo caminho. Com menos animação no sistema, só a opacidade muda.
+        Rectangle {
+            visible: root.panel-shown;
+            x: root.side-left ? root.pad : root.pad + root.left-w + Size.panel-gap;
+            y: root.pad;
+            width: Size.panel-w;
+            height: root.panel-h;
+            opacity: clamp(root.open, 0, 1);
+            transform-origin: { x: root.side-left ? self.width : 0px, y: Size.bubble / 2 };
+            transform-scale: Motion.reduced ? 1 : Motion.panel-from-scale + (1 - Motion.panel-from-scale) * root.open;
+
+            Surface {
+                width: parent.width;
+                height: parent.height;
+                Rectangle {
+                    border-radius: Radius.panel;
+                    clip: true;
+                    content := VerticalLayout {
+                        x: Size.panel-pad;
+                        y: Size.panel-pad;
+                        width: parent.width - 2 * Size.panel-pad;
+                        height: self.preferred-height;
+                        opacity: root.content-fade;
+                        if root.panel-kind == 1: MenuPanel { }
+                        if root.panel-kind == 2: QualityPanel { }
+                        if root.panel-kind == 3: JoinPanel { }
+                        if root.panel-kind == 4: DiscordPanel { }
+                    }
+                }
+            }
+        }
+    }
+}
