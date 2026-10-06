@@ -288,13 +288,25 @@ function acceptTurbo(conn) {
   const rx = new TurboReceiver(openVideoChannel(conn.peerConnection), {
     requestKey: () => { if (conn.open) conn.send({ t: "key" }); },
     onUnsupported: () => { if (conn.open) conn.send({ t: "unsupported" }); },
-    report: (r) => { if (conn.open) conn.send({ t: "rx", ...r }); },
+    report: (r) => { if (conn.open) conn.send({ t: "rx", ...r, relay: entry.relay }); },
   });
-  const entry = { conn, rx, remote: null, close() { rx.close(); conn.close(); } };
+  // A espera por quadro perdido acompanha a ida e volta real da conexão; e
+  // quem manda fica sabendo se o caminho é pelo repasse (lá o canal de dados
+  // engasga, e o vídeo vai melhor pelo WebRTC comum).
+  const rtt = setInterval(async () => {
+    const stats = await conn.peerConnection?.getStats().catch(() => null);
+    stats?.forEach((r) => {
+      if (r.type !== "candidate-pair" || !r.nominated || r.state !== "succeeded") return;
+      if (r.currentRoundTripTime) rx.setRtt(r.currentRoundTripTime * 1000);
+      entry.relay = [r.localCandidateId, r.remoteCandidateId].some((id) => stats.get(id)?.candidateType === "relay");
+    });
+  }, 2000);
+  const entry = { conn, rx, remote: null, close() { clearInterval(rtt); rx.close(); conn.close(); } };
   conn.on("data", (msg) => { if (msg?.t === "tx") entry.remote = msg; });
   state.turboIn.set(id, entry);
   conn.on("open", () => showTurbo(id));
   const end = () => {
+    clearInterval(rtt);
     if (state.turboIn.get(id) !== entry) return;
     state.turboIn.delete(id);
     rx.close();
@@ -534,7 +546,10 @@ function turboMember(id) {
   state.turboOut.addViewer(id, channel, { onCongested: () => demote(id, true) });
   conn.on("data", (msg) => {
     if (msg?.t === "key") state.turboOut?.requestKey(500);
-    else if (msg?.t === "rx") state.turboOut?.report(id, msg);
+    else if (msg?.t === "rx") {
+      if (msg.relay) demote(id);
+      else state.turboOut?.report(id, msg);
+    }
     else if (msg?.t === "unsupported") demote(id);
   });
   // Conta pra quem assiste como está o lado de cá (captura, codificador, aba

@@ -14,14 +14,16 @@
 const MAGIC = 0x54;
 const HEADER = 20;
 const FRAG = 16000;
-const HOLD_MS = 150;        // quanto esperar por um quadro que ficou faltando
+const HOLD_MS = 150;        // espera mínima por um quadro que ficou faltando
+const HOLD_MAX_MS = 600;    // ... e máxima (com ida e volta longa, pelo repasse)
+const PACKET_LIFETIME_MS = 400; // reenvio do lado de quem manda; no direto ele acontece em ~1 ms
 const KEY_INTERVAL_MS = 1000; // keyframe pedida por fila cheia: no máximo 1 por segundo
 const VIEWER_KEY_MS = 500;    // keyframe pedida por quem perdeu um quadro
 const REPORT_MS = 1000;       // relatório de quem assiste para quem transmite
 // Codificadores de hardware (NVENC/QuickSync via Media Foundation, VAAPI)
 // trabalham com alguns quadros em andamento; só descarta se a fila passar disso.
 const MAX_ENCODE_QUEUE = 3;
-const CHANNEL = { negotiated: true, id: 100, ordered: false, maxPacketLifeTime: HOLD_MS };
+const CHANNEL = { negotiated: true, id: 100, ordered: false, maxPacketLifeTime: PACKET_LIFETIME_MS };
 
 export function turboSupport() {
   return {
@@ -265,6 +267,7 @@ export class TurboReceiver {
     this.reportTimer = report ? setInterval(() => report({ bytes: this.payload, lost: this.stats.lost }), REPORT_MS) : 0;
     this.payload = 0; // só os dados de vídeo, para comparar com o que foi enviado
     this.onUnsupported = onUnsupported;
+    this.hold = HOLD_MS;
     let last = 0;
     this.requestKey = () => {
       const now = performance.now();
@@ -278,6 +281,11 @@ export class TurboReceiver {
   }
 
   get track() { return this.generator; }
+
+  /// Um reenvio leva uma ida e volta: espera por quadro faltante acompanha a conexão.
+  setRtt(ms) {
+    if (ms > 0) this.hold = Math.min(HOLD_MAX_MS, Math.max(HOLD_MS, ms * 2.5));
+  }
 
   close() {
     this.closed = true;
@@ -349,7 +357,7 @@ export class TurboReceiver {
   #arm() {
     if (this.timer || this.closed) return;
     if (!this.frames.size && !this.waitingKey) return;
-    this.timer = setTimeout(() => { this.timer = 0; this.#check(); }, HOLD_MS / 3);
+    this.timer = setTimeout(() => { this.timer = 0; this.#check(); }, this.hold / 3);
   }
 
   // Quadro que não chegou a tempo vira perda: pede keyframe e segue sem ele.
@@ -359,7 +367,7 @@ export class TurboReceiver {
       this.requestKey();
     } else {
       const missing = this.frames.get(this.expected);
-      const stale = [...this.frames.values()].some((f) => now - f.at > HOLD_MS);
+      const stale = [...this.frames.values()].some((f) => now - f.at > this.hold);
       if (stale && !missing?.done) {
         this.stats.lost++;
         this.waitingKey = true;
