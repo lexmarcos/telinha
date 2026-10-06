@@ -71,6 +71,7 @@ export function createStatsPanel({ container, getConnections }) {
         if (!b || b.pc !== c.pc) { b?.el.remove(); b = makeBlock(dir); b.pc = c.pc; blocks.set(key, b); }
         b.dir = dir;
         b.name = c.name;
+        b.turbo = typeof c.turbo === "function" ? c.turbo : null;
         if (b.el.parentNode !== list || list.children[seen.size - 1] !== b.el) {
           list.insertBefore(b.el, list.children[seen.size - 1] || null);
         }
@@ -231,7 +232,55 @@ function render(b, report) {
     hero(f.hero, rtt);
   }
 
+  if (b.turbo) {
+    const t = safe(b.turbo);
+    if (t) renderTurbo(b, t, rtt);
+  }
   renderPath(f.path, state, local, remote);
+}
+
+// Modo atraso mínimo: o vídeo não é RTP, então os números vêm do próprio
+// codificador/decodificador (turbo.js).
+const TURBO_LABELS = { in: { buffer: "Montagem", lost: "Quadros perdidos", freeze: "Keyframes pedidas" }, out: { limit: "Fila", retx: "Descartados" } };
+
+function renderTurbo(b, t, rtt) {
+  const { f, dir } = b;
+  if (!b.turboLabels) {
+    b.turboLabels = true;
+    for (const [k, label] of Object.entries(TURBO_LABELS[dir])) {
+      if (f[k]?.previousElementSibling) f[k].previousElementSibling.textContent = label;
+    }
+  }
+  const now = performance.now();
+  const prev = b.tprev;
+  b.tprev = { frames: t.frames, bytes: t.bytes, dropped: t.dropped, at: now };
+  const dt = prev ? (now - prev.at) / 1000 : 0;
+
+  const codec = !t.codec ? "" : t.codec.startsWith("avc1") ? "H264" : t.codec.toUpperCase();
+  const hw = typeof t.hardware === "boolean" ? (t.hardware ? "hardware" : "software") : "";
+  setText(f.codec, [codec, hw, "WebCodecs"].filter(Boolean).join(" · "));
+  const fps = dt > 0 ? (t.frames - prev.frames) / dt : null;
+  const res = t.width && t.height ? `${t.width}×${t.height}` : "";
+  setText(f.res, [res, isNum(fps) ? `${n0.format(fps)} fps` : ""].filter(Boolean).join(" · ") || DASH);
+  setText(f.rate, dt > 0 ? bitrate(((t.bytes - prev.bytes) * 8) / dt) : DASH);
+
+  if (dir === "in") {
+    setHTML(f.buffer, msPerFrame(t.assemblyMs));
+    setHTML(f.decode, msPerFrame(t.decodeMs));
+    setText(f.rtt, ms(rtt));
+    setText(f.lost, isNum(t.lost) ? n0.format(t.lost) : DASH);
+    setText(f.freeze, isNum(t.keyRequests) ? n0.format(t.keyRequests) : DASH);
+    const est = isNum(rtt) && isNum(t.assemblyMs) && isNum(t.decodeMs) ? rtt / 2 + t.assemblyMs + t.decodeMs : null;
+    hero(f.hero, est);
+    f.hero.parentNode.title = isNum(est)
+      ? `Estimativa: metade da ida e volta (${ms(rtt)}) + montagem do quadro (${ms(t.assemblyMs)}) + decodificação (${ms(t.decodeMs)}). Sem buffer de espera.`
+      : "";
+  } else {
+    setHTML(f.encode, msPerFrame(t.encodeMs));
+    const dropping = prev && t.dropped > prev.dropped;
+    setText(f.limit, dropping ? "cheia, descartando" : "livre");
+    setText(f.retx, isNum(t.dropped) ? `${n0.format(t.dropped)} quadros` : DASH);
+  }
 }
 
 function renderPath(el, state, local, remote) {

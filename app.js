@@ -12,9 +12,11 @@
 // servidor, abra com ?servidor=dominio.do.servidor.
 
 import { createStatsPanel } from "./stats.js";
+import { turboSupport, openVideoChannel, TurboSender, TurboReceiver } from "./turbo.js";
 
 const SERVER = new URLSearchParams(location.search).get("servidor")
   ?? (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) ? null : location.host);
+const TURBO = turboSupport();
 const PREFIX = "telinha-canal-v1-";
 const MAX_BITRATE = 8_000_000;
 const $ = (id) => document.getElementById(id);
@@ -46,6 +48,10 @@ const state = {
   outgoing: new Map(),         // peerId -> MediaConnection (minha tela indo para ele)
   incoming: new Map(),         // peerId -> MediaConnection (a tela dele vindo para mim)
   streams: new Map(),          // peerId -> { stream, name, local, thumb }
+  turboOut: null,              // TurboSender quando transmito em atraso mínimo
+  turboIn: new Map(),          // peerId -> { conn, rx } (vídeo dele chegando por WebCodecs)
+  audioIn: new Map(),          // peerId -> MediaStream só com o áudio dele (modo atraso mínimo)
+  demoted: new Set(),          // quem voltou pro WebRTC por congestionamento
   featured: null,
   inRoom: false,
 };
@@ -112,7 +118,7 @@ async function host(attempt = 0) {
     state.peer = peer;
     state.isHost = true;
     state.code = code;
-    state.roster.set(peer.id, { name: state.name, sharing: false });
+    state.roster.set(peer.id, { name: state.name, sharing: false, wc: TURBO.receive });
     peer.on("connection", acceptGuest);
     wirePeer(peer);
     broadcastRoster();
@@ -126,10 +132,11 @@ async function host(attempt = 0) {
 }
 
 function acceptGuest(conn) {
+  if (conn.metadata?.kind === "turbo") return; // vídeo em atraso mínimo, tratado em wirePeer
   conn.on("open", () => {
     const name = String(conn.metadata?.name || "Alguém").slice(0, 24);
     state.guests.set(conn.peer, conn);
-    state.roster.set(conn.peer, { name, sharing: false });
+    state.roster.set(conn.peer, { name, sharing: false, wc: !!conn.metadata?.wc });
     broadcastRoster();
   });
   conn.on("data", (msg) => {
@@ -162,7 +169,7 @@ async function join(code) {
   let peer;
   try {
     peer = await openPeer();
-    const conn = await connectTo(peer, PREFIX + code, { name: state.name });
+    const conn = await connectTo(peer, PREFIX + code, { name: state.name, wc: TURBO.receive });
     state.peer = peer;
     state.code = code;
     state.hostConn = conn;
@@ -244,7 +251,9 @@ function peerErrorText(err) {
 /* ---------------- Peer: chamadas e reconexão ---------------- */
 
 function wirePeer(peer) {
+  peer.on("connection", (conn) => { if (conn.metadata?.kind === "turbo") acceptTurbo(conn); });
   peer.on("call", (call) => {
+    if (call.metadata?.audioOnly) return acceptTurboAudio(call);
     state.incoming.get(call.peer)?.close();
     state.incoming.set(call.peer, call);
     call.answer();
@@ -262,23 +271,76 @@ function wirePeer(peer) {
     call.on("error", end);
   });
   peer.on("disconnected", () => { if (!peer.destroyed) peer.reconnect(); });
+  window.addEventListener("pagehide", () => state.turboOut?.stop());
   peer.on("error", (err) => {
     if (err.type === "peer-unavailable") return; // alguém saiu no meio de uma chamada
     console.warn("[telinha]", err.type, err);
   });
 }
 
+/* Vídeo em atraso mínimo chegando (WebCodecs) */
+
+function acceptTurbo(conn) {
+  if (!TURBO.receive) { conn.close(); return; }
+  const id = conn.peer;
+  state.turboIn.get(id)?.close();
+  const rx = new TurboReceiver(openVideoChannel(conn.peerConnection), {
+    requestKey: () => { if (conn.open) conn.send({ t: "key" }); },
+    onUnsupported: () => { if (conn.open) conn.send({ t: "unsupported" }); },
+  });
+  const entry = { conn, rx, close() { rx.close(); conn.close(); } };
+  state.turboIn.set(id, entry);
+  conn.on("open", () => showTurbo(id));
+  const end = () => {
+    if (state.turboIn.get(id) !== entry) return;
+    state.turboIn.delete(id);
+    rx.close();
+    removeStream(id);
+  };
+  conn.on("close", end);
+  conn.on("error", end);
+}
+
+function acceptTurboAudio(call) {
+  const id = call.peer;
+  call.answer();
+  call.on("stream", (stream) => { state.audioIn.set(id, stream); showTurbo(id); });
+  const end = () => {
+    if (state.audioIn.get(id)?.id !== call.remoteStream?.id) return;
+    state.audioIn.delete(id);
+    showTurbo(id);
+  };
+  call.on("close", end);
+  call.on("error", end);
+}
+
+// Junta o vídeo decodificado com o áudio (que vem pelo WebRTC) numa trilha só.
+function showTurbo(id) {
+  const entry = state.turboIn.get(id);
+  if (!entry) return;
+  const tracks = [entry.rx.track, ...(state.audioIn.get(id)?.getAudioTracks() ?? [])];
+  addStream(id, new MediaStream(tracks), state.members.get(id)?.name || "Alguém", false);
+}
+
+function closeIncoming(id) {
+  state.turboIn.get(id)?.close();
+  state.turboIn.delete(id);
+  state.audioIn.delete(id);
+  removeStream(id);
+}
+
 function applyRoster(list) {
   const me = state.peer.id;
-  const next = new Map(list.map((m) => [m.id, { name: m.name, sharing: !!m.sharing }]));
+  const next = new Map(list.map((m) => [m.id, { name: m.name, sharing: !!m.sharing, wc: !!m.wc }]));
 
   for (const [id, prev] of state.members) {
     if (id === me) continue;
     if (!next.has(id)) {
       state.outgoing.get(id)?.close(); state.outgoing.delete(id);
-      removeStream(id);
+      state.demoted.delete(id);
+      closeIncoming(id);
     } else if (prev.sharing && !next.get(id).sharing) {
-      removeStream(id);
+      closeIncoming(id);
     }
   }
   // A primeira lista que chega é o estado inicial, não novidade.
@@ -293,7 +355,7 @@ function applyRoster(list) {
   }
   state.members = next;
 
-  if (state.localStream) for (const id of next.keys()) if (id !== me && !state.outgoing.has(id)) callMember(id);
+  if (state.localStream) for (const id of next.keys()) if (id !== me && !state.outgoing.has(id)) connectMember(id);
   for (const [id, s] of state.streams) if (!s.local && next.has(id)) s.name = next.get(id).name;
   renderPeople();
   renderStreams();
@@ -331,7 +393,7 @@ async function startShare() {
   state.localStream = stream;
   await applyQuality();
   addStream(state.peer.id, stream, "Você", true);
-  for (const id of state.members.keys()) if (id !== state.peer.id) callMember(id);
+  startTransport();
   announceSharing(true);
   renderShareButton();
 }
@@ -340,8 +402,7 @@ function stopShare() {
   if (!state.localStream) return;
   state.localStream.getTracks().forEach((t) => t.stop());
   state.localStream = null;
-  for (const call of state.outgoing.values()) call.close();
-  state.outgoing.clear();
+  stopTransport();
   removeStream(state.peer.id);
   announceSharing(false);
   renderShareButton();
@@ -355,6 +416,72 @@ function announceSharing(on) {
   } else if (state.hostConn?.open) {
     state.hostConn.send({ t: "sharing", on });
   }
+}
+
+function useTurbo() { return state.quality.turbo && TURBO.send; }
+
+function startTransport() {
+  if (useTurbo()) {
+    const video = state.localStream.getVideoTracks()[0];
+    state.turboOut = new TurboSender(video, { bitrate: Math.round(targetBitrate()), framerate: state.quality.fps });
+  }
+  for (const id of state.members.keys()) if (id !== state.peer.id) connectMember(id);
+}
+
+function stopTransport() {
+  for (const handle of state.outgoing.values()) handle.close();
+  state.outgoing.clear();
+  state.turboOut?.stop();
+  state.turboOut = null;
+  state.demoted.clear();
+}
+
+// Quem consegue receber por WebCodecs ganha o caminho de atraso mínimo; o resto, WebRTC.
+function connectMember(id) {
+  if (state.turboOut && state.members.get(id)?.wc && !state.demoted.has(id)) turboMember(id);
+  else callMember(id);
+}
+
+function turboMember(id) {
+  const conn = state.peer.connect(id, { metadata: { kind: "turbo", name: state.name }, reliable: true });
+  if (!conn) return;
+  const channel = openVideoChannel(conn.peerConnection);
+  let audio = null;
+  const handle = {
+    kind: "turbo",
+    peerConnection: conn.peerConnection,
+    turbo: () => state.turboOut?.viewerStats(id),
+    close() { state.turboOut?.removeViewer(id); audio?.close(); conn.close(); },
+  };
+  state.outgoing.set(id, handle);
+  state.turboOut.addViewer(id, channel, { onCongested: () => demote(id) });
+  conn.on("data", (msg) => {
+    if (msg?.t === "key") state.turboOut?.requestKey(250);
+    else if (msg?.t === "unsupported") demote(id);
+  });
+  conn.on("open", () => {
+    const tracks = state.localStream?.getAudioTracks() ?? [];
+    if (tracks.length) audio = state.peer.call(id, new MediaStream(tracks), { metadata: { name: state.name, audioOnly: true } });
+  });
+  const end = () => {
+    if (state.outgoing.get(id) !== handle) return;
+    state.outgoing.delete(id);
+    state.turboOut?.removeViewer(id);
+    audio?.close();
+  };
+  conn.on("close", end);
+  conn.on("error", end);
+}
+
+// Fila cheia o tempo todo ou navegador sem o codec: essa pessoa volta pro WebRTC,
+// que sabe baixar a qualidade sozinho.
+function demote(id) {
+  const handle = state.outgoing.get(id);
+  if (handle?.kind !== "turbo") return;
+  state.demoted.add(id);
+  handle.close();
+  state.outgoing.delete(id);
+  if (state.localStream) callMember(id);
 }
 
 function callMember(id) {
@@ -430,6 +557,7 @@ function loadQuality() {
   return {
     res: ["720", "1080", "1440", "original"].includes(q.res) ? q.res : "1080",
     fps: q.fps === 30 ? 30 : 60,
+    turbo: q.turbo === true,
     priority: PRIORITIES[q.priority] ? q.priority : PRIORITIES[safeGet("telinha:mode")] ? safeGet("telinha:mode") : "fluidez",
   };
 }
@@ -458,8 +586,9 @@ async function applyQuality() {
     if ("contentHint" in video) video.contentHint = PRIORITIES[state.quality.priority].hint;
   }
   for (const call of state.outgoing.values()) {
-    if (call.peerConnection?.connectionState === "connected") applySenderParams(call.peerConnection);
+    if (call.kind !== "turbo" && call.peerConnection?.connectionState === "connected") applySenderParams(call.peerConnection);
   }
+  state.turboOut?.setRate({ bitrate: Math.round(targetBitrate()), framerate: state.quality.fps });
   renderQuality();
 }
 
@@ -482,15 +611,17 @@ function applySenderParams(pc) {
 }
 
 function setQuality(change) {
+  const switchTransport = "turbo" in change && change.turbo !== state.quality.turbo;
   Object.assign(state.quality, change);
   safeSet("telinha:quality", JSON.stringify(state.quality));
   applyQuality();
+  if (switchTransport && state.localStream) { stopTransport(); startTransport(); }
 }
 
 /* Painel: nasce do botão e volta pra ele */
 
 const qp = ui.qualityPanel;
-const segs = { res: $("resSeg"), fps: $("fpsSeg"), priority: $("prioSeg") };
+const segs = { res: $("resSeg"), fps: $("fpsSeg"), priority: $("prioSeg"), turbo: $("turboSeg") };
 
 function renderSeg(el, key, options, current = String(state.quality[key])) {
   const index = Math.max(0, options.findIndex((o) => String(o.value) === current));
@@ -503,7 +634,8 @@ function renderSeg(el, key, options, current = String(state.quality[key])) {
     for (const o of options) {
       const label = document.createElement("label");
       const input = Object.assign(document.createElement("input"), { type: "radio", name: `q-${key}`, value: o.value });
-      input.addEventListener("change", () => setQuality({ [key]: typeof state.quality[key] === "number" ? Number(o.value) : String(o.value) }));
+      const cast = { number: Number, boolean: (v) => v === "true" }[typeof state.quality[key]] ?? String;
+      input.addEventListener("change", () => setQuality({ [key]: cast(String(o.value)) }));
       label.append(input, o.label);
       el.append(label);
     }
@@ -526,6 +658,11 @@ function renderQuality() {
 
   $("resNote").textContent = `Sua tela: ${native.width}×${native.height}. Saindo em ${width}×${height}.`;
   $("prioNote").textContent = PRIORITIES[state.quality.priority].note;
+  $("turboField").hidden = !TURBO.send;
+  renderSeg(segs.turbo, "turbo", [{ value: false, label: "Normal" }, { value: true, label: "Mínimo" }]);
+  $("turboNote").textContent = state.quality.turbo
+    ? "Codifica uma vez só e manda sem fila de espera, como o Sunshine. Experimental: quem não tem suporte recebe no modo normal."
+    : "Usa o WebRTC padrão do navegador, que se adapta bem a conexões instáveis.";
   const mbps = (n) => n.toLocaleString("pt-BR", { maximumFractionDigits: 1 });
   const viewers = Math.max(0, state.members.size - 1);
   const perPerson = Math.round(targetBitrate() / 1e5) / 10; // em Mb/s, já arredondado
@@ -694,7 +831,8 @@ const stats = createStatsPanel({
   container: ui.stage,
   getConnections: () => [
     ...[...state.incoming].map(([peerId, call]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "in", pc: call.peerConnection })),
-    ...[...state.outgoing].map(([peerId, call]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "out", pc: call.peerConnection })),
+    ...[...state.turboIn].map(([peerId, e]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "in", pc: e.conn.peerConnection, turbo: () => e.rx.stats })),
+    ...[...state.outgoing].map(([peerId, call]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "out", pc: call.peerConnection, turbo: call.turbo })),
   ].filter((c) => c.pc),
 });
 statsBtn.addEventListener("click", () => stats.toggle());
