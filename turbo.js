@@ -16,6 +16,8 @@ const HEADER = 20;
 const FRAG = 16000;
 const HOLD_MS = 150;        // quanto esperar por um quadro que ficou faltando
 const KEY_INTERVAL_MS = 1000; // keyframe pedida por fila cheia: no máximo 1 por segundo
+const VIEWER_KEY_MS = 500;    // keyframe pedida por quem perdeu um quadro
+const REPORT_MS = 1000;       // relatório de quem assiste para quem transmite
 const CHANNEL = { negotiated: true, id: 100, ordered: false, maxPacketLifeTime: HOLD_MS };
 
 export function turboSupport() {
@@ -85,7 +87,7 @@ export class TurboSender {
   }
 
   addViewer(id, channel, { onCongested } = {}) {
-    const v = { channel, seq: 0, needKey: true, frames: 0, bytes: 0, dropped: 0, drops: [], onCongested };
+    const v = { channel, seq: 0, needKey: true, frames: 0, bytes: 0, dropped: 0, drops: [], onCongested, last: null, strikes: 0 };
     this.viewers.set(id, v);
     const start = () => this.requestKey(0);
     if (channel.readyState === "open") start();
@@ -93,6 +95,22 @@ export class TurboSender {
   }
 
   removeViewer(id) { this.viewers.delete(id); }
+
+  // Quem assiste conta o que chegou. O canal descarta em silêncio o que passa
+  // do tempo de vida, então a fila daqui não mostra o congestionamento; o
+  // relatório mostra. Três relatórios ruins seguidos: a pessoa volta pro WebRTC.
+  report(id, { bytes, lost }) {
+    const v = this.viewers.get(id);
+    if (!v) return;
+    const now = { sent: v.bytes, bytes, lost };
+    const prev = v.last;
+    v.last = now;
+    if (!prev) return;
+    const sent = now.sent - prev.sent, got = now.bytes - prev.bytes, lostNow = now.lost - prev.lost;
+    const bad = (sent > 50e3 && got < sent * 0.8) || lostNow >= 2;
+    v.strikes = bad ? v.strikes + 1 : 0;
+    if (v.strikes >= 3) v.onCongested?.();
+  }
 
   requestKey(minInterval = KEY_INTERVAL_MS) {
     const now = performance.now();
@@ -226,7 +244,7 @@ export class TurboSender {
 /* ---------------- Quem assiste ---------------- */
 
 export class TurboReceiver {
-  constructor(channel, { requestKey, onUnsupported }) {
+  constructor(channel, { requestKey, onUnsupported, report }) {
     this.generator = new MediaStreamTrackGenerator({ kind: "video" });
     this.writer = this.generator.writable.getWriter();
     this.frames = new Map(); // seq -> quadro sendo montado
@@ -239,11 +257,13 @@ export class TurboReceiver {
     this.closed = false;
     this.pending = new Map(); // timestamp -> instante do decode()
     this.stats = { codec: null, width: 0, height: 0, frames: 0, bytes: 0, lost: 0, keyRequests: 0, assemblyMs: null, decodeMs: null };
+    this.reportTimer = report ? setInterval(() => report({ bytes: this.payload, lost: this.stats.lost }), REPORT_MS) : 0;
+    this.payload = 0; // só os dados de vídeo, para comparar com o que foi enviado
     this.onUnsupported = onUnsupported;
     let last = 0;
     this.requestKey = () => {
       const now = performance.now();
-      if (now - last < 300) return;
+      if (now - last < VIEWER_KEY_MS) return;
       last = now;
       this.stats.keyRequests++;
       requestKey();
@@ -257,6 +277,7 @@ export class TurboReceiver {
   close() {
     this.closed = true;
     clearTimeout(this.timer);
+    clearInterval(this.reportTimer);
     try { this.decoder?.close(); } catch {}
     this.writer.close().catch(() => {});
     this.generator.stop();
@@ -286,6 +307,7 @@ export class TurboReceiver {
       off += cfgLen;
     }
     f.parts[idx] = new Uint8Array(buf, off);
+    this.payload += buf.byteLength - off;
     f.got++;
     f.size += f.parts[idx].byteLength;
     if (f.got === f.parts.length) {

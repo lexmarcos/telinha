@@ -287,6 +287,7 @@ function acceptTurbo(conn) {
   const rx = new TurboReceiver(openVideoChannel(conn.peerConnection), {
     requestKey: () => { if (conn.open) conn.send({ t: "key" }); },
     onUnsupported: () => { if (conn.open) conn.send({ t: "unsupported" }); },
+    report: (r) => { if (conn.open) conn.send({ t: "rx", ...r }); },
   });
   const entry = { conn, rx, close() { rx.close(); conn.close(); } };
   state.turboIn.set(id, entry);
@@ -454,9 +455,10 @@ function turboMember(id) {
     close() { state.turboOut?.removeViewer(id); audio?.close(); conn.close(); },
   };
   state.outgoing.set(id, handle);
-  state.turboOut.addViewer(id, channel, { onCongested: () => demote(id) });
+  state.turboOut.addViewer(id, channel, { onCongested: () => demote(id, true) });
   conn.on("data", (msg) => {
-    if (msg?.t === "key") state.turboOut?.requestKey(250);
+    if (msg?.t === "key") state.turboOut?.requestKey(500);
+    else if (msg?.t === "rx") state.turboOut?.report(id, msg);
     else if (msg?.t === "unsupported") demote(id);
   });
   conn.on("open", () => {
@@ -475,9 +477,10 @@ function turboMember(id) {
 
 // Fila cheia o tempo todo ou navegador sem o codec: essa pessoa volta pro WebRTC,
 // que sabe baixar a qualidade sozinho.
-function demote(id) {
+function demote(id, congested = false) {
   const handle = state.outgoing.get(id);
   if (handle?.kind !== "turbo") return;
+  if (congested) toast(`A conexão de ${state.members.get(id)?.name || "alguém"} não aguentou o atraso mínimo. Mandando no modo normal.`);
   state.demoted.add(id);
   handle.close();
   state.outgoing.delete(id);
