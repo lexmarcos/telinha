@@ -112,3 +112,7 @@
 @media (prefers-reduced-motion: reduce) {
   .stats-panel { animation: none; }
 }
+
+/* separador "Lá na origem" no bloco de quem assiste */
+.stats-grid .stats-sep { margin-top: 0.35rem; padding-top: 0.45rem; border-top: 1px solid var(--line); }
+dt.stats-sep { font-weight: 600; color: var(--text); }

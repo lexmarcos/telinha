@@ -239,6 +239,32 @@ function render(b, report) {
   renderPath(f.path, state, local, remote);
 }
 
+// Números que quem transmite manda (modo atraso mínimo): mostram se o gargalo é
+// a captura, o codificador ou o Chrome rebaixado com a aba escondida.
+function renderRemote(b, r) {
+  if (!b.remoteRows) {
+    const grid = b.el.querySelector(".stats-grid");
+    grid.insertAdjacentHTML("beforeend", `<dt class="stats-sep">Lá na origem</dt><dd class="stats-sep"></dd><dt>Captura</dt><dd data-f="rcap">${DASH}</dd><dt>Codificador</dt><dd data-f="renc">${DASH}</dd><dt>Descartados</dt><dd data-f="rdrop">${DASH}</dd><dt>Aba do Telinha</dt><dd data-f="rtab">${DASH}</dd>`);
+    for (const node of grid.querySelectorAll("[data-f^=r]")) b.f[node.dataset.f] = node;
+    b.remoteRows = true;
+  }
+  const { f } = b;
+  if (!r) { for (const k of ["rcap", "renc", "rdrop", "rtab"]) setText(f[k], DASH); return; }
+  const now = performance.now(), prev = b.rprev;
+  b.rprev = { ...r, at: now };
+  const dt = prev ? (now - prev.at) / 1000 : 0;
+  const per = (k) => (dt > 0 && isNum(r[k]) && isNum(prev[k]) ? Math.max(0, (r[k] - prev[k]) / dt) : null);
+  const cap = per("captured"), skip = per("skipped"), net = per("dropped");
+  setText(f.rcap, [isNum(cap) ? `${n0.format(cap)} fps` : "", isNum(r.captureFps) ? `pedida a ${n0.format(r.captureFps)}` : ""].filter(Boolean).join(" · ") || DASH);
+  const hw = typeof r.hardware === "boolean" ? (r.hardware ? "hardware" : "software") : "";
+  setHTML(f.renc, [hw, isNum(r.encodeMs) ? `${fmtMs(r.encodeMs)} ms<span class="stats-unit"> por quadro</span>` : ""].filter(Boolean).join(" · ") || DASH);
+  const lost = [];
+  if (isNum(skip)) lost.push(`${n0.format(skip)}/s no codificador`);
+  if (isNum(net)) lost.push(`${n0.format(net)}/s na rede`);
+  setText(f.rdrop, lost.join(" · ") || DASH);
+  setText(f.rtab, typeof r.hidden === "boolean" ? (r.hidden ? "escondida (jogo na frente)" : "visível") : DASH);
+}
+
 // Modo atraso mínimo: o vídeo não é RTP, então os números vêm do próprio
 // codificador/decodificador (turbo.js).
 const TURBO_LABELS = { in: { buffer: "Montagem", lost: "Quadros perdidos", freeze: "Keyframes pedidas" }, out: { limit: "Captura", retx: "Descartados" } };
@@ -270,6 +296,7 @@ function renderTurbo(b, t, rtt) {
     setText(f.rtt, ms(rtt));
     setText(f.lost, isNum(t.lost) ? n0.format(t.lost) : DASH);
     setText(f.freeze, isNum(t.keyRequests) ? n0.format(t.keyRequests) : DASH);
+    renderRemote(b, t.remote);
     const est = isNum(rtt) && isNum(t.assemblyMs) && isNum(t.decodeMs) ? rtt / 2 + t.assemblyMs + t.decodeMs : null;
     hero(f.hero, est);
     f.hero.parentNode.title = isNum(est)

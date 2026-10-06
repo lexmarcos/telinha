@@ -290,7 +290,8 @@ function acceptTurbo(conn) {
     onUnsupported: () => { if (conn.open) conn.send({ t: "unsupported" }); },
     report: (r) => { if (conn.open) conn.send({ t: "rx", ...r }); },
   });
-  const entry = { conn, rx, close() { rx.close(); conn.close(); } };
+  const entry = { conn, rx, remote: null, close() { rx.close(); conn.close(); } };
+  conn.on("data", (msg) => { if (msg?.t === "tx") entry.remote = msg; });
   state.turboIn.set(id, entry);
   conn.on("open", () => showTurbo(id));
   const end = () => {
@@ -536,11 +537,21 @@ function turboMember(id) {
     else if (msg?.t === "rx") state.turboOut?.report(id, msg);
     else if (msg?.t === "unsupported") demote(id);
   });
+  // Conta pra quem assiste como está o lado de cá (captura, codificador, aba
+  // escondida), pra dar pra achar o gargalo olhando só o painel de quem assiste.
+  let info = 0;
   conn.on("open", () => {
     const tracks = state.localStream?.getAudioTracks() ?? [];
     if (tracks.length) audio = state.peer.call(id, new MediaStream(tracks), { metadata: { name: state.name, audioOnly: true } });
+    info = setInterval(() => {
+      const t = state.turboOut?.viewerStats(id);
+      if (!t || !conn.open) return;
+      const video = state.localStream?.getVideoTracks()[0];
+      conn.send({ t: "tx", captured: t.captured, skipped: t.skipped, dropped: t.dropped, hardware: t.hardware, encodeMs: t.encodeMs, captureFps: video?.getSettings().frameRate, hidden: document.hidden });
+    }, 1000);
   });
   const end = () => {
+    clearInterval(info);
     if (state.outgoing.get(id) !== handle) return;
     state.outgoing.delete(id);
     state.turboOut?.removeViewer(id);
@@ -934,7 +945,7 @@ const stats = createStatsPanel({
   container: ui.stage,
   getConnections: () => [
     ...[...state.incoming].map(([peerId, call]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "in", pc: call.peerConnection })),
-    ...[...state.turboIn].map(([peerId, e]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "in", pc: e.conn.peerConnection, turbo: () => e.rx.stats })),
+    ...[...state.turboIn].map(([peerId, e]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "in", pc: e.conn.peerConnection, turbo: () => ({ ...e.rx.stats, remote: e.remote }) })),
     ...[...state.outgoing].map(([peerId, call]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "out", pc: call.peerConnection, turbo: call.turbo })),
   ].filter((c) => c.pc),
 });
