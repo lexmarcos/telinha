@@ -241,7 +241,7 @@ function render(b, report) {
 
 // Modo atraso mínimo: o vídeo não é RTP, então os números vêm do próprio
 // codificador/decodificador (turbo.js).
-const TURBO_LABELS = { in: { buffer: "Montagem", lost: "Quadros perdidos", freeze: "Keyframes pedidas" }, out: { limit: "Fila", retx: "Descartados" } };
+const TURBO_LABELS = { in: { buffer: "Montagem", lost: "Quadros perdidos", freeze: "Keyframes pedidas" }, out: { limit: "Captura", retx: "Descartados" } };
 
 function renderTurbo(b, t, rtt) {
   const { f, dir } = b;
@@ -253,7 +253,7 @@ function renderTurbo(b, t, rtt) {
   }
   const now = performance.now();
   const prev = b.tprev;
-  b.tprev = { frames: t.frames, bytes: t.bytes, dropped: t.dropped, at: now };
+  b.tprev = { frames: t.frames, bytes: t.bytes, dropped: t.dropped, captured: t.captured, skipped: t.skipped, at: now };
   const dt = prev ? (now - prev.at) / 1000 : 0;
 
   const codec = !t.codec ? "" : t.codec.startsWith("avc1") ? "H264" : t.codec.toUpperCase();
@@ -277,9 +277,16 @@ function renderTurbo(b, t, rtt) {
       : "";
   } else {
     setHTML(f.encode, msPerFrame(t.encodeMs));
-    const dropping = prev && t.dropped > prev.dropped;
-    setText(f.limit, dropping ? "cheia, descartando" : "livre");
-    setText(f.retx, isNum(t.dropped) ? `${n0.format(t.dropped)} quadros` : DASH);
+    // onde os quadros se perdem: captura → codificador → rede
+    const per = (k) => (dt > 0 && isNum(t[k]) && isNum(prev[k]) ? (t[k] - prev[k]) / dt : null);
+    const cap = per("captured"), skip = per("skipped"), net = per("dropped");
+    setText(f.limit, isNum(cap) ? `${n0.format(cap)} fps` : DASH);
+    f.limit.title = "Quadros que a captura de tela entregou por segundo";
+    const lost = [];
+    if (isNum(skip)) lost.push(`${n0.format(skip)}/s no codificador`);
+    if (isNum(net)) lost.push(`${n0.format(net)}/s na rede`);
+    setText(f.retx, lost.join(" · ") || DASH);
+    f.retx.title = `Codificador: fila acima de 3 quadros (agora ${t.queue ?? 0}). Rede: fila de envio cheia pra essa pessoa.`;
   }
 }
 

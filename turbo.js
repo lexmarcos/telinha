@@ -18,6 +18,9 @@ const HOLD_MS = 150;        // quanto esperar por um quadro que ficou faltando
 const KEY_INTERVAL_MS = 1000; // keyframe pedida por fila cheia: no máximo 1 por segundo
 const VIEWER_KEY_MS = 500;    // keyframe pedida por quem perdeu um quadro
 const REPORT_MS = 1000;       // relatório de quem assiste para quem transmite
+// Codificadores de hardware (NVENC/QuickSync via Media Foundation, VAAPI)
+// trabalham com alguns quadros em andamento; só descarta se a fila passar disso.
+const MAX_ENCODE_QUEUE = 3;
 const CHANNEL = { negotiated: true, id: 100, ordered: false, maxPacketLifeTime: HOLD_MS };
 
 export function turboSupport() {
@@ -81,7 +84,7 @@ export class TurboSender {
     this.dirty = false;
     this.closed = false;
     this.pending = new Map(); // timestamp -> instante do encode()
-    this.stats = { encodeMs: null, frames: 0, skipped: 0 };
+    this.stats = { encodeMs: null, frames: 0, captured: 0, skipped: 0 };
     this.reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
     this.done = this.#loop();
   }
@@ -133,6 +136,7 @@ export class TurboSender {
       codec: this.choice?.codec, hardware: this.choice ? this.choice.hw === "prefer-hardware" : undefined,
       width: this.size?.w, height: this.size?.h,
       frames: v.frames, bytes: v.bytes, dropped: v.dropped, encodeMs: this.stats.encodeMs,
+      captured: this.stats.captured, skipped: this.stats.skipped, queue: this.encoder?.encodeQueueSize ?? 0,
     };
   }
 
@@ -157,12 +161,13 @@ export class TurboSender {
 
   async #encode(frame) {
     if (!this.viewers.size) { frame.close(); this.needKey = true; return; }
+    this.stats.captured++;
     const w = frame.displayWidth & ~1, h = frame.displayHeight & ~1;
     if (!this.encoder || this.encoder.state !== "configured" || this.dirty || this.size?.w !== w || this.size?.h !== h) {
       await this.#configure(w, h);
     }
     // Fila do codificador cheia: descarta antes de codificar, como o Sunshine.
-    if (!this.encoder || this.encoder.encodeQueueSize > 1) { frame.close(); this.stats.skipped++; return; }
+    if (!this.encoder || this.encoder.encodeQueueSize >= MAX_ENCODE_QUEUE) { frame.close(); this.stats.skipped++; return; }
     const keyFrame = this.needKey;
     this.needKey = false;
     if (this.pending.size > 120) this.pending.clear();
