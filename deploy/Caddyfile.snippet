@@ -1,0 +1,9 @@
+# Bloco para o Caddyfile do proxy reverso (o serviço `telinha` está na rede dele).
+# Troque seu-dominio.com pelo valor de TURN_HOST.
+seu-dominio.com {
+	reverse_proxy telinha:9000
+}
+
+www.seu-dominio.com {
+	redir https://seu-dominio.com{uri} permanent
+}

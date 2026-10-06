@@ -1,0 +1,9 @@
+{
+  "name": "telinha-server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "express": "^4.21.2",
+    "peer": "^1.0.2"
+  }
+}
