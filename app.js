@@ -175,9 +175,9 @@ async function join(code) {
   } catch (err) {
     peer?.destroy();
     setBusy(null);
-    showLobbyError(err?.type === "peer-unavailable"
-      ? `O canal ${code} não está no ar. Confira o número com quem te convidou.`
-      : peerErrorText(err));
+    showLobbyError(err?.type !== "peer-unavailable" ? peerErrorText(err)
+      : state.fallback ? `Não consegui falar com o servidor do Telinha, então não dá pra achar o canal ${code}. Confira sua internet e tente de novo.`
+      : `O canal ${code} não está no ar. Confira o número com quem te convidou.`);
   }
 }
 
@@ -185,16 +185,22 @@ let ownServer = null; // guarda só o sucesso; uma falha é tentada de novo na p
 async function peerOptions() {
   if (!SERVER) return { config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } };
   if (ownServer && ownServer.expires > Date.now()) return ownServer.options;
-  try {
-    const res = await fetch(`https://${SERVER}/api/ice`, { signal: AbortSignal.timeout(4000) });
-    const { iceServers } = await res.json();
-    const options = { host: SERVER, port: 443, path: "/peer", secure: true, config: { iceServers } };
-    ownServer = { options, expires: Date.now() + 12 * 3600_000 };
-    return options;
-  } catch {
-    console.warn("[telinha] servidor próprio indisponível, usando o PeerJS público");
-    return { config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } };
+  // Cair no servidor público separa a pessoa dos amigos que estão na VPS,
+  // então só desiste depois de duas tentativas com folga.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`https://${SERVER}/api/ice`, { signal: AbortSignal.timeout(8000) });
+      if (!res.ok) throw new Error(res.status);
+      const { iceServers } = await res.json();
+      const options = { host: SERVER, port: 443, path: "/peer", secure: true, config: { iceServers } };
+      ownServer = { options, expires: Date.now() + 12 * 3600_000 };
+      state.fallback = false;
+      return options;
+    } catch {}
   }
+  console.warn("[telinha] servidor próprio indisponível, usando o PeerJS público");
+  state.fallback = true;
+  return { config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } };
 }
 
 async function openPeer(id) {
