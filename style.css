@@ -295,6 +295,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 
 .quality {
   position: fixed; z-index: 5;
+  overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
   width: min(21rem, calc(100vw - 1.5rem));
   padding: 1.1rem 1rem 1rem; border-radius: 24px;
   background: rgba(16, 23, 56, 0.86);
@@ -309,6 +310,16 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .quality fieldset { margin: 0 0 0.9rem; padding: 0; border: 0; min-width: 0; }
 .quality legend { padding: 0 0.25rem; margin-bottom: 0.4rem; font-size: 0.8125rem; font-weight: 600; color: var(--muted); }
 .seg-note { margin: 0.45rem 0.25rem 0; font-size: 0.8125rem; line-height: 1.4; color: var(--muted); font-variant-numeric: tabular-nums; }
+.btn-small { min-height: 2.25rem; padding: 0 0.9rem; font-size: 0.875rem; }
+.audio-row { display: flex; align-items: center; gap: 0.75rem; }
+.audio-row .seg-note { flex: 1; margin: 0 0.25rem; }
+.audio-row .btn { flex: none; }
+.audio-help { margin-top: 0.6rem; padding: 0.75rem; border-radius: 14px; background: rgba(200, 212, 255, 0.07); font-size: 0.8125rem; line-height: 1.45; }
+.audio-help p { margin: 0 0 0.5rem; }
+.audio-help pre {
+  margin: 0 0 0.6rem; padding: 0.6rem 0.7rem; border-radius: 10px; background: rgba(5, 8, 22, 0.6);
+  white-space: pre-wrap; word-break: break-all; font-size: 0.75rem; line-height: 1.5;
+}
 .quality-upload {
   margin: 0; padding: 0.7rem 0.8rem; border-radius: 14px;
   background: rgba(200, 212, 255, 0.07);

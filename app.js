@@ -256,7 +256,7 @@ function wirePeer(peer) {
     if (call.metadata?.audioOnly) return acceptTurboAudio(call);
     state.incoming.get(call.peer)?.close();
     state.incoming.set(call.peer, call);
-    call.answer();
+    call.answer(undefined, { sdpTransform: hiFiAudio });
     tuneReceiver(call.peerConnection, call.metadata?.codec);
     call.on("stream", (stream) => {
       const name = call.metadata?.name || state.members.get(call.peer)?.name || "Alguém";
@@ -284,6 +284,7 @@ function acceptTurbo(conn) {
   if (!TURBO.receive) { conn.close(); return; }
   const id = conn.peer;
   state.turboIn.get(id)?.close();
+  state.audioIn.delete(id); // áudio de uma conexão anterior; o novo chega logo depois desta
   const rx = new TurboReceiver(openVideoChannel(conn.peerConnection), {
     requestKey: () => { if (conn.open) conn.send({ t: "key" }); },
     onUnsupported: () => { if (conn.open) conn.send({ t: "unsupported" }); },
@@ -304,7 +305,7 @@ function acceptTurbo(conn) {
 
 function acceptTurboAudio(call) {
   const id = call.peer;
-  call.answer();
+  call.answer(undefined, { sdpTransform: hiFiAudio });
   call.on("stream", (stream) => { state.audioIn.set(id, stream); showTurbo(id); });
   const end = () => {
     if (state.audioIn.get(id)?.id !== call.remoteStream?.id) return;
@@ -390,6 +391,11 @@ async function startShare() {
   const { width = 1920, height = 1080 } = video.getSettings();
   state.native = { width, height };
   state.codec = await hardwareCodec(video);
+  state.audioSource = stream.getAudioTracks().length ? "tela" : null;
+  if (!state.audioSource && safeGet("telinha:systemAudio") !== "off") {
+    const track = await captureSystemAudio(false).catch(() => null); // só se a permissão já existe
+    if (track) { stream.addTrack(track); state.audioSource = "computador"; }
+  }
 
   state.localStream = stream;
   await applyQuality();
@@ -420,6 +426,75 @@ function announceSharing(on) {
 }
 
 function useTurbo() { return state.quality.turbo && TURBO.send; }
+
+// Trilhas mudaram: reabre as conexões (o PeerJS não renegocia).
+function restartTransport() {
+  if (!state.localStream) return;
+  stopTransport();
+  startTransport();
+}
+
+/* ---------------- Som do computador ----------------
+ * No Windows o Chrome manda o som do sistema junto com a tela inteira (caixa
+ * "Compartilhar áudio do sistema"). No Linux e no Mac ele só manda o som de
+ * abas; lá a saída de som vira uma entrada virtual ("Som do computador", ver
+ * som-linux.conf) e a gente pega como se fosse um microfone. */
+
+const SYSTEM_AUDIO_RE = /som do computador|monitor of|blackhole|loopback/i;
+const OS = /win/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? "windows"
+  : /mac/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? "mac" : "linux";
+
+async function findSystemAudioDevice() {
+  const list = await navigator.mediaDevices.enumerateDevices();
+  return list.find((d) => d.kind === "audioinput" && d.deviceId && SYSTEM_AUDIO_RE.test(d.label)) ?? null;
+}
+
+async function captureSystemAudio(ask) {
+  if (!navigator.mediaDevices?.getUserMedia) return null;
+  let device = await findSystemAudioDevice();
+  if (!device && ask) {
+    // o nome dos dispositivos só aparece depois da permissão de microfone
+    const probe = await navigator.mediaDevices.getUserMedia({ audio: true });
+    probe.getTracks().forEach((t) => t.stop());
+    device = await findSystemAudioDevice();
+  }
+  if (!device) return null;
+  const s = await navigator.mediaDevices.getUserMedia({
+    audio: { deviceId: { exact: device.deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2 },
+  });
+  return s.getAudioTracks()[0] ?? null;
+}
+
+async function enableSystemAudio() {
+  let track = null;
+  try { track = await captureSystemAudio(true); } catch {}
+  if (!track) { $("audioHelp").hidden = false; return; }
+  if (!state.localStream) { track.stop(); return; }
+  state.localStream.addTrack(track);
+  state.audioSource = "computador";
+  safeSet("telinha:systemAudio", "on");
+  restartTransport();
+  renderQuality();
+  toast("Som do computador ligado");
+}
+
+function disableSystemAudio() {
+  for (const t of state.localStream?.getAudioTracks() ?? []) { t.stop(); state.localStream.removeTrack(t); }
+  state.audioSource = null;
+  safeSet("telinha:systemAudio", "off");
+  restartTransport();
+  renderQuality();
+}
+
+// Som de jogo e música: Opus em estéreo e com mais banda (o padrão é voz mono ~32 kb/s).
+function hiFiAudio(sdp) {
+  const pt = sdp.match(/a=rtpmap:(\d+) opus\/48000/i)?.[1];
+  if (!pt) return sdp;
+  return sdp.replace(new RegExp(`a=fmtp:${pt} (.*)`), (_, params) => {
+    const kept = params.split(";").filter((p) => p && !/^(stereo|sprop-stereo|maxaveragebitrate)=/.test(p));
+    return `a=fmtp:${pt} ${[...kept, "stereo=1", "sprop-stereo=1", "maxaveragebitrate=192000"].join(";")}`;
+  });
+}
 
 function startTransport() {
   if (useTurbo()) {
@@ -618,7 +693,7 @@ function setQuality(change) {
   Object.assign(state.quality, change);
   safeSet("telinha:quality", JSON.stringify(state.quality));
   applyQuality();
-  if (switchTransport && state.localStream) { stopTransport(); startTransport(); }
+  if (switchTransport) restartTransport();
 }
 
 /* Painel: nasce do botão e volta pra ele */
@@ -646,6 +721,29 @@ function renderSeg(el, key, options, current = String(state.quality[key])) {
   for (const input of el.querySelectorAll("input")) input.checked = input.value === String(options[index].value);
 }
 
+const AUDIO_NOTES = {
+  tela: "O som vai junto com a tela.",
+  computador: "Vai tudo que sai no seu fone ou caixa de som, inclusive vozes de chamadas.",
+  windows: "Sem som. Pra mandar o som, compartilhe de novo e marque “Compartilhar áudio do sistema”.",
+  outro: "Sem som. Neste sistema o Chrome só manda o som de abas.",
+};
+function renderAudio() {
+  const src = state.audioSource;
+  $("audioNote").textContent = AUDIO_NOTES[src] ?? (OS === "windows" ? AUDIO_NOTES.windows : AUDIO_NOTES.outro);
+  const btn = $("audioBtn");
+  btn.hidden = src === "tela" || (!src && OS === "windows");
+  btn.textContent = src === "computador" ? "Desligar som" : "Usar som do computador";
+  $("audioCmdWrap").hidden = OS !== "linux";
+  $("audioCmd").textContent = "mkdir -p ~/.config/pipewire/pipewire.conf.d && curl -fsSL "
+    + `${location.origin}/som-linux.conf -o ~/.config/pipewire/pipewire.conf.d/telinha-som.conf && systemctl --user restart pipewire`;
+  $("audioMac").hidden = OS !== "mac";
+  if (src) $("audioHelp").hidden = true;
+}
+$("audioBtn").addEventListener("click", () => (state.audioSource === "computador" ? disableSystemAudio() : enableSystemAudio()));
+$("audioCopy").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("audioCmd").textContent); toast("Comando copiado"); } catch {}
+});
+
 function renderQuality() {
   const native = state.native ?? { width: 1920, height: 1080 };
   const { width, height } = targetSize();
@@ -661,6 +759,7 @@ function renderQuality() {
 
   $("resNote").textContent = `Sua tela: ${native.width}×${native.height}. Saindo em ${width}×${height}.`;
   $("prioNote").textContent = PRIORITIES[state.quality.priority].note;
+  renderAudio();
   $("turboField").hidden = !TURBO.send;
   renderSeg(segs.turbo, "turbo", [{ value: false, label: "Normal" }, { value: true, label: "Mínimo" }]);
   $("turboNote").textContent = state.quality.turbo
@@ -684,6 +783,7 @@ function openQuality(viaKeyboard) {
   const left = Math.min(Math.max(12, b.left + b.width / 2 - w / 2), innerWidth - w - 12);
   qp.style.left = `${left}px`;
   qp.style.bottom = `${innerHeight - b.top + 10}px`;
+  qp.style.maxHeight = `${b.top - 22}px`;
   qp.style.transformOrigin = `${b.left + b.width / 2 - left}px 100%`;
   qp.getBoundingClientRect(); // fixa o estado inicial antes da transição
   qp.dataset.open = "";

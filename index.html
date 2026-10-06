@@ -141,6 +141,21 @@
       <div class="seg" id="prioSeg"></div>
       <p class="seg-note" id="prioNote"></p>
     </fieldset>
+    <fieldset id="audioField">
+      <legend>Som</legend>
+      <div class="audio-row">
+        <p class="seg-note" id="audioNote"></p>
+        <button class="btn btn-quiet btn-small" id="audioBtn" type="button">Usar som do computador</button>
+      </div>
+      <div class="audio-help" id="audioHelp" hidden>
+        <div id="audioCmdWrap">
+          <p>Não achei a entrada “Som do computador”. Rode isto uma vez no terminal e tente de novo:</p>
+          <pre><code id="audioCmd"></code></pre>
+          <button class="btn btn-quiet btn-small" id="audioCopy" type="button">Copiar comando</button>
+        </div>
+        <p id="audioMac">Não achei uma entrada de som do sistema. No Mac, instale o BlackHole e mande a saída de som pra ele.</p>
+      </div>
+    </fieldset>
     <fieldset id="turboField">
       <legend>Atraso</legend>
       <div class="seg" id="turboSeg"></div>
