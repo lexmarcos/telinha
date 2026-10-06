@@ -7,3 +7,5 @@ native/target/
 native/.deps/
 native/dist/
 native/.env.build
+bot/.env
+bot/dados.json

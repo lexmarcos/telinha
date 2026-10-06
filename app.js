@@ -29,6 +29,7 @@ const ui = {
   stageBar: $("stageBar"), featureName: $("featureName"), unmute: $("unmute"),
   volume: $("volume"), muteBtn: $("muteBtn"), pipBtn: $("pipBtn"), fullBtn: $("fullBtn"),
   channelDigits: $("channelDigits"), emptyDigits: $("emptyDigits"),
+  emptyTitle: $("emptyTitle"), emptyText: $("emptyText"),
   people: $("people"), shareBtn: $("shareBtn"), leaveBtn: $("leaveBtn"),
   offair: $("offair"), offairText: $("offairText"), offairBtn: $("offairBtn"),
   toasts: $("toasts"),
@@ -59,7 +60,12 @@ const state = {
 /* ---------------- Entrada ---------------- */
 
 ui.name.value = safeGet("telinha:name") || "";
-const hashCode = location.hash.replace(/\D/g, "").slice(0, 4);
+// Convite: #1234. Pelo botão Assistir do bot do Discord vem também um passe
+// (#1234/passe), que sai da barra de endereço para não ir junto num copiar-colar.
+const [hashRaw = "", hashPass = ""] = location.hash.slice(1).split("/");
+const hashCode = hashRaw.replace(/\D/g, "").slice(0, 4);
+const discordPass = hashPass.trim();
+if (discordPass) history.replaceState(null, "", `${location.pathname}${location.search}#${hashCode}`);
 if (hashCode.length === 4) {
   ui.code.value = hashCode;
   setTimeout(() => (ui.name.value ? ui.tune : ui.name).focus(), 950);
@@ -141,7 +147,9 @@ function acceptGuest(conn) {
   });
   conn.on("data", (msg) => {
     if (msg?.t === "sharing" && state.roster.has(conn.peer)) {
-      state.roster.get(conn.peer).sharing = !!msg.on;
+      const m = state.roster.get(conn.peer);
+      m.sharing = !!msg.on;
+      m.discord = !!msg.on && !!msg.discord; // só quem está na call do Discord assiste
       broadcastRoster();
     }
   });
@@ -345,9 +353,36 @@ function closeIncoming(id) {
   removeStream(id);
 }
 
+/* ---------------- Passe do Discord ---------------- */
+
+// Quem transmite pelo app com "só a call" manda vídeo só para quem entrega um
+// passe assinado pelo bot do Discord. O passe vai direto para essa pessoa
+// (nunca pela lista do canal, que todo mundo vê).
+const passStatus = new Map(); // id de quem transmite → { ok, motivo } | "enviando"
+
+function passTarget() {
+  try {
+    const body = discordPass.split(".")[0].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(atob(body)).p ?? null;
+  } catch { return null; }
+}
+
+function deliverPass(id) {
+  if (!discordPass || passStatus.has(id) || passTarget() !== id) return;
+  passStatus.set(id, "enviando");
+  const conn = state.peer.connect(id, { metadata: { kind: "passe", passe: discordPass }, reliable: true, serialization: "json" });
+  conn.on("data", (msg) => {
+    if (msg?.t !== "passe") return;
+    passStatus.set(id, { ok: !!msg.ok, motivo: msg.motivo });
+    renderStreams();
+    setTimeout(() => conn.close(), 500);
+  });
+  conn.on("error", () => { passStatus.delete(id); });
+}
+
 function applyRoster(list) {
   const me = state.peer.id;
-  const next = new Map(list.map((m) => [m.id, { name: m.name, sharing: !!m.sharing, wc: !!m.wc }]));
+  const next = new Map(list.map((m) => [m.id, { name: m.name, sharing: !!m.sharing, wc: !!m.wc, discord: !!m.discord }]));
 
   for (const [id, prev] of state.members) {
     if (id === me) continue;
@@ -370,6 +405,7 @@ function applyRoster(list) {
     for (const [id, m] of state.members) if (!next.has(id)) toast(`${m.name} saiu`);
   }
   state.members = next;
+  for (const [id, m] of next) if (id !== me && m.sharing && m.discord) deliverPass(id);
 
   if (state.localStream) for (const id of next.keys()) if (id !== me && !state.outgoing.has(id)) connectMember(id);
   for (const [id, s] of state.streams) if (!s.local && next.has(id)) s.name = next.get(id).name;
@@ -868,6 +904,25 @@ function addStream(id, stream, name, local) {
   renderStreams();
 }
 
+// Palco vazio: explica o que fazer quando a transmissão é só para a call.
+function renderEmpty() {
+  const me = state.peer?.id;
+  const gated = [...state.members].find(([id, m]) => id !== me && m.sharing && m.discord);
+  if (!gated) {
+    ui.emptyTitle.textContent = "Ninguém está transmitindo";
+    ui.emptyText.textContent = "Compartilhe sua tela ou mande o convite pra galera entrar.";
+    return;
+  }
+  const [id, m] = gated;
+  const st = passStatus.get(id);
+  ui.emptyTitle.textContent = `${m.name} transmite só pra call`;
+  ui.emptyText.textContent =
+    st === "enviando" ? "Conferindo seu passe…"
+    : st?.ok ? "Passe aceito. A imagem já vai aparecer."
+    : st?.motivo ? st.motivo
+    : "Entre na call do Discord e clique em Assistir no chat dela.";
+}
+
 function removeStream(id) {
   const s = state.streams.get(id);
   if (!s) return;
@@ -890,6 +945,7 @@ function renderStreams() {
   const s = state.streams.get(state.featured);
   ui.stage.classList.toggle("idle", !s);
   ui.stageBar.hidden = !s;
+  renderEmpty();
 
   if (!s) {
     ui.feature.srcObject = null;
