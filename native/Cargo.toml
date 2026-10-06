@@ -1,0 +1,73 @@
+[package]
+name = "telinha"
+version = "0.1.0"
+edition = "2024"
+description = "Transmissão de tela de baixa latência para o Telinha"
+license = "MIT"
+
+[dependencies]
+# Interface em Slint (ui/*.slint): janela pelo winit, desenho por software no
+# Linux (funciona pelo XWayland sem depender da GPU).
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "backend-winit-x11", "backend-winit-wayland", "renderer-software", "unstable-winit-030"] }
+arboard = { version = "3", default-features = false }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+image = { version = "0.25", default-features = false, features = ["png"] }
+tracing = "0.1"
+async-trait = "0.1"
+webrtc = "0.21"
+rtc = "0.21"
+ffmpeg-next = "9"
+ffmpeg-sys-next = "9"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+base64 = "0.22"
+ring = "0.17"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rand = "0.9"
+bytes = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[package.metadata.deb]
+name = "telinha"
+maintainer = "Telinha"
+copyright = "Telinha"
+section = "video"
+priority = "optional"
+extended-description = "A bolha flutuante do Telinha: transmite a tela com codificação na placa de vídeo e baixa latência para quem assiste no navegador."
+depends = "libc6 (>= 2.35), libgcc-s1, libpipewire-0.3-0t64 | libpipewire-0.3-0, libdrm2, libfontconfig1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcursor1, libxrandr2, libxi6"
+recommends = "xdg-desktop-portal, intel-media-va-driver | mesa-va-drivers"
+assets = [
+    ["target/release/telinha", "usr/bin/", "755"],
+    ["dist/stage-linux/lib/*", "usr/lib/telinha/", "644"],
+    ["assets/linux/telinha.desktop", "usr/share/applications/", "644"],
+    ["assets/icons/telinha.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+]
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# O fontique é o que o Slint usa para achar fontes; com esta feature a
+# fontconfig é carregada em tempo de execução (o binário não fica preso à
+# versão da máquina de compilação).
+fontique = { version = "0.11", default-features = false, features = ["fontconfig-dlopen"] }
+ksni = "0.3"
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
+pipewire = "0.10"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# No Windows a janela transparente pede o desenho por OpenGL.
+slint = { version = "1.18", default-features = false, features = ["renderer-femtovg"] }
+tray-icon = "0.26"
+wasapi = "0.25"
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+
+[build-dependencies]
+slint-build = "1.18"
+embed-resource = "3"
+

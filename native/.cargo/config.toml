@@ -1,0 +1,12 @@
+# FFmpeg pré-compilado (BtbN, LGPL) baixado por scripts/fetch-deps.sh.
+# Para compilar para Windows, o script de empacotamento troca FFMPEG_DIR.
+[env]
+FFMPEG_DIR = { value = ".deps/ffmpeg-linux", relative = true }
+# Cabeçalhos do PipeWire extraídos dos .deb (scripts/fetch-deps.sh): a captura
+# de tela no Linux compila sem precisar instalar pacotes de desenvolvimento.
+PKG_CONFIG_PATH = { value = ".deps/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig", relative = true }
+PKG_CONFIG_SYSROOT_DIR = { value = ".deps/sysroot", relative = true }
+
+# Windows: runtime do C embutido (não depende do Visual C++ Redistributable).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

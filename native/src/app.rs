@@ -1,0 +1,867 @@
+//! A bolha: estado da interface, molas e a ligação com o motor, a bandeja e o
+//! Discord. O desenho fica em ui/*.slint (o design system está em DESIGN.md);
+//! aqui só se decide o que mostrar e como se mexe.
+//!
+//! As animações são molas (ui/spring.rs) e não as curvas do Slint: mola começa
+//! de onde a coisa está e herda a velocidade quando muda de alvo no meio do
+//! caminho, então abrir e fechar rápido nunca pula nem "bate na parede".
+
+slint::include_modules!();
+
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use slint::winit_030::WinitWindowAccessor;
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+
+use crate::config::{Config, Priority, Resolution};
+use crate::engine::{self, Command, EncoderInfo, Event, Viewer};
+use crate::ui::motion;
+use crate::ui::spring::{Spring, reduced_motion};
+
+/// Medidas de ui/tokens.slint que o app precisa para mexer a janela.
+const PANEL_W: f32 = 264.0;
+const PANEL_GAP: f32 = 10.0;
+const SHADOW_ROOM: f32 = 18.0;
+const BUBBLE: f32 = 64.0;
+/// Quanto a janela anda para a esquerda quando o painel abre desse lado.
+const LEFT_SHIFT: f32 = PANEL_W + PANEL_GAP;
+const FPS_OPTIONS: [u32; 2] = [30, 60];
+const DOTS_MAX: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    Menu = 1,
+    Quality = 2,
+    Join = 3,
+    Discord = 4,
+}
+
+impl Panel {
+    fn from_index(i: i32) -> Self {
+        match i {
+            2 => Self::Quality,
+            3 => Self::Join,
+            4 => Self::Discord,
+            _ => Self::Menu,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Session {
+    Idle,
+    Connecting,
+    Channel { code: String, invite: String, live: bool },
+}
+
+struct Controller {
+    ui: Bolha,
+    config: Config,
+    session: Session,
+    viewers: Vec<Viewer>,
+    encoder: Option<EncoderInfo>,
+    screen: Option<(u32, u32)>,
+    monitor: Option<(f32, f32)>,
+    notice: Option<(String, NoteTone)>,
+    join_text: String,
+    joining: bool,
+
+    panel: Option<Panel>,
+    side_left: bool,
+    /// O painel acabou de abrir: a altura dele entra direto, sem animar,
+    /// enquanto ele ainda está quase transparente.
+    fresh_panel: bool,
+    /// Quando o painel trocou. O Slint só cria os itens de um painel no
+    /// primeiro desenho dele, então a medida dos primeiros instantes sai curta.
+    switched_at: Option<Instant>,
+    open: Spring,
+    press: Spring,
+    tally: Spring,
+    /// Marcadores dos segmentados: resolução, fps, prioridade, som, perfil do
+    /// Discord e quem pode assistir.
+    thumbs: [Spring; 6],
+    panel_h: Spring,
+    fade: Spring,
+    /// Altura que a janela reserva para o painel: durante uma troca, a maior
+    /// entre a de antes e a de depois (a janela muda duas vezes, não a cada quadro).
+    hold_h: f32,
+    dragging: bool,
+    timer: slint::Timer,
+
+    engine: tokio::sync::mpsc::Sender<Command>,
+    tray: Option<crate::tray::Guard>,
+    presence: tokio::sync::watch::Sender<Option<crate::discord::Presence>>,
+    presence_since: (Option<(String, bool)>, i64),
+    /// A área de transferência do X11 precisa de alguém dono dela enquanto o
+    /// texto copiado estiver lá.
+    clipboard: Option<arboard::Clipboard>,
+}
+
+thread_local! {
+    static CTRL: RefCell<Option<Controller>> = const { RefCell::new(None) };
+}
+
+/// Mexe no controlador (na thread da interface).
+fn with(f: impl FnOnce(&mut Controller)) {
+    CTRL.with(|c| {
+        if let Some(c) = c.borrow_mut().as_mut() {
+            f(c);
+        }
+    });
+}
+
+/// Manda trabalho de outra thread (motor, bandeja, Discord) para a interface.
+fn post(f: impl FnOnce(&mut Controller) + Send + 'static) {
+    let _ = slint::invoke_from_event_loop(move || with(f));
+}
+
+pub fn run() {
+    crate::ui::spring::detect_reduced_motion();
+    let ui = Bolha::new().expect("criar a janela da bolha");
+    ui.global::<Motion>().set_reduced(reduced_motion());
+
+    let engine = engine::spawn(|e| post(move |c| c.on_engine(e)));
+    let tray = crate::tray::init(Arc::new(|e| post(move |c| c.on_tray(e))));
+    let (presence, presence_rx) = tokio::sync::watch::channel(None);
+    tokio::spawn(crate::discord::run(presence_rx));
+
+    let config = Config::load();
+    let mut c = Controller {
+        ui: ui.clone_strong(),
+        session: Session::Idle,
+        viewers: Vec::new(),
+        encoder: None,
+        screen: None,
+        monitor: None,
+        notice: None,
+        join_text: String::new(),
+        joining: false,
+        panel: None,
+        side_left: false,
+        fresh_panel: false,
+        switched_at: None,
+        open: Spring::new(0.0, motion::UI),
+        press: Spring::new(0.0, motion::PRESS),
+        tally: Spring::new(0.0, motion::TALLY),
+        thumbs: [Spring::new(0.0, motion::UI); 6],
+        panel_h: Spring::new(0.0, motion::UI),
+        fade: Spring::new(1.0, motion::FADE),
+        hold_h: 0.0,
+        dragging: false,
+        timer: slint::Timer::default(),
+        engine,
+        tray,
+        presence,
+        presence_since: (None, 0),
+        clipboard: None,
+        config,
+    };
+    c.sync_thumbs(true);
+    c.wire();
+    c.render();
+    ui.show().expect("mostrar a bolha");
+    c.place();
+    CTRL.with(|x| *x.borrow_mut() = Some(c));
+
+    if let Some(dir) = std::env::var_os("TELINHA_SHOTS").map(PathBuf::from) {
+        shots(dir);
+    }
+    // A janela some na bandeja sem fechar o app: só "Fechar o Telinha" encerra.
+    slint::run_event_loop_until_quit().expect("laço da interface");
+}
+
+impl Controller {
+    /* ---------------- ligações com a interface ---------------- */
+
+    fn wire(&self) {
+        let ui = &self.ui;
+        ui.on_bubble_down(|| with(|c| c.bubble_down()));
+        ui.on_bubble_up(|| with(|c| c.bubble_up()));
+        ui.on_bubble_drag(|| with(|c| c.bubble_drag()));
+        ui.on_bubble_click(|| with(|c| c.bubble_click()));
+        ui.on_escape(|| with(|c| c.close_panel()));
+
+        let st = ui.global::<AppState>();
+        st.on_open(|i| with(|c| c.open_panel(Panel::from_index(i))));
+        st.on_create(|| {
+            with(|c| {
+                let (name, server) = (c.config.name.clone(), c.config.server.clone());
+                c.send(Command::Create { name, server });
+                c.close_panel();
+            })
+        });
+        st.on_start_live(|| {
+            with(|c| {
+                let quality = c.config.quality;
+                let discord = if c.config.call_only { c.config.discord_session.clone() } else { None };
+                c.send(Command::StartLive { quality, discord });
+                c.close_panel();
+            })
+        });
+        st.on_stop_live(|| with(|c| c.stop_live()));
+        st.on_copy_invite(|| with(|c| c.copy_invite()));
+        st.on_hide(|| with(|c| c.hide()));
+        st.on_leave(|| {
+            with(|c| {
+                c.send(Command::Leave);
+                c.close_panel();
+            })
+        });
+        st.on_quit(|| with(|c| c.quit()));
+        st.on_join_edited(|t| {
+            with(|c| {
+                c.join_text = t.trim().to_owned();
+                c.render();
+            })
+        });
+        st.on_name_edited(|t| with(|c| c.config.name = t.to_string()));
+        st.on_join_submit(|| with(|c| c.join_submit()));
+        st.on_set_resolution(|i| {
+            with(|c| {
+                if let Some(r) = c.resolution_options().get(i as usize) {
+                    c.config.quality.resolution = *r;
+                    c.quality_changed();
+                }
+            })
+        });
+        st.on_set_fps(|i| {
+            with(|c| {
+                c.config.quality.fps = FPS_OPTIONS[(i as usize).min(FPS_OPTIONS.len() - 1)];
+                c.quality_changed();
+            })
+        });
+        st.on_set_priority(|i| {
+            with(|c| {
+                c.config.quality.priority = if i == 1 { Priority::Nitidez } else { Priority::Fluidez };
+                c.quality_changed();
+            })
+        });
+        st.on_set_audio(|i| {
+            with(|c| {
+                c.config.quality.system_audio = i == 1;
+                c.quality_changed();
+            })
+        });
+        st.on_set_profile(|i| {
+            with(|c| {
+                c.config.discord = i == 1;
+                c.config.save();
+                c.sync_thumbs(false);
+                c.render();
+            })
+        });
+        st.on_set_call(|i| {
+            with(|c| {
+                c.config.call_only = i == 1;
+                c.config.save();
+                c.sync_thumbs(false);
+                c.render();
+            })
+        });
+        st.on_discord_login(|| with(|c| c.discord_login()));
+        st.on_discord_logout(|| {
+            with(|c| {
+                c.config.discord_session = None;
+                c.config.discord_name = None;
+                c.config.save();
+                c.render();
+            })
+        });
+    }
+
+    /* ---------------- a bolha ---------------- */
+
+    fn bubble_down(&mut self) {
+        // Resposta no aperto, não no soltar.
+        self.dragging = false;
+        self.press.set_target(1.0);
+        self.animate();
+    }
+
+    fn bubble_up(&mut self) {
+        self.press.set_target(0.0);
+        self.animate();
+    }
+
+    fn bubble_drag(&mut self) {
+        if self.dragging {
+            return;
+        }
+        self.dragging = true;
+        self.press.set_target(0.0);
+        self.animate();
+        // O gerenciador de janelas arrasta: acompanha o mouse 1:1, sem atraso.
+        self.ui.window().with_winit_window(|w| {
+            let _ = w.drag_window();
+        });
+    }
+
+    fn bubble_click(&mut self) {
+        if std::mem::take(&mut self.dragging) {
+            return;
+        }
+        if self.panel.is_some() && self.open.target() > 0.0 {
+            self.close_panel();
+        } else {
+            self.open_panel(Panel::Menu);
+        }
+    }
+
+    /* ---------------- painel ---------------- */
+
+    fn open_panel(&mut self, kind: Panel) {
+        let was_closed = self.panel.is_none() || self.open.target() == 0.0;
+        let switched = self.panel.is_some_and(|p| p != kind);
+        self.panel = Some(kind);
+        self.notice = None;
+        self.open.set_target(1.0);
+        if was_closed && self.open.value() <= 0.001 {
+            self.fresh_panel = true;
+            self.fade.snap(1.0);
+            // Abre do lado que tem espaço na tela; a bolha fica parada no lugar.
+            let (x, y) = self.bubble_position();
+            let needed = 2.0 * SHADOW_ROOM + BUBBLE.max(self.dots_width()) + LEFT_SHIFT;
+            self.side_left = self.monitor.is_some_and(|(w, _)| x + needed > w);
+            if self.side_left {
+                self.set_window_position(x - LEFT_SHIFT, y);
+            }
+        } else if switched {
+            // Troca de painel: o conteúdo novo aparece enquanto a altura acompanha.
+            self.fade.snap(0.0);
+            self.fade.set_target(1.0);
+            self.switched_at = Some(Instant::now());
+        }
+        self.render();
+        self.animate();
+    }
+
+    fn close_panel(&mut self) {
+        if self.panel.is_none() {
+            return;
+        }
+        self.open.set_target(0.0);
+        self.animate();
+    }
+
+    /// O painel terminou de fechar: a janela volta ao tamanho da bolha.
+    fn finish_close(&mut self) {
+        let (x, y) = self.bubble_position();
+        self.panel = None;
+        self.hold_h = 0.0;
+        if std::mem::take(&mut self.side_left) {
+            self.set_window_position(x, y);
+        }
+        self.render();
+    }
+
+    /// Mede o conteúdo do painel (o Slint calcula a altura natural dele) e
+    /// anima a superfície até lá.
+    fn measure_panel(&mut self) {
+        if self.panel.is_none() {
+            return;
+        }
+        let h = self.ui.get_content_h();
+        if self.fresh_panel {
+            self.panel_h.snap(h);
+            self.hold_h = h;
+            // Só deixa de ser "recém-aberto" quando já dá para ver o painel.
+            if self.open.value() > 0.3 {
+                self.fresh_panel = false;
+            }
+        } else if self.switched_at.is_some_and(|t| t.elapsed() < Duration::from_millis(40)) {
+            // Ainda montando o painel novo: espera a medida de verdade.
+            self.animate();
+        } else if (h - self.panel_h.target()).abs() > 0.5 {
+            self.panel_h.set_target(h);
+            self.hold_h = self.hold_h.max(h).max(self.panel_h.value());
+            self.animate();
+        }
+        self.ui.set_hold_h(self.hold_h);
+        self.ui.set_panel_h(self.panel_h.value());
+    }
+
+    /* ---------------- molas ---------------- */
+
+    fn animating(&self) -> bool {
+        self.fresh_panel
+            || self.open.is_moving()
+            || self.press.is_moving()
+            || self.tally.is_moving()
+            || self.panel_h.is_moving()
+            || self.fade.is_moving()
+            || self.thumbs.iter().any(Spring::is_moving)
+    }
+
+    /// Liga o relógio das molas (só roda enquanto algo se mexe).
+    fn animate(&mut self) {
+        if !self.timer.running() {
+            self.timer.start(slint::TimerMode::Repeated, Duration::from_millis(8), || with(|c| c.frame()));
+        }
+    }
+
+    fn frame(&mut self) {
+        let now = Instant::now();
+        for s in [&mut self.open, &mut self.press, &mut self.tally, &mut self.panel_h, &mut self.fade] {
+            s.tick(now);
+        }
+        for s in &mut self.thumbs {
+            s.tick(now);
+        }
+        if self.panel.is_some() && self.open.target() == 0.0 && !self.open.is_moving() {
+            self.finish_close();
+        }
+        self.measure_panel();
+        // Troca de painel terminou: a janela encolhe para a altura nova.
+        if !self.panel_h.is_moving() && self.hold_h > self.panel_h.target() + 0.5 && self.open.target() > 0.0 {
+            self.hold_h = self.panel_h.target();
+        }
+        self.push_motion();
+        if !self.animating() {
+            self.timer.stop();
+        }
+    }
+
+    fn push_motion(&self) {
+        let ui = &self.ui;
+        ui.set_open(self.open.value());
+        ui.set_press(self.press.value());
+        ui.set_tally(self.tally.value());
+        ui.set_panel_h(self.panel_h.value());
+        ui.set_hold_h(self.hold_h);
+        ui.set_content_fade(self.fade.value());
+        let thumbs: Vec<f32> = self.thumbs.iter().map(Spring::value).collect();
+        ui.global::<AppState>().set_thumbs(ModelRc::new(VecModel::from(thumbs)));
+    }
+
+    /* ---------------- desenho ---------------- */
+
+    /// Passa o estado inteiro para a interface.
+    fn render(&mut self) {
+        let ui = &self.ui;
+        let st = ui.global::<AppState>();
+        let (session, code, live) = match &self.session {
+            Session::Idle => (0, String::new(), false),
+            Session::Connecting => (1, String::new(), false),
+            Session::Channel { code, live, .. } => (2, code.clone(), *live),
+        };
+        ui.set_window_title(
+            match &self.session {
+                Session::Channel { code, live: true, .. } => format!("Telinha · transmitindo no canal {code}"),
+                Session::Channel { code, .. } => format!("Telinha · canal {code}"),
+                _ => "Telinha".into(),
+            }
+            .into(),
+        );
+        st.set_session(session);
+        st.set_code(code.clone().into());
+        st.set_live(live);
+        st.set_subtitle(self.subtitle().into());
+
+        let palette = ui.global::<Palette>().get_avatars();
+        let dots: Vec<DotData> = self
+            .viewers
+            .iter()
+            .take(DOTS_MAX)
+            .map(|v| DotData {
+                initials: initials(&v.name).into(),
+                tint: palette.row_data(name_hash(&v.name) % palette.row_count().max(1)).unwrap_or_default(),
+                supported: v.supported,
+            })
+            .collect();
+        st.set_dots(ModelRc::new(VecModel::from(dots)));
+        st.set_dots_extra(self.viewers.len().saturating_sub(DOTS_MAX) as i32);
+        let (notice, tone) = self.notice.clone().unwrap_or((String::new(), NoteTone::Info));
+        st.set_notice(notice.into());
+        st.set_notice_tone(tone);
+
+        // Qualidade
+        let q = self.config.quality;
+        let opts = self.resolution_options();
+        let labels: Vec<SharedString> = opts.iter().map(|r| r.height().map_or("Original".into(), |h| format!("{h}p").into())).collect();
+        st.set_res_options(ModelRc::new(VecModel::from(labels)));
+        st.set_res_sel(opts.iter().position(|r| *r == q.resolution).unwrap_or(opts.len() - 1) as i32);
+        st.set_fps_sel(FPS_OPTIONS.iter().position(|f| *f == q.fps).unwrap_or(1) as i32);
+        st.set_prio_sel(i32::from(q.priority == Priority::Nitidez));
+        st.set_audio_sel(i32::from(q.system_audio));
+        let native = self.native();
+        let (ow, oh) = q.output_size(native);
+        st.set_screen_note(format!("Sua tela: {}×{}. Saindo em {ow}×{oh}.", native.0, native.1).into());
+        st.set_prio_note(
+            if q.priority == Priority::Fluidez { "Mantém o movimento suave. Bom pra jogos e vídeos." } else { "Mantém a imagem nítida. Bom pra texto e código." }.into(),
+        );
+        let (enc, enc_tone) = match &self.encoder {
+            Some(e) if e.hardware => (format!("Codificando na placa de vídeo ({}).", e.name), NoteTone::Info),
+            Some(e) => (format!("Codificando no processador ({}). Acima de 1080p60 ele pode não dar conta.", e.name), NoteTone::Warn),
+            None => (String::new(), NoteTone::Info),
+        };
+        st.set_encoder_note(enc.into());
+        st.set_encoder_tone(enc_tone);
+        let mbps = q.bitrate(native) as f64 / 1e6;
+        let br = |v: f64| format!("{v:.1}").replace('.', ",");
+        let upload = match self.viewers.len() {
+            n if n > 1 => format!("Até {} Mb/s de upload por pessoa. Com {n} pessoas assistindo, até {} Mb/s.", br(mbps), br(mbps * n as f64)),
+            _ => format!("Até {} Mb/s de upload por pessoa assistindo.", br(mbps)),
+        };
+        st.set_upload_note(upload.into());
+
+        // Entrar
+        if st.get_join_text().as_str() != self.join_text {
+            st.set_join_text(self.join_text.clone().into());
+        }
+        st.set_join_digits(!self.join_text.is_empty() && self.join_text.chars().all(|c| c.is_ascii_digit()));
+        if st.get_name().as_str() != self.config.name {
+            st.set_name(self.config.name.clone().into());
+        }
+        st.set_joining(self.joining);
+
+        // Discord
+        st.set_discord_available(crate::discord::client_id().is_some());
+        st.set_discord_logged(self.config.discord_session.is_some());
+        st.set_discord_name(self.config.discord_name.clone().unwrap_or_default().into());
+        st.set_profile_sel(i32::from(self.config.discord));
+        st.set_call_sel(i32::from(self.config.call_only));
+
+        ui.set_panel_kind(self.panel.map_or(0, |p| p as i32));
+        ui.set_panel_shown(self.panel.is_some());
+        ui.set_side_left(self.side_left);
+        self.measure_panel();
+        self.push_motion();
+        self.sync_presence();
+    }
+
+    fn subtitle(&self) -> String {
+        match &self.session {
+            Session::Idle => "Compartilhe a tela com os amigos".into(),
+            Session::Connecting => "Conectando…".into(),
+            Session::Channel { code, .. } => format!("Canal {code}. {}", self.viewers_line()),
+        }
+    }
+
+    /// Quem está assistindo, pelo nome quando são poucos (mais específico que um número).
+    fn viewers_line(&self) -> String {
+        let first: Vec<&str> = self.viewers.iter().map(|v| v.name.split_whitespace().next().unwrap_or("Alguém")).collect();
+        match first.as_slice() {
+            [] => "Ninguém assistindo ainda".into(),
+            [a] => format!("{a} assistindo"),
+            [a, b] => format!("{a} e {b} assistindo"),
+            [a, b, c] => format!("{a}, {b} e {c} assistindo"),
+            many => format!("{} pessoas assistindo", many.len()),
+        }
+    }
+
+    /* ---------------- janela ---------------- */
+
+    /// Posição inicial e tamanho da tela (para escolher o lado do painel).
+    fn place(&mut self) {
+        self.monitor = self
+            .ui
+            .window()
+            .with_winit_window(|w| {
+                w.current_monitor().map(|m| {
+                    let s = m.size().to_logical::<f64>(m.scale_factor());
+                    (s.width as f32, s.height as f32)
+                })
+            })
+            .flatten();
+        let (x, y) = match (self.config.position, self.monitor) {
+            (Some(p), _) => p,
+            // Primeira vez: no alto, perto da direita.
+            (None, Some((w, _))) => (w - BUBBLE - 2.0 * SHADOW_ROOM - 48.0, 120.0),
+            (None, None) => (200.0, 120.0),
+        };
+        self.set_window_position(x, y);
+        self.sync_thumbs(true);
+        self.render();
+    }
+
+    fn window_position(&self) -> (f32, f32) {
+        let p = self.ui.window().position();
+        let s = self.ui.window().scale_factor();
+        (p.x as f32 / s, p.y as f32 / s)
+    }
+
+    fn set_window_position(&self, x: f32, y: f32) {
+        self.ui.window().set_position(slint::LogicalPosition::new(x, y));
+    }
+
+    /// Onde a bolha está (com o painel aberto à esquerda, a janela começa antes dela).
+    fn bubble_position(&self) -> (f32, f32) {
+        let (x, y) = self.window_position();
+        if self.panel.is_some() && self.side_left { (x + LEFT_SHIFT, y) } else { (x, y) }
+    }
+
+    fn dots_width(&self) -> f32 {
+        let n = self.viewers.len().min(DOTS_MAX) + usize::from(self.viewers.len() > DOTS_MAX);
+        if n == 0 { 0.0 } else { 20.0 + (n as f32 - 1.0) * 13.0 }
+    }
+
+    fn hide(&mut self) {
+        self.config.position = Some(self.bubble_position());
+        self.config.save();
+        // Some de uma vez: quem pede para esconder não quer ver o painel fechando.
+        self.open.snap(0.0);
+        self.finish_close();
+        let _ = self.ui.hide();
+    }
+
+    fn show(&mut self) {
+        let _ = self.ui.show();
+        if let Some((x, y)) = self.config.position {
+            self.set_window_position(x, y);
+        }
+    }
+
+    fn quit(&mut self) {
+        self.config.position = Some(self.bubble_position());
+        self.config.save();
+        let _ = slint::quit_event_loop();
+    }
+
+    /* ---------------- ações ---------------- */
+
+    fn send(&self, cmd: Command) {
+        let _ = self.engine.try_send(cmd);
+    }
+
+    fn stop_live(&mut self) {
+        self.send(Command::StopLive);
+        self.close_panel();
+    }
+
+    fn copy_invite(&mut self) {
+        let Session::Channel { invite, .. } = &self.session else { return };
+        let invite = invite.clone();
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().map_err(|e| tracing::warn!("área de transferência: {e}")).ok();
+        }
+        let ok = self.clipboard.as_mut().is_some_and(|c| c.set_text(invite).is_ok());
+        self.notice = Some(if ok { ("Convite copiado.".into(), NoteTone::Info) } else { ("Não consegui copiar o convite.".into(), NoteTone::Error) });
+        self.render();
+    }
+
+    fn join_submit(&mut self) {
+        if self.join_text.is_empty() {
+            self.notice = Some(("Digite o número do canal ou cole o link de convite.".into(), NoteTone::Error));
+            self.render();
+            return;
+        }
+        self.config.save();
+        let (input, name, server) = (self.join_text.clone(), self.config.name.clone(), self.config.server.clone());
+        self.send(Command::Join { input, name, server });
+    }
+
+    fn quality_changed(&mut self) {
+        self.sync_thumbs(false);
+        self.config.save();
+        self.send(Command::SetQuality { quality: self.config.quality });
+        self.render();
+    }
+
+    fn discord_login(&mut self) {
+        let Some(server) = self.config.server.clone() else {
+            self.notice = Some(("Entre num canal uma vez antes, para o app saber qual é o servidor.".into(), NoteTone::Warn));
+            self.render();
+            return;
+        };
+        self.notice = Some(("Termine o login no navegador.".into(), NoteTone::Info));
+        self.render();
+        tokio::spawn(async move {
+            let r = crate::engine::gate::login(server).await;
+            post(move |c| {
+                match r {
+                    Ok((session, name)) => {
+                        c.config.discord_session = Some(session);
+                        c.config.discord_name = Some(name);
+                        c.config.save();
+                        c.notice = None;
+                    }
+                    Err(e) => c.notice = Some((e, NoteTone::Error)),
+                }
+                c.render();
+            });
+        });
+    }
+
+    fn on_tray(&mut self, e: crate::tray::TrayEvent) {
+        match e {
+            crate::tray::TrayEvent::Show => self.show(),
+            crate::tray::TrayEvent::StopLive => self.stop_live(),
+            crate::tray::TrayEvent::Quit => self.quit(),
+        }
+    }
+
+    fn on_engine(&mut self, e: Event) {
+        match e {
+            Event::Connecting => self.session = Session::Connecting,
+            Event::Joined { code, invite, server } => {
+                self.session = Session::Channel { code, invite, live: false };
+                self.joining = false;
+                self.config.server = Some(server);
+                self.config.save();
+                self.close_panel();
+            }
+            Event::Failed(msg) => {
+                tracing::warn!("falhou: {msg}");
+                if self.session == Session::Connecting {
+                    self.session = Session::Idle;
+                }
+                self.joining = false;
+                self.notice = Some((msg, NoteTone::Error));
+            }
+            Event::Viewers(v) => self.viewers = v,
+            Event::Live(on) => {
+                if let Session::Channel { live, .. } = &mut self.session {
+                    *live = on;
+                }
+                self.tally.set_target(if on { 1.0 } else { 0.0 });
+                self.animate();
+                if let Some(t) = &self.tray {
+                    t.set_live(on);
+                }
+            }
+            Event::Encoder(info) => self.encoder = Some(info),
+            Event::Screen { width, height } => {
+                self.screen = Some((width, height));
+                self.sync_thumbs(true);
+            }
+            Event::Notice(msg) => self.notice = Some((msg, NoteTone::Warn)),
+            Event::Info(msg) => self.notice = Some((msg, NoteTone::Info)),
+            Event::Left => {
+                self.session = Session::Idle;
+                self.viewers.clear();
+                self.encoder = None;
+                self.tally.set_target(0.0);
+                self.animate();
+            }
+        }
+        self.render();
+    }
+
+    /// Atualiza o que o perfil do Discord mostra (só manda se mudou).
+    fn sync_presence(&mut self) {
+        let channel = match &self.session {
+            Session::Channel { code, invite, live } => Some((code.clone(), invite.clone(), *live)),
+            _ => None,
+        };
+        let key = channel.as_ref().map(|(code, _, live)| (code.clone(), *live));
+        if key != self.presence_since.0 {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+            self.presence_since = (key, now);
+        }
+        let next = channel.filter(|_| self.config.discord && crate::discord::client_id().is_some()).map(|(_, invite, live)| crate::discord::Presence {
+            invite,
+            live,
+            viewers: self.viewers.len(),
+            since: self.presence_since.1,
+        });
+        self.presence.send_if_modified(|cur| {
+            let changed = *cur != next;
+            if changed {
+                *cur = next;
+            }
+            changed
+        });
+    }
+
+    /* ---------------- qualidade ---------------- */
+
+    fn native(&self) -> (u32, u32) {
+        self.screen.or_else(|| self.monitor.map(|(w, h)| (w as u32, h as u32))).unwrap_or((1920, 1080))
+    }
+
+    fn resolution_options(&self) -> Vec<Resolution> {
+        let (_, h) = self.native();
+        let mut opts: Vec<Resolution> =
+            [Resolution::P720, Resolution::P1080, Resolution::P1440].into_iter().filter(|r| r.height().is_some_and(|rh| rh < h)).collect();
+        opts.push(Resolution::Original);
+        opts
+    }
+
+    fn sync_thumbs(&mut self, snap: bool) {
+        let q = self.config.quality;
+        let opts = self.resolution_options();
+        let res = opts.iter().position(|r| *r == q.resolution).unwrap_or(opts.len() - 1);
+        let fps = FPS_OPTIONS.iter().position(|f| *f == q.fps).unwrap_or(1);
+        let values = [res, fps, usize::from(q.priority == Priority::Nitidez), usize::from(q.system_audio), usize::from(self.config.discord), usize::from(self.config.call_only)];
+        for (s, v) in self.thumbs.iter_mut().zip(values) {
+            if snap { s.snap(v as f32) } else { s.set_target(v as f32) }
+        }
+        if !snap {
+            self.animate();
+        }
+    }
+}
+
+fn initials(name: &str) -> String {
+    let parts: Vec<&str> = name.split_whitespace().collect();
+    let mut s: String = parts.first().and_then(|p| p.chars().next()).unwrap_or('?').to_uppercase().collect();
+    if parts.len() > 1 {
+        if let Some(l) = parts.last().and_then(|p| p.chars().next()) {
+            s.extend(l.to_uppercase());
+        }
+    }
+    s
+}
+
+fn name_hash(name: &str) -> usize {
+    name.chars().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32)) as usize
+}
+
+/* ---------------- roteiro de fotos (TELINHA_SHOTS=pasta) ---------------- */
+
+/// Passa pelos estados principais com o motor de mentira e salva uma foto de
+/// cada um, para revisar o visual sem clicar.
+fn shots(dir: PathBuf) {
+    let _ = std::fs::create_dir_all(&dir);
+    type Step = (&'static str, u64, fn(&mut Controller));
+    let steps: Vec<Step> = vec![
+        ("bolha", 500, |_| {}),
+        ("menu", 700, |c| c.open_panel(Panel::Menu)),
+        ("entrar", 700, |c| {
+            c.join_text = "4821".into();
+            c.open_panel(Panel::Join);
+        }),
+        ("no-canal", 1800, |c| c.join_submit()),
+        ("menu-canal", 700, |c| c.open_panel(Panel::Menu)),
+        ("ao-vivo", 1200, |c| {
+            let quality = c.config.quality;
+            c.send(Command::StartLive { quality, discord: None });
+            c.close_panel();
+        }),
+        ("menu-ao-vivo", 700, |c| c.open_panel(Panel::Menu)),
+        ("qualidade", 800, |c| c.open_panel(Panel::Quality)),
+        ("qualidade-nitidez", 700, |c| {
+            c.config.quality.priority = Priority::Nitidez;
+            c.quality_changed();
+        }),
+        ("discord", 800, |c| c.open_panel(Panel::Discord)),
+        ("meio-da-troca", 90, |c| c.open_panel(Panel::Menu)),
+        ("fechado", 900, |c| c.close_panel()),
+        ("abrindo", 70, |c| c.open_panel(Panel::Menu)),
+    ];
+    let steps = Rc::new(steps);
+    fn next(dir: Rc<PathBuf>, steps: Rc<Vec<Step>>, i: usize) {
+        let Some(&(name, wait, act)) = steps.get(i) else {
+            let _ = slint::quit_event_loop();
+            return;
+        };
+        with(act);
+        slint::Timer::single_shot(Duration::from_millis(wait), move || {
+            with(|c| {
+                if let Ok(img) = c.ui.window().take_snapshot() {
+                    let (w, h) = (img.width(), img.height());
+                    if let Some(png) = image::RgbaImage::from_raw(w, h, img.as_bytes().to_vec()) {
+                        let _ = png.save(dir.join(format!("{i:02}-{name}.png")));
+                    }
+                }
+            });
+            next(dir, steps, i + 1);
+        });
+    }
+    let dir = Rc::new(dir);
+    slint::Timer::single_shot(Duration::from_millis(300), move || next(dir, steps, 0));
+}
