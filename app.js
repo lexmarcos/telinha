@@ -241,6 +241,7 @@ function wirePeer(peer) {
     state.incoming.get(call.peer)?.close();
     state.incoming.set(call.peer, call);
     call.answer();
+    tuneReceiver(call.peerConnection, call.metadata?.codec);
     call.on("stream", (stream) => {
       const name = call.metadata?.name || state.members.get(call.peer)?.name || "Alguém";
       addStream(call.peer, stream, name, false);
@@ -316,6 +317,7 @@ async function startShare() {
   const video = stream.getVideoTracks()[0];
   if ("contentHint" in video) video.contentHint = "motion";
   video.addEventListener("ended", stopShare);
+  state.codec = await hardwareCodec(video);
 
   state.localStream = stream;
   addStream(state.peer.id, stream, "Você", true);
@@ -346,13 +348,59 @@ function announceSharing(on) {
 }
 
 function callMember(id) {
-  const call = state.peer.call(id, state.localStream, { metadata: { name: state.name } });
+  const call = state.peer.call(id, state.localStream, { metadata: { name: state.name, codec: state.codec } });
   if (!call) return;
   state.outgoing.set(id, call);
   const end = () => { if (state.outgoing.get(id) === call) state.outgoing.delete(id); };
   call.on("close", end);
   call.on("error", end);
   tuneSender(call.peerConnection);
+}
+
+/* ---------------- Latência (ideias do Sunshine/Moonlight) ----------------
+ *
+ * - Codificador de hardware: o Sunshine usa NVENC/QuickSync/VAAPI. Aqui quem
+ *   transmite descobre qual codec a placa de vídeo codifica (powerEfficient) e
+ *   avisa quem assiste, que põe esse codec na frente da resposta.
+ * - Sem colchão no receptor: o Moonlight mostra o quadro assim que decodifica.
+ *   Pedimos ao navegador o menor buffer de espera possível. */
+
+async function hardwareCodec(track) {
+  if (!navigator.mediaCapabilities?.encodingInfo) return null;
+  const { width = 1920, height = 1080 } = track.getSettings();
+  const candidates = [
+    ["video/H264", "video/H264;level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"],
+    ["video/VP9", "video/VP9"],
+    ["video/AV1", "video/AV1"],
+  ];
+  for (const [mime, contentType] of candidates) {
+    try {
+      const info = await navigator.mediaCapabilities.encodingInfo({
+        type: "webrtc",
+        video: { contentType, width, height, bitrate: MAX_BITRATE, framerate: 60 },
+      });
+      if (info.supported && info.powerEfficient) return mime;
+    } catch {}
+  }
+  return null;
+}
+
+function tuneReceiver(pc, codec) {
+  if (!pc) return;
+  pc.addEventListener("track", ({ receiver, transceiver }) => {
+    try {
+      if ("jitterBufferTarget" in receiver) receiver.jitterBufferTarget = 0;
+      else receiver.playoutDelayHint = 0;
+    } catch {}
+    if (codec && receiver.track.kind === "video" && transceiver.setCodecPreferences) {
+      const all = RTCRtpReceiver.getCapabilities("video")?.codecs ?? [];
+      const rank = (c) => c.mimeType !== codec ? 2 : /packetization-mode=1/.test(c.sdpFmtpLine ?? "") || codec !== "video/H264" ? 0 : 1;
+      const sorted = [...all].sort((a, b) => rank(a) - rank(b));
+      if (sorted.length && rank(sorted[0]) < 2) {
+        try { transceiver.setCodecPreferences(sorted); } catch {}
+      }
+    }
+  });
 }
 
 // Sobe o teto de bitrate do vídeo (o padrão do navegador deixa texto borrado).
