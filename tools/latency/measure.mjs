@@ -3,6 +3,10 @@
 //
 //   node measure.mjs --app <dir> [--server dominio] [--seconds 20] [--relay] [--turbo] [--label name] [--warmup 3] [--headed]
 //
+// --nativo <binário> põe o app nativo (native/) no lugar do Chrome que transmite: ele
+// entra no canal pelo link e manda a tela de teste dele (mesma grade de horário).
+// Precisa de --server. Ex.: --nativo ../../native/target/release/telinha
+//
 // --server aponta o app para o servidor de sinalização/TURN (deploy/). Sem ele,
 // o app servido em localhost usa o PeerJS público, só com STUN, e --relay não conecta.
 //
@@ -44,11 +48,12 @@ import puppeteer from "puppeteer";
 /* ---------------- args ---------------- */
 
 const argv = process.argv.slice(2);
-const opt = { app: null, server: null, seconds: 20, relay: false, turbo: false, label: null, warmup: 3, headed: false, retries: 3 };
+const opt = { app: null, server: null, native: null, seconds: 20, relay: false, turbo: false, label: null, warmup: 3, headed: false, retries: 3 };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--app") opt.app = argv[++i];
   else if (a === "--server") opt.server = argv[++i];
+  else if (a === "--nativo") opt.native = argv[++i];
   else if (a === "--seconds") opt.seconds = Number(argv[++i]);
   else if (a === "--warmup") opt.warmup = Number(argv[++i]);
   else if (a === "--label") opt.label = argv[++i];
@@ -56,6 +61,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--turbo") opt.turbo = true; // modo "atraso mínimo" (WebCodecs) do app
   else if (a === "--headed") opt.headed = true;
   else if (a === "--retries") opt.retries = Number(argv[++i]);
+  else if (a === "--foto") opt.photo = argv[++i]; // salva o último quadro que chegou (PNG, tamanho real)
   else { console.error(`unknown arg ${a}`); process.exit(2); }
 }
 if (!opt.app) { console.error("usage: node measure.mjs --app <dir> [--seconds 20] [--relay] [--label name]"); process.exit(2); }
@@ -396,6 +402,7 @@ let exitCode = 0;
 const hardTimeout = setTimeout(() => { log("hard timeout"); exitCode = 1; cleanup().then(() => process.exit(1)); }, (opt.seconds + opt.warmup + 90 * opt.retries + 60) * 1000);
 
 async function cleanup() {
+  try { nativeProc?.kill("SIGINT"); } catch {}
   try { await browser.close(); } catch {}
   try { server.close(); } catch {}
 }
@@ -437,6 +444,28 @@ async function mkPage(name, { sender }) {
   return p;
 }
 
+/* App nativo como quem transmite: os números do lado dele não existem na página. */
+let nativeProc = null;
+async function nativeSender(viewer, code) {
+  const { spawn } = await import("node:child_process");
+  if (!opt.server) throw new Error("--nativo precisa de --server");
+  nativeProc = spawn(opt.native, ["--entrar", `https://${opt.server}/#${code}`, "--segundos", String(opt.seconds + opt.warmup + 90)], {
+    env: { TELINHA_FONTE_TESTE: "1", ...process.env, TELINHA_NOME: "Nativo" },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  const nativeLog = process.env.NATIVO_LOG ? (await import("node:fs")).createWriteStream(process.env.NATIVO_LOG) : null;
+  nativeProc.stderr.on("data", (d) => nativeLog?.write(d));
+  nativeProc.stderr.on("data", (d) => { const t = d.toString().replace(/\x1b\[[0-9;]*m/g, ""); if (/escolhido|ERROR|WARN/.test(t)) log("nativo:", t.trim().slice(0, 160)); });
+  await viewer.waitForFunction(() => {
+    const v = document.querySelector("#feature");
+    return v.videoWidth > 0 && v.readyState >= 2;
+  }, { timeout: 30000, polling: 200 });
+  log("viewer receiving video from native app");
+  await viewer.evaluate(startDecoder);
+  await viewer.waitForFunction(() => window.__lat.firstOkAt > 0, { timeout: 15000, polling: 100 });
+  return { evaluate: async (fn) => (fn === snapshotStats ? { inbound: [], outbound: [], sources: [], pairs: [] } : null) };
+}
+
 async function setup() {
   const checkFallback = () => { if (attemptState.fallback) throw new Error(`app fell back off the signaling server (${attemptState.fallback})`); };
   // A: creates the channel, watches.
@@ -447,6 +476,8 @@ async function setup() {
   const code = await viewer.$eval("#channelDigits", (e) => e.textContent);
   checkFallback();
   log("channel", code);
+
+  if (opt.native) return { viewer, sender: await nativeSender(viewer, code) };
 
   // B: guest, joins by code, shares.
   const sender = await mkPage("Sender", { sender: true });
@@ -519,6 +550,16 @@ try {
   const vs1 = await viewer.evaluate(snapshotStats);
   const ss1 = await sender.evaluate(snapshotStats);
   const drawn = await sender.evaluate(() => window.__sender);
+  if (opt.photo) {
+    const png = await viewer.evaluate(() => {
+      const v = document.getElementById("feature");
+      const c = document.createElement("canvas"); c.width = v.videoWidth; c.height = v.videoHeight;
+      c.getContext("2d").drawImage(v, 0, 0);
+      return c.toDataURL("image/png").split(",")[1];
+    });
+    (await import("node:fs")).writeFileSync(opt.photo, Buffer.from(png, "base64"));
+    log("foto:", opt.photo);
+  }
 
   const in0 = pickVideo(vs0.inbound, "framesDecoded"), in1 = pickVideo(vs1.inbound, "framesDecoded");
   const out0 = pickVideo(ss0.outbound, "framesEncoded"), out1 = pickVideo(ss1.outbound, "framesEncoded");
