@@ -282,6 +282,65 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .dock-share.live { background: var(--tally); color: #fff; }
 .dock-share.live:hover { background: #ff5a4f; }
 
+/* Qualidade: botão no dock + painel que nasce dele */
+.quality-btn {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  height: 3rem; padding: 0 1rem 0 0.85rem; border: 0; border-radius: 999px;
+  background: rgba(200, 212, 255, 0.08); color: var(--text);
+  font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.005em;
+  transition: transform 120ms ease-out, background-color 160ms ease;
+}
+.quality-btn:hover, .quality-btn[aria-expanded="true"] { background: rgba(200, 212, 255, 0.16); }
+.quality-btn:active { transform: scale(0.95); transition-duration: 60ms; }
+
+.quality {
+  position: fixed; z-index: 5;
+  width: min(21rem, calc(100vw - 1.5rem));
+  padding: 1.1rem 1rem 1rem; border-radius: 24px;
+  background: rgba(16, 23, 56, 0.86);
+  -webkit-backdrop-filter: blur(32px) saturate(180%); backdrop-filter: blur(32px) saturate(180%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.1), 0 0 0 1px var(--line), 0 30px 70px -20px rgba(0,0,0,0.75);
+  opacity: 0; transform: translateY(10px) scale(0.92); filter: blur(6px);
+  transition: opacity 200ms ease, transform 340ms var(--ease-out), filter 260ms ease;
+  pointer-events: none;
+}
+.quality[data-open] { opacity: 1; transform: none; filter: none; pointer-events: auto; }
+.quality-title { margin: 0 0.25rem 0.85rem; font-size: 1.0625rem; font-weight: 650; letter-spacing: -0.015em; }
+.quality fieldset { margin: 0 0 0.9rem; padding: 0; border: 0; min-width: 0; }
+.quality legend { padding: 0 0.25rem; margin-bottom: 0.4rem; font-size: 0.8125rem; font-weight: 600; color: var(--muted); }
+.seg-note { margin: 0.45rem 0.25rem 0; font-size: 0.8125rem; line-height: 1.4; color: var(--muted); font-variant-numeric: tabular-nums; }
+.quality-upload {
+  margin: 0; padding: 0.7rem 0.8rem; border-radius: 14px;
+  background: rgba(200, 212, 255, 0.07);
+  font-size: 0.875rem; line-height: 1.4; font-variant-numeric: tabular-nums;
+}
+
+/* Controle segmentado: o marcador desliza até a opção escolhida */
+.seg {
+  --n: 2; --i: 0;
+  position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+  padding: 3px; border-radius: 13px; background: rgba(200, 212, 255, 0.08);
+}
+.seg-thumb {
+  position: absolute; top: 3px; bottom: 3px; left: 3px;
+  width: calc((100% - 6px) / var(--n));
+  border-radius: 10px; background: rgba(200, 212, 255, 0.2);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.1), 0 2px 8px rgba(0,0,0,0.25);
+  transform: translateX(calc(var(--i) * 100%));
+  transition: transform 340ms var(--ease-out);
+}
+.seg label {
+  position: relative; display: grid; place-items: center; height: 2.25rem;
+  border-radius: 10px; cursor: pointer;
+  font-size: 0.9375rem; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums;
+  transition: color 200ms ease, transform 120ms ease-out;
+}
+.seg label:hover { color: var(--text); }
+.seg label:active { transform: scale(0.94); transition-duration: 60ms; }
+.seg label:has(input:checked) { color: var(--text); }
+.seg label:has(input:focus-visible) { outline: 2px solid var(--phosphor); outline-offset: -2px; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+
 .people { list-style: none; margin: 0; padding: 0 0.5rem 0 0.25rem; display: flex; }
 .people li {
   width: 2.25rem; height: 2.25rem; border-radius: 50%;
@@ -342,9 +401,11 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; transition-duration: 1ms !important; }
   .tv { animation: fade 300ms ease both !important; }
+  .quality { transform: none !important; filter: none !important; transition: opacity 150ms ease !important; }
+  .seg-thumb { transition: none !important; }
 }
 @media (prefers-reduced-transparency: reduce) {
-  .stage-bar, .dock, .channel, .toast, .offair-card { background: #18214a; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .stage-bar, .dock, .channel, .toast, .offair-card, .quality { background: #18214a; -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
 @media (prefers-contrast: more) {
   :root { --line: rgba(220, 228, 255, 0.5); --muted: #b9c0e0; }

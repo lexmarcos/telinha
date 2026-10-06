@@ -30,6 +30,7 @@ const ui = {
   people: $("people"), shareBtn: $("shareBtn"), leaveBtn: $("leaveBtn"),
   offair: $("offair"), offairText: $("offairText"), offairBtn: $("offairBtn"),
   toasts: $("toasts"),
+  qualityBtn: $("qualityBtn"), qualityLabel: $("qualityLabel"), qualityPanel: $("qualityPanel"),
 };
 
 const state = {
@@ -290,6 +291,7 @@ function applyRoster(list) {
   for (const [id, s] of state.streams) if (!s.local && next.has(id)) s.name = next.get(id).name;
   renderPeople();
   renderStreams();
+  if ("open" in qp.dataset) renderQuality();
 }
 
 /* ---------------- Transmitir ---------------- */
@@ -304,7 +306,7 @@ async function startShare() {
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 60, max: 60 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      video: { frameRate: { ideal: state.quality.fps, max: 60 } }, // sem limite de tamanho: a qualidade decide
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       systemAudio: "include",
       selfBrowserSurface: "exclude",
@@ -315,11 +317,13 @@ async function startShare() {
     return;
   }
   const video = stream.getVideoTracks()[0];
-  if ("contentHint" in video) video.contentHint = "motion";
   video.addEventListener("ended", stopShare);
+  const { width = 1920, height = 1080 } = video.getSettings();
+  state.native = { width, height };
   state.codec = await hardwareCodec(video);
 
   state.localStream = stream;
+  await applyQuality();
   addStream(state.peer.id, stream, "Você", true);
   for (const id of state.members.keys()) if (id !== state.peer.id) callMember(id);
   announceSharing(true);
@@ -363,7 +367,9 @@ function callMember(id) {
  *   transmite descobre qual codec a placa de vídeo codifica (powerEfficient) e
  *   avisa quem assiste, que põe esse codec na frente da resposta.
  * - Sem colchão no receptor: o Moonlight mostra o quadro assim que decodifica.
- *   Pedimos ao navegador o menor buffer de espera possível. */
+ *   Pedimos ao navegador o menor buffer de espera possível.
+ * - Modo: fluidez mantém os quadros por segundo (jogos), nitidez mantém a
+ *   resolução (texto, código). */
 
 async function hardwareCodec(track) {
   if (!navigator.mediaCapabilities?.encodingInfo) return null;
@@ -403,21 +409,160 @@ function tuneReceiver(pc, codec) {
   });
 }
 
-// Sobe o teto de bitrate do vídeo (o padrão do navegador deixa texto borrado).
 function tuneSender(pc) {
   if (!pc) return;
-  const apply = () => {
-    for (const sender of pc.getSenders()) {
-      if (sender.track?.kind !== "video") continue;
-      const p = sender.getParameters();
-      if (!p.encodings?.length) p.encodings = [{}];
-      p.encodings[0].maxBitrate = MAX_BITRATE;
-      p.encodings[0].maxFramerate = 60;
-      sender.setParameters(p).catch(() => {});
-    }
-  };
-  pc.addEventListener("connectionstatechange", () => { if (pc.connectionState === "connected") apply(); });
+  pc.addEventListener("connectionstatechange", () => { if (pc.connectionState === "connected") applySenderParams(pc); });
 }
+
+/* ---------------- Qualidade da transmissão ---------------- */
+
+const PRIORITIES = {
+  fluidez: { hint: "motion", degradation: "maintain-framerate", note: "Mantém o movimento suave. Bom pra jogos e vídeos." },
+  nitidez: { hint: "detail", degradation: "maintain-resolution", note: "Mantém a imagem nítida. Bom pra texto e código." },
+};
+state.quality = loadQuality();
+
+function loadQuality() {
+  let q = {};
+  try { q = JSON.parse(safeGet("telinha:quality")) || {}; } catch {}
+  return {
+    res: ["720", "1080", "1440", "original"].includes(q.res) ? q.res : "1080",
+    fps: q.fps === 30 ? 30 : 60,
+    priority: PRIORITIES[q.priority] ? q.priority : PRIORITIES[safeGet("telinha:mode")] ? safeGet("telinha:mode") : "fluidez",
+  };
+}
+
+// Tamanho que vai sair, respeitando a proporção da tela capturada e nunca
+// aumentando além do original.
+function targetSize() {
+  const { width, height } = state.native ?? { width: 1920, height: 1080 };
+  const h = state.quality.res === "original" ? height : Math.min(height, Number(state.quality.res));
+  return { width: Math.round((h * width) / height / 2) * 2, height: h };
+}
+
+// Orçamento por pessoa, proporcional aos pixels por segundo (~0,065 bit por pixel).
+function targetBitrate() {
+  const { width, height } = targetSize();
+  return Math.min(20e6, Math.max(2.5e6, width * height * state.quality.fps * 0.065));
+}
+
+async function applyQuality() {
+  const video = state.localStream?.getVideoTracks()[0];
+  if (video) {
+    const { width, height } = targetSize();
+    try { await video.applyConstraints({ width: { max: width }, height: { max: height }, frameRate: { max: state.quality.fps } }); } catch {}
+    if ("contentHint" in video) video.contentHint = PRIORITIES[state.quality.priority].hint;
+  }
+  for (const call of state.outgoing.values()) {
+    if (call.peerConnection?.connectionState === "connected") applySenderParams(call.peerConnection);
+  }
+  renderQuality();
+}
+
+function applySenderParams(pc) {
+  const { height } = targetSize();
+  for (const sender of pc.getSenders()) {
+    if (sender.track?.kind !== "video") continue;
+    const p = sender.getParameters();
+    if (!p.encodings?.length) p.encodings = [{}];
+    const captured = sender.track.getSettings().height || height;
+    p.encodings[0].maxBitrate = Math.round(targetBitrate());
+    p.encodings[0].maxFramerate = state.quality.fps;
+    p.encodings[0].scaleResolutionDownBy = Math.max(1, captured / height); // se a captura não aceitou reduzir
+    p.degradationPreference = PRIORITIES[state.quality.priority].degradation;
+    sender.setParameters(p).catch(() => {
+      delete p.degradationPreference; // nem todo navegador aceita
+      sender.setParameters(p).catch(() => {});
+    });
+  }
+}
+
+function setQuality(change) {
+  Object.assign(state.quality, change);
+  safeSet("telinha:quality", JSON.stringify(state.quality));
+  applyQuality();
+}
+
+/* Painel: nasce do botão e volta pra ele */
+
+const qp = ui.qualityPanel;
+const segs = { res: $("resSeg"), fps: $("fpsSeg"), priority: $("prioSeg") };
+
+function renderSeg(el, key, options, current = String(state.quality[key])) {
+  const index = Math.max(0, options.findIndex((o) => String(o.value) === current));
+  el.style.setProperty("--n", options.length);
+  el.style.setProperty("--i", index);
+  const signature = options.map((o) => o.value + o.label).join("|");
+  if (el.dataset.signature !== signature) {
+    el.dataset.signature = signature;
+    el.replaceChildren(Object.assign(document.createElement("span"), { className: "seg-thumb" }));
+    for (const o of options) {
+      const label = document.createElement("label");
+      const input = Object.assign(document.createElement("input"), { type: "radio", name: `q-${key}`, value: o.value });
+      input.addEventListener("change", () => setQuality({ [key]: typeof state.quality[key] === "number" ? Number(o.value) : String(o.value) }));
+      label.append(input, o.label);
+      el.append(label);
+    }
+  }
+  for (const input of el.querySelectorAll("input")) input.checked = input.value === String(options[index].value);
+}
+
+function renderQuality() {
+  const native = state.native ?? { width: 1920, height: 1080 };
+  const { width, height } = targetSize();
+  const resOptions = [720, 1080, 1440]
+    .filter((h) => h < native.height)
+    .map((h) => ({ value: String(h), label: `${h}p` }));
+  resOptions.push({ value: "original", label: "Original" });
+  // escolha salva maior que a tela atual vira "Original" na tela
+  const shownRes = resOptions.some((o) => o.value === state.quality.res) ? state.quality.res : "original";
+  renderSeg(segs.res, "res", resOptions, shownRes);
+  renderSeg(segs.fps, "fps", [{ value: 30, label: "30" }, { value: 60, label: "60" }]);
+  renderSeg(segs.priority, "priority", [{ value: "fluidez", label: "Fluidez" }, { value: "nitidez", label: "Nitidez" }]);
+
+  $("resNote").textContent = `Sua tela: ${native.width}×${native.height}. Saindo em ${width}×${height}.`;
+  $("prioNote").textContent = PRIORITIES[state.quality.priority].note;
+  const mbps = (n) => n.toLocaleString("pt-BR", { maximumFractionDigits: 1 });
+  const viewers = Math.max(0, state.members.size - 1);
+  const perPerson = Math.round(targetBitrate() / 1e5) / 10; // em Mb/s, já arredondado
+
+  $("qualityUpload").textContent = viewers > 1
+    ? `Até ${mbps(perPerson)} Mb/s de upload por pessoa. Com ${viewers} pessoas assistindo, até ${mbps(perPerson * viewers)} Mb/s.`
+    : `Até ${mbps(perPerson)} Mb/s de upload por pessoa assistindo.`;
+  ui.qualityLabel.textContent = `${height}p${state.quality.fps}`;
+}
+
+function openQuality(viaKeyboard) {
+  renderQuality();
+  qp.hidden = false;
+  const b = ui.qualityBtn.getBoundingClientRect();
+  const w = qp.offsetWidth;
+  const left = Math.min(Math.max(12, b.left + b.width / 2 - w / 2), innerWidth - w - 12);
+  qp.style.left = `${left}px`;
+  qp.style.bottom = `${innerHeight - b.top + 10}px`;
+  qp.style.transformOrigin = `${b.left + b.width / 2 - left}px 100%`;
+  qp.getBoundingClientRect(); // fixa o estado inicial antes da transição
+  qp.dataset.open = "";
+  ui.qualityBtn.setAttribute("aria-expanded", "true");
+  if (viaKeyboard) qp.querySelector("input:checked")?.focus();
+}
+
+function closeQuality(returnFocus) {
+  if (!("open" in qp.dataset)) return;
+  delete qp.dataset.open;
+  ui.qualityBtn.setAttribute("aria-expanded", "false");
+  if (returnFocus) ui.qualityBtn.focus();
+}
+
+qp.addEventListener("transitionend", (e) => {
+  if (e.target === qp && e.propertyName === "opacity" && !("open" in qp.dataset)) qp.hidden = true;
+});
+ui.qualityBtn.addEventListener("click", (e) => ("open" in qp.dataset ? closeQuality() : openQuality(e.detail === 0)));
+document.addEventListener("pointerdown", (e) => {
+  if ("open" in qp.dataset && !qp.contains(e.target) && !ui.qualityBtn.contains(e.target)) closeQuality();
+});
+qp.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); closeQuality(true); } });
+addEventListener("resize", () => closeQuality());
 
 function renderShareButton() {
   const live = !!state.localStream;
@@ -425,6 +570,8 @@ function renderShareButton() {
   ui.shareBtn.querySelector("use").setAttribute("href", live ? "#i-stop" : "#i-screen");
   ui.shareBtn.querySelector("span").textContent = live ? "Parar de transmitir" : "Compartilhar tela";
   ui.shareBtn.setAttribute("aria-label", live ? "Parar de transmitir" : "Compartilhar tela");
+  ui.qualityBtn.hidden = !live;
+  if (!live) closeQuality();
 }
 
 /* ---------------- Telas na sala ---------------- */
