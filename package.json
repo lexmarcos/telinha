@@ -1,0 +1,7 @@
+{
+  "name": "telinha",
+  "private": true,
+  "scripts": {
+    "dev": "bun server.ts"
+  }
+}

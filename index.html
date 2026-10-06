@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1430">
+  <title>Telinha</title>
+  <meta name="description" content="Compartilhe a tela com os amigos direto pelo navegador.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='6' width='26' height='18' rx='5' fill='%23cfe0ff'/%3E%3Ccircle cx='24' cy='11' r='2.4' fill='%23ff4438'/%3E%3Crect x='11' y='26' width='10' height='2.4' rx='1.2' fill='%23cfe0ff'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Doto:wght@700;900&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-screen" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="12.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 13.5V8m0 0-2.4 2.4M12 8l2.4 2.4M8.5 20h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="12.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="9.5" y="8.2" width="5" height="5" rx="1" fill="currentColor"/><path d="M8.5 20h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-leave" viewBox="0 0 24 24"><path d="M14 4.5h3.5a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H14M10 8l-4 4 4 4M6 12h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-full" viewBox="0 0 24 24"><path d="M4.5 9V5.5a1 1 0 0 1 1-1H9M15 4.5h3.5a1 1 0 0 1 1 1V9M19.5 15v3.5a1 1 0 0 1-1 1H15M9 19.5H5.5a1 1 0 0 1-1-1V15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-pip" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="12" y="11.5" width="6" height="4.5" rx="1" fill="currentColor"/></symbol>
+  <symbol id="i-sound" viewBox="0 0 24 24"><path d="M4.5 9.5h3l4-3.5v12l-4-3.5h-3z" fill="currentColor"/><path d="M15 9a4.2 4.2 0 0 1 0 6M17.5 6.5a7.8 7.8 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4.5 9.5h3l4-3.5v12l-4-3.5h-3z" fill="currentColor"/><path d="m15.5 9.5 5 5m0-5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+</svg>
+
+<!-- Entrada -->
+<main id="lobby" class="lobby">
+  <header class="brand">
+    <h1>Telinha</h1>
+    <p>Compartilhe a tela com os amigos. Sem conta, sem instalar nada.</p>
+  </header>
+
+  <div class="tv" id="tv">
+    <canvas class="tv-static" id="static" width="160" height="100" aria-hidden="true"></canvas>
+    <div class="tv-glass" aria-hidden="true"></div>
+    <label class="osd" for="code">
+      <span class="osd-word">Canal</span>
+      <input id="code" class="osd-digits" inputmode="numeric" pattern="[0-9]*" maxlength="4"
+             autocomplete="off" spellcheck="false" placeholder="----" aria-describedby="tvHint">
+    </label>
+    <p class="tv-hint" id="tvHint">Digite o número do canal que te mandaram</p>
+  </div>
+
+  <form class="controls" id="controls" novalidate>
+    <label class="field">
+      <span>Seu nome</span>
+      <input id="name" maxlength="24" autocomplete="nickname" placeholder="Como os amigos te chamam">
+    </label>
+    <div class="actions">
+      <button class="btn btn-primary" id="tune" type="submit" disabled>Sintonizar</button>
+      <button class="btn btn-quiet" id="create" type="button">Abrir um canal novo</button>
+    </div>
+    <p class="error" id="lobbyError" role="alert" hidden></p>
+  </form>
+
+  <p class="footnote">A imagem vai direto de quem transmite pra quem assiste, criptografada.</p>
+</main>
+
+<!-- Sala -->
+<section id="room" class="room" hidden aria-label="Canal">
+  <div class="stage" id="stage">
+    <video id="feature" class="feature" autoplay playsinline></video>
+
+    <div class="empty" id="empty">
+      <p class="empty-digits" id="emptyDigits">0000</p>
+      <h2>Ninguém está transmitindo</h2>
+      <p>Compartilhe sua tela ou mande o convite pra galera entrar.</p>
+      <button class="btn btn-quiet" type="button" data-action="invite">
+        <svg><use href="#i-link"/></svg>Copiar convite
+      </button>
+    </div>
+
+    <button class="unmute" id="unmute" type="button" hidden>
+      <svg><use href="#i-sound"/></svg>Ativar o som
+    </button>
+
+    <div class="stage-bar" id="stageBar" hidden>
+      <span class="live-chip"><i class="tally"></i><span id="featureName"></span></span>
+      <div class="stage-tools">
+        <label class="volume" id="volumeWrap">
+          <button class="icon-btn" id="muteBtn" type="button" aria-label="Silenciar">
+            <svg><use href="#i-sound"/></svg>
+          </button>
+          <input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
+        </label>
+        <button class="icon-btn" id="pipBtn" type="button" aria-label="Janela flutuante" title="Janela flutuante">
+          <svg><use href="#i-pip"/></svg>
+        </button>
+        <button class="icon-btn" id="fullBtn" type="button" aria-label="Tela cheia" title="Tela cheia (F)">
+          <svg><use href="#i-full"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <ul class="strip" id="strip" aria-label="Transmissões"></ul>
+
+  <div class="channel" title="Número do canal">
+    <span class="channel-word">Canal</span>
+    <span class="channel-digits" id="channelDigits">0000</span>
+  </div>
+
+  <nav class="dock" aria-label="Controles">
+    <ul class="people" id="people" aria-label="Quem está no canal"></ul>
+    <button class="btn btn-primary dock-share" id="shareBtn" type="button">
+      <svg><use href="#i-screen"/></svg><span>Compartilhar tela</span>
+    </button>
+    <button class="icon-btn icon-btn-lg" type="button" data-action="invite" aria-label="Copiar convite" title="Copiar convite">
+      <svg><use href="#i-link"/></svg>
+    </button>
+    <button class="icon-btn icon-btn-lg icon-btn-leave" id="leaveBtn" type="button" aria-label="Sair do canal" title="Sair do canal">
+      <svg><use href="#i-leave"/></svg>
+    </button>
+  </nav>
+
+  <div class="offair" id="offair" hidden>
+    <div class="offair-card" role="alertdialog" aria-labelledby="offairTitle">
+      <h2 id="offairTitle">O canal saiu do ar</h2>
+      <p id="offairText">Quem abriu o canal fechou a página ou perdeu a conexão.</p>
+      <button class="btn btn-primary" type="button" id="offairBtn">Voltar ao início</button>
+    </div>
+  </div>
+</section>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+<script src="app.js" type="module"></script>
+</body>
+</html>
