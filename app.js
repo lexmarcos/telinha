@@ -222,7 +222,8 @@ async function openPeer(id) {
 
 function connectTo(peer, id, metadata) {
   return new Promise((resolve, reject) => {
-    const conn = peer.connect(id, { metadata, reliable: true });
+    // JSON (e não o BinaryPack padrão) para o app nativo também entender quando for o anfitrião.
+    const conn = peer.connect(id, { metadata, reliable: true, serialization: "json" });
     const timer = setTimeout(() => reject({ type: "timeout" }), 15000);
     const onErr = (err) => { clearTimeout(timer); reject(err); };
     peer.once("error", onErr);
