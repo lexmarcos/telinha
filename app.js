@@ -11,6 +11,8 @@
 // servidor público do PeerJS, só com STUN. Para testar localmente contra o
 // servidor, abra com ?servidor=dominio.do.servidor.
 
+import { createStatsPanel } from "./stats.js";
+
 const SERVER = new URLSearchParams(location.search).get("servidor")
   ?? (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) ? null : location.host);
 const PREFIX = "telinha-canal-v1-";
@@ -488,6 +490,17 @@ ui.unmute.addEventListener("click", () => {
   renderMute();
 });
 
+const statsBtn = $("statsBtn");
+const stats = createStatsPanel({
+  container: ui.stage,
+  getConnections: () => [
+    ...[...state.incoming].map(([peerId, call]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "in", pc: call.peerConnection })),
+    ...[...state.outgoing].map(([peerId, call]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "out", pc: call.peerConnection })),
+  ].filter((c) => c.pc),
+});
+statsBtn.addEventListener("click", () => stats.toggle());
+ui.stage.addEventListener("statstoggle", (e) => statsBtn.setAttribute("aria-pressed", String(e.detail.open)));
+
 ui.fullBtn.addEventListener("click", toggleFullscreen);
 ui.feature.addEventListener("dblclick", toggleFullscreen);
 function toggleFullscreen() {
@@ -503,6 +516,7 @@ ui.pipBtn.addEventListener("click", async () => {
 document.addEventListener("keydown", (e) => {
   if (!state.inRoom || e.target.matches("input") || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === "f" || e.key === "F") toggleFullscreen();
+  if (e.key === "i" || e.key === "I") stats.toggle();
 });
 
 // Esconde a barra da transmissão quando o mouse fica parado sobre a tela.
