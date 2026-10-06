@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Glass-to-glass latency harness for Telinha.
 //
-//   node measure.mjs --app <dir> [--server dominio] [--seconds 20] [--relay] [--label name] [--warmup 3] [--headed]
+//   node measure.mjs --app <dir> [--server dominio] [--seconds 20] [--relay] [--turbo] [--label name] [--warmup 3] [--headed]
 //
 // --server aponta o app para o servidor de sinalização/TURN (deploy/). Sem ele,
 // o app servido em localhost usa o PeerJS público, só com STUN, e --relay não conecta.
@@ -44,7 +44,7 @@ import puppeteer from "puppeteer";
 /* ---------------- args ---------------- */
 
 const argv = process.argv.slice(2);
-const opt = { app: null, server: null, seconds: 20, relay: false, label: null, warmup: 3, headed: false, retries: 3 };
+const opt = { app: null, server: null, seconds: 20, relay: false, turbo: false, label: null, warmup: 3, headed: false, retries: 3 };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--app") opt.app = argv[++i];
@@ -53,6 +53,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--warmup") opt.warmup = Number(argv[++i]);
   else if (a === "--label") opt.label = argv[++i];
   else if (a === "--relay") opt.relay = true;
+  else if (a === "--turbo") opt.turbo = true; // modo "atraso mínimo" (WebCodecs) do app
   else if (a === "--headed") opt.headed = true;
   else if (a === "--retries") opt.retries = Number(argv[++i]);
   else { console.error(`unknown arg ${a}`); process.exit(2); }
@@ -416,6 +417,10 @@ async function mkPage(name, { sender }) {
   await p.setViewport({ width: 1280, height: 800 });
   await p.evaluateOnNewDocument(installPcWrapper, opt.relay);
   if (sender) await p.evaluateOnNewDocument(installFakeScreen);
+  // mesma qualidade nos dois modos, para comparar só o transporte
+  await p.evaluateOnNewDocument((turbo) => {
+    try { localStorage.setItem("telinha:quality", JSON.stringify({ res: "original", fps: 60, priority: "fluidez", turbo })); } catch {}
+  }, opt.turbo);
   p.on("console", (m) => { if (m.type() === "error" || m.type() === "warn") log(name, m.type(), m.text()); });
   p.on("pageerror", (e) => log(name, "PAGEERROR", e.message));
   await p.goto(URL_, { waitUntil: "load" });
@@ -540,6 +545,7 @@ try {
     jitterBufferMsPerFrame: dEmit > 0 ? r1((dJb / dEmit) * 1000) : null,
     qualityLimitationReason: out1?.qualityLimitationReason ?? null,
     relay: opt.relay,
+    turbo: opt.turbo,
     // extras
     extra: {
       presentedFps: r1(S.length / elapsed),
