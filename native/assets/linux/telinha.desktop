@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Telinha
+Comment=Transmita sua tela para os amigos com baixa latência
+Exec=telinha
+Icon=telinha
+Categories=AudioVideo;Network;
+StartupWMClass=telinha
+Terminal=false

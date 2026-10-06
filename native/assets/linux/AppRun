@@ -1,0 +1,4 @@
+#!/bin/sh
+# AppImage: o binário acha o FFmpeg e a libva em usr/lib/telinha (rpath).
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/bin/telinha" "$@"
