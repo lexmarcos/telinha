@@ -9,6 +9,9 @@ const PORT = 9000;
 const SECRET = process.env.TURN_SECRET;
 const TURN_HOST = process.env.TURN_HOST;
 const CRED_TTL = 24 * 3600;
+// TURN over TLS (port 5349) needs coturn to have the site's certificate; the
+// all-in-one setup (setup.sh) runs without it.
+const TURN_TLS = process.env.TURN_TLS !== "off";
 if (!SECRET || !TURN_HOST) throw new Error("set TURN_SECRET and TURN_HOST in .env");
 
 const app = express();
@@ -38,7 +41,7 @@ app.get("/api/ice", (req, res) => {
         urls: [
           `turn:${TURN_HOST}:3478?transport=udp`,
           `turn:${TURN_HOST}:3478?transport=tcp`,
-          `turns:${TURN_HOST}:5349?transport=tcp`,
+          ...(TURN_TLS ? [`turns:${TURN_HOST}:5349?transport=tcp`] : []),
         ],
         username,
         credential,
@@ -47,8 +50,8 @@ app.get("/api/ice", (req, res) => {
   });
 });
 
-// Discord bot (bot/), which runs on another machine and arrives through an SSH tunnel.
-// BOT_URL in .env (e.g. http://172.18.0.1:8790); without it, /discord does not exist.
+// Discord bot (bot/), wherever it runs: BOT_URL in .env is its address as seen
+// from this container (e.g. http://bot:8790); without it, /discord does not exist.
 // The body passes through untouched: the bot verifies Discord's signature over the bytes.
 const BOT_URL = process.env.BOT_URL;
 if (BOT_URL) {

@@ -1,9 +1,9 @@
-# Bloco para o Caddyfile do proxy reverso (o serviço `telinha` está na rede dele).
-# Troque seu-dominio.com pelo valor de TURN_HOST.
-seu-dominio.com {
+# Block for your reverse proxy's Caddyfile (the `telinha` service is on its network).
+# Replace example.com with your TURN_HOST.
+example.com {
 	reverse_proxy telinha:9000
 }
 
-www.seu-dominio.com {
-	redir https://seu-dominio.com{uri} permanent
+www.example.com {
+	redir https://example.com{uri} permanent
 }

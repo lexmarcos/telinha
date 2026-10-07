@@ -12,7 +12,8 @@
 // forwards /discord/* here.
 //
 // Variables (.env alongside): DISCORD_TOKEN, DISCORD_PUBLIC_KEY,
-// DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, TELINHA_HOST (the domain), PORT.
+// DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, TELINHA_HOST (the domain), PORT,
+// and optionally BIND (listen address, 0.0.0.0 inside Docker) and DATA_FILE.
 
 const env = (k: string) => {
   const v = Deno.env.get(k)?.trim();
@@ -25,7 +26,7 @@ const CLIENT_ID = env("DISCORD_CLIENT_ID");
 const CLIENT_SECRET = env("DISCORD_CLIENT_SECRET");
 const HOST = env("TELINHA_HOST");
 const PORT = Number(Deno.env.get("PORT") ?? 8790);
-const DATA = new URL("./dados.json", import.meta.url);
+const DATA = new URL(Deno.env.get("DATA_FILE") ?? "./dados.json", import.meta.url);
 const REDIRECT = `https://${HOST}/discord/login/volta`;
 const API = "https://discord.com/api/v10";
 const PASS_HOURS = 12;
@@ -73,7 +74,7 @@ const pending = new Map<string, { session?: string; at: number }>();
 
 /* ---------------- server ---------------- */
 
-Deno.serve({ port: PORT, hostname: "127.0.0.1" }, async (req) => {
+Deno.serve({ port: PORT, hostname: Deno.env.get("BIND") ?? "127.0.0.1" }, async (req) => {
   const url = new URL(req.url);
   try {
     const route = url.pathname.startsWith("/discord/assistir/") ? "/discord/assistir" : url.pathname;

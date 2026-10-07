@@ -1,0 +1,46 @@
+# All-in-one Telinha server, prepared and started by setup.sh:
+#   caddy    HTTPS for your domain (free certificate, renewed on its own)
+#   telinha  the site, signaling (/peer) and relay credentials (/api/ice)
+#   coturn   relay for friends on networks that block direct connections
+#   bot      optional Discord bot (only with COMPOSE_PROFILES=discord in .env)
+# Already have a reverse proxy? Use docker-compose.yml instead.
+name: telinha
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${TURN_HOST} --to telinha:9000
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes: [caddy_data:/data, caddy_config:/config]
+
+  telinha:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes: [./public:/srv/public:ro]
+    mem_limit: 256m
+
+  coturn:
+    image: coturn/coturn:4
+    restart: unless-stopped
+    # The relay uses thousands of ports: host networking avoids mapping them one by one.
+    network_mode: host
+    volumes: [./turnserver.generated.conf:/etc/coturn/turnserver.conf:ro]
+
+  bot:
+    profiles: [discord]
+    image: denoland/deno:2.9.7
+    restart: unless-stopped
+    working_dir: /app
+    command: run --allow-net --allow-env --allow-read --allow-write=/data main.ts
+    env_file: .env
+    environment:
+      TELINHA_HOST: ${TURN_HOST}
+      BIND: 0.0.0.0
+      DATA_FILE: /data/dados.json
+    volumes: [../bot:/app:ro, bot_data:/data]
+
+volumes:
+  caddy_data:
+  caddy_config:
+  bot_data:
