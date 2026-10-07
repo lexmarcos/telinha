@@ -1,7 +1,7 @@
-// A janela da bolha: transparente, sem bordas, sempre no topo e só do tamanho
-// do conteúdo (para não roubar cliques de quem está embaixo).
+// The bubble window: transparent, borderless, always on top and only as big
+// as its content (so it does not steal clicks from what is underneath).
 //
-// O app (Rust) cuida das molas e da posição; aqui fica só o desenho.
+// The app (Rust) handles springs and position; this only does the drawing.
 
 import "../assets/fonts/Doto-Black.ttf";
 import { Palette, Size, Space, Radius, Motion } from "tokens.slint";
@@ -16,19 +16,19 @@ export { AppState, Motion, DotData, NoteTone, Face, Palette }
 
 export component Bolha inherits Window {
     in property <string> window-title: "Telinha";
-    // Molas do app.
+    // App springs.
     in property <float> open;
     in property <float> press;
     in property <float> tally;
     in property <float> content-fade: 1;
     in property <length> panel-h;
-    // Painel: qual é (1 menu, 2 qualidade, 3 entrar, 4 Discord), se ocupa a
-    // janela, de que lado da bolha e quanto de altura a janela reserva.
+    // Panel: which one (1 menu, 2 quality, 3 join, 4 Discord), whether it fills the
+    // window, which side of the bubble, and how much height the window reserves.
     in property <int> panel-kind;
     in property <bool> panel-shown;
     in property <bool> side-left;
     in property <length> hold-h;
-    // Altura natural do conteúdo do painel (o app anima a superfície até ela).
+    // Natural height of the panel content (the app animates the surface to it).
     out property <length> content-h: content.preferred-height + 2 * Size.panel-pad;
 
     callback bubble-down();
@@ -79,15 +79,16 @@ export component Bolha inherits Window {
             extra: AppState.dots-extra;
         }
 
-        // O painel nasce da bolha: cresce a partir do canto do lado dela e volta
-        // pelo mesmo caminho. Com menos animação no sistema, só a opacidade muda.
+        // The panel is born from the bubble: it grows from the corner on its side and returns
+        // the same way. With reduced motion on the system, only opacity changes.
         Rectangle {
             visible: root.panel-shown;
             x: root.side-left ? root.pad : root.pad + root.left-w + Size.panel-gap;
             y: root.pad;
             width: Size.panel-w;
             height: root.panel-h;
-            opacity: clamp(root.open, 0, 1);
+            // Opacity layer only while opening or closing (see the content below).
+            opacity: root.open < 0.999 ? clamp(root.open, 0, 1) : 1;
             transform-origin: { x: root.side-left ? self.width : 0px, y: Size.bubble / 2 };
             transform-scale: Motion.reduced ? 1 : Motion.panel-from-scale + (1 - Motion.panel-from-scale) * root.open;
 
@@ -102,7 +103,12 @@ export component Bolha inherits Window {
                         y: Size.panel-pad;
                         width: parent.width - 2 * Size.panel-pad;
                         height: self.preferred-height;
-                        opacity: root.content-fade;
+                        // The OpenGL renderer caches anything with opacity, and changing
+                        // only the opacity does not rebuild the cache: if it stayed still from the
+                        // first frame (before the panel items existed), the panel
+                        // would be empty. So the content always enters with the crossfade
+                        // (which forces a redraw) and the layer goes away when it ends.
+                        opacity: root.content-fade < 0.999 ? root.content-fade : 1;
                         if root.panel-kind == 1: MenuPanel { }
                         if root.panel-kind == 2: QualityPanel { }
                         if root.panel-kind == 3: JoinPanel { }

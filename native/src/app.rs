@@ -1,10 +1,10 @@
-//! A bolha: estado da interface, molas e a ligação com o motor, a bandeja e o
-//! Discord. O desenho fica em ui/*.slint (o design system está em DESIGN.md);
-//! aqui só se decide o que mostrar e como se mexe.
+//! The bubble: UI state, springs and the wiring to the engine, the tray and
+//! Discord. Drawing lives in ui/*.slint (the design system is in DESIGN.md);
+//! here we only decide what to show and how it moves.
 //!
-//! As animações são molas (ui/spring.rs) e não as curvas do Slint: mola começa
-//! de onde a coisa está e herda a velocidade quando muda de alvo no meio do
-//! caminho, então abrir e fechar rápido nunca pula nem "bate na parede".
+//! Animations are springs (ui/spring.rs), not Slint easing curves: a spring
+//! starts from where the thing is and keeps its velocity when the target changes
+//! mid-way, so opening and closing quickly never jumps or "hits a wall".
 
 slint::include_modules!();
 
@@ -22,12 +22,12 @@ use crate::engine::{self, Command, EncoderInfo, Event, Viewer};
 use crate::ui::motion;
 use crate::ui::spring::{Spring, reduced_motion};
 
-/// Medidas de ui/tokens.slint que o app precisa para mexer a janela.
+/// Measurements from ui/tokens.slint the app needs to move the window.
 const PANEL_W: f32 = 264.0;
 const PANEL_GAP: f32 = 10.0;
 const SHADOW_ROOM: f32 = 18.0;
 const BUBBLE: f32 = 64.0;
-/// Quanto a janela anda para a esquerda quando o painel abre desse lado.
+/// How far the window shifts left when the panel opens on that side.
 const LEFT_SHIFT: f32 = PANEL_W + PANEL_GAP;
 const FPS_OPTIONS: [u32; 2] = [30, 60];
 const DOTS_MAX: usize = 5;
@@ -72,22 +72,22 @@ struct Controller {
 
     panel: Option<Panel>,
     side_left: bool,
-    /// O painel acabou de abrir: a altura dele entra direto, sem animar,
-    /// enquanto ele ainda está quase transparente.
+    /// The panel just opened: its height is applied directly, without animating,
+    /// while it is still almost transparent.
     fresh_panel: bool,
-    /// Quando o painel trocou. O Slint só cria os itens de um painel no
-    /// primeiro desenho dele, então a medida dos primeiros instantes sai curta.
+    /// When the panel switched. Slint only creates a panel's items on its
+    /// first draw, so the measurement in the first moments comes out short.
     switched_at: Option<Instant>,
     open: Spring,
     press: Spring,
     tally: Spring,
-    /// Marcadores dos segmentados: resolução, fps, prioridade, som, perfil do
-    /// Discord e quem pode assistir.
+    /// Segmented-control indicators: resolution, fps, priority, audio, Discord
+    /// profile and who can watch.
     thumbs: [Spring; 6],
     panel_h: Spring,
     fade: Spring,
-    /// Altura que a janela reserva para o painel: durante uma troca, a maior
-    /// entre a de antes e a de depois (a janela muda duas vezes, não a cada quadro).
+    /// Height the window reserves for the panel: during a switch, the larger of
+    /// before and after (the window resizes twice, not every frame).
     hold_h: f32,
     dragging: bool,
     timer: slint::Timer,
@@ -96,8 +96,8 @@ struct Controller {
     tray: Option<crate::tray::Guard>,
     presence: tokio::sync::watch::Sender<Option<crate::discord::Presence>>,
     presence_since: (Option<(String, bool)>, i64),
-    /// A área de transferência do X11 precisa de alguém dono dela enquanto o
-    /// texto copiado estiver lá.
+    /// The X11 clipboard needs an owner while the copied text
+    /// is still there.
     clipboard: Option<arboard::Clipboard>,
 }
 
@@ -105,7 +105,7 @@ thread_local! {
     static CTRL: RefCell<Option<Controller>> = const { RefCell::new(None) };
 }
 
-/// Mexe no controlador (na thread da interface).
+/// Operates on the controller (on the UI thread).
 fn with(f: impl FnOnce(&mut Controller)) {
     CTRL.with(|c| {
         if let Some(c) = c.borrow_mut().as_mut() {
@@ -114,7 +114,7 @@ fn with(f: impl FnOnce(&mut Controller)) {
     });
 }
 
-/// Manda trabalho de outra thread (motor, bandeja, Discord) para a interface.
+/// Sends work from another thread (engine, tray, Discord) to the UI.
 fn post(f: impl FnOnce(&mut Controller) + Send + 'static) {
     let _ = slint::invoke_from_event_loop(move || with(f));
 }
@@ -170,7 +170,7 @@ pub fn run() {
     if let Some(dir) = std::env::var_os("TELINHA_SHOTS").map(PathBuf::from) {
         shots(dir);
     }
-    // A janela some na bandeja sem fechar o app: só "Fechar o Telinha" encerra.
+    // The window hides to the tray without quitting: only "Fechar o Telinha" quits.
     slint::run_event_loop_until_quit().expect("laço da interface");
 }
 
@@ -276,7 +276,7 @@ impl Controller {
     /* ---------------- a bolha ---------------- */
 
     fn bubble_down(&mut self) {
-        // Resposta no aperto, não no soltar.
+        // Respond on press, not on release.
         self.dragging = false;
         self.press.set_target(1.0);
         self.animate();
@@ -294,7 +294,7 @@ impl Controller {
         self.dragging = true;
         self.press.set_target(0.0);
         self.animate();
-        // O gerenciador de janelas arrasta: acompanha o mouse 1:1, sem atraso.
+        // The window manager drags: follows the mouse 1:1, with no lag.
         self.ui.window().with_winit_window(|w| {
             let _ = w.drag_window();
         });
@@ -321,8 +321,11 @@ impl Controller {
         self.open.set_target(1.0);
         if was_closed && self.open.value() <= 0.001 {
             self.fresh_panel = true;
-            self.fade.snap(1.0);
-            // Abre do lado que tem espaço na tela; a bolha fica parada no lugar.
+            // The content arrives right after the material (which also forces
+            // OpenGL rendering to redraw the panel; see ui/app.slint).
+            self.fade.snap(0.0);
+            self.fade.set_target(1.0);
+            // Opens on the side with room on screen; the bubble stays put.
             let (x, y) = self.bubble_position();
             let needed = 2.0 * SHADOW_ROOM + BUBBLE.max(self.dots_width()) + LEFT_SHIFT;
             self.side_left = self.monitor.is_some_and(|(w, _)| x + needed > w);
@@ -330,7 +333,7 @@ impl Controller {
                 self.set_window_position(x - LEFT_SHIFT, y);
             }
         } else if switched {
-            // Troca de painel: o conteúdo novo aparece enquanto a altura acompanha.
+            // Panel switch: the new content appears while the height follows.
             self.fade.snap(0.0);
             self.fade.set_target(1.0);
             self.switched_at = Some(Instant::now());
@@ -347,7 +350,7 @@ impl Controller {
         self.animate();
     }
 
-    /// O painel terminou de fechar: a janela volta ao tamanho da bolha.
+    /// The panel finished closing: the window goes back to the bubble size.
     fn finish_close(&mut self) {
         let (x, y) = self.bubble_position();
         self.panel = None;
@@ -358,8 +361,8 @@ impl Controller {
         self.render();
     }
 
-    /// Mede o conteúdo do painel (o Slint calcula a altura natural dele) e
-    /// anima a superfície até lá.
+    /// Measures the panel content (Slint computes its natural height) and
+    /// animates the surface to it.
     fn measure_panel(&mut self) {
         if self.panel.is_none() {
             return;
@@ -368,12 +371,12 @@ impl Controller {
         if self.fresh_panel {
             self.panel_h.snap(h);
             self.hold_h = h;
-            // Só deixa de ser "recém-aberto" quando já dá para ver o painel.
+            // Stops being "just opened" only once the panel is visible.
             if self.open.value() > 0.3 {
                 self.fresh_panel = false;
             }
         } else if self.switched_at.is_some_and(|t| t.elapsed() < Duration::from_millis(40)) {
-            // Ainda montando o painel novo: espera a medida de verdade.
+            // Still building the new panel: wait for the real measurement.
             self.animate();
         } else if (h - self.panel_h.target()).abs() > 0.5 {
             self.panel_h.set_target(h);
@@ -396,7 +399,7 @@ impl Controller {
             || self.thumbs.iter().any(Spring::is_moving)
     }
 
-    /// Liga o relógio das molas (só roda enquanto algo se mexe).
+    /// Starts the spring timer (only runs while something is moving).
     fn animate(&mut self) {
         if !self.timer.running() {
             self.timer.start(slint::TimerMode::Repeated, Duration::from_millis(8), || with(|c| c.frame()));
@@ -415,7 +418,7 @@ impl Controller {
             self.finish_close();
         }
         self.measure_panel();
-        // Troca de painel terminou: a janela encolhe para a altura nova.
+        // Panel switch done: the window shrinks to the new height.
         if !self.panel_h.is_moving() && self.hold_h > self.panel_h.target() + 0.5 && self.open.target() > 0.0 {
             self.hold_h = self.panel_h.target();
         }
@@ -439,7 +442,7 @@ impl Controller {
 
     /* ---------------- desenho ---------------- */
 
-    /// Passa o estado inteiro para a interface.
+    /// Pushes the whole state to the UI.
     fn render(&mut self) {
         let ui = &self.ui;
         let st = ui.global::<AppState>();
@@ -478,7 +481,7 @@ impl Controller {
         st.set_notice(notice.into());
         st.set_notice_tone(tone);
 
-        // Qualidade
+        // Quality
         let q = self.config.quality;
         let opts = self.resolution_options();
         let labels: Vec<SharedString> = opts.iter().map(|r| r.height().map_or("Original".into(), |h| format!("{h}p").into())).collect();
@@ -508,7 +511,7 @@ impl Controller {
         };
         st.set_upload_note(upload.into());
 
-        // Entrar
+        // Join
         if st.get_join_text().as_str() != self.join_text {
             st.set_join_text(self.join_text.clone().into());
         }
@@ -541,7 +544,7 @@ impl Controller {
         }
     }
 
-    /// Quem está assistindo, pelo nome quando são poucos (mais específico que um número).
+    /// Who is watching, by name when there are few (more specific than a count).
     fn viewers_line(&self) -> String {
         let first: Vec<&str> = self.viewers.iter().map(|v| v.name.split_whitespace().next().unwrap_or("Alguém")).collect();
         match first.as_slice() {
@@ -555,7 +558,7 @@ impl Controller {
 
     /* ---------------- janela ---------------- */
 
-    /// Posição inicial e tamanho da tela (para escolher o lado do painel).
+    /// Initial position and screen size (to pick the panel side).
     fn place(&mut self) {
         self.monitor = self
             .ui
@@ -569,7 +572,7 @@ impl Controller {
             .flatten();
         let (x, y) = match (self.config.position, self.monitor) {
             (Some(p), _) => p,
-            // Primeira vez: no alto, perto da direita.
+            // First time: at the top, near the right.
             (None, Some((w, _))) => (w - BUBBLE - 2.0 * SHADOW_ROOM - 48.0, 120.0),
             (None, None) => (200.0, 120.0),
         };
@@ -588,7 +591,7 @@ impl Controller {
         self.ui.window().set_position(slint::LogicalPosition::new(x, y));
     }
 
-    /// Onde a bolha está (com o painel aberto à esquerda, a janela começa antes dela).
+    /// Where the bubble is (with the panel open on the left, the window starts before it).
     fn bubble_position(&self) -> (f32, f32) {
         let (x, y) = self.window_position();
         if self.panel.is_some() && self.side_left { (x + LEFT_SHIFT, y) } else { (x, y) }
@@ -602,7 +605,7 @@ impl Controller {
     fn hide(&mut self) {
         self.config.position = Some(self.bubble_position());
         self.config.save();
-        // Some de uma vez: quem pede para esconder não quer ver o painel fechando.
+        // Hide at once: whoever asks to hide doesn't want to watch the panel close.
         self.open.snap(0.0);
         self.finish_close();
         let _ = self.ui.hide();
@@ -636,7 +639,7 @@ impl Controller {
         let Session::Channel { invite, .. } = &self.session else { return };
         let invite = invite.clone();
         if self.clipboard.is_none() {
-            self.clipboard = arboard::Clipboard::new().map_err(|e| tracing::warn!("área de transferência: {e}")).ok();
+            self.clipboard = arboard::Clipboard::new().map_err(|e| tracing::warn!("clipboard: {e}")).ok();
         }
         let ok = self.clipboard.as_mut().is_some_and(|c| c.set_text(invite).is_ok());
         self.notice = Some(if ok { ("Convite copiado.".into(), NoteTone::Info) } else { ("Não consegui copiar o convite.".into(), NoteTone::Error) });
@@ -705,7 +708,7 @@ impl Controller {
                 self.close_panel();
             }
             Event::Failed(msg) => {
-                tracing::warn!("falhou: {msg}");
+                tracing::warn!("failed: {msg}");
                 if self.session == Session::Connecting {
                     self.session = Session::Idle;
                 }
@@ -741,7 +744,7 @@ impl Controller {
         self.render();
     }
 
-    /// Atualiza o que o perfil do Discord mostra (só manda se mudou).
+    /// Updates what the Discord profile shows (only sends if it changed).
     fn sync_presence(&mut self) {
         let channel = match &self.session {
             Session::Channel { code, invite, live } => Some((code.clone(), invite.clone(), *live)),
@@ -813,8 +816,8 @@ fn name_hash(name: &str) -> usize {
 
 /* ---------------- roteiro de fotos (TELINHA_SHOTS=pasta) ---------------- */
 
-/// Passa pelos estados principais com o motor de mentira e salva uma foto de
-/// cada um, para revisar o visual sem clicar.
+/// Walks through the main states with a fake engine and saves a screenshot of
+/// each, to review the visuals without clicking.
 fn shots(dir: PathBuf) {
     let _ = std::fs::create_dir_all(&dir);
     type Step = (&'static str, u64, fn(&mut Controller));
