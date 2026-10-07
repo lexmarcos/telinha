@@ -52,7 +52,7 @@ if len(sys.argv) > 2:
     try:
         previous = json.load(urllib.request.urlopen(sys.argv[2], timeout=20))["versions"]
     except Exception as e:  # first release, or the server is down
-        print(f"no previous versions.json ({e})")
+        print(f"no previous versions.json ({e})", file=sys.stderr)
 versions = [release] + [v for v in previous if v["version"] != version]
 with open(os.path.join(out, "versions.json"), "w") as f:
     json.dump({"versions": versions[:KEEP]}, f, indent=1)
