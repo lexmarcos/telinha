@@ -1,7 +1,7 @@
 // Panel contents. Each one is a column; the app measures its height and animates
 // the surface to it.
 
-import { Palette, Space, Radius } from "tokens.slint";
+import { Palette, Space, Radius, Size, Type } from "tokens.slint";
 import { AppState } from "state.slint";
 import { Header, Label } from "surface.slint";
 import { MenuItem, Divider, Tone } from "menu-item.slint";
@@ -172,4 +172,50 @@ export component DiscordPanel inherits VerticalLayout {
     if AppState.discord-logged: Gap { size: Space.m; }
     if AppState.discord-logged: Pill { label: "Sair do Discord"; kind: PillKind.quiet; clicked => { AppState.discord-logout(); } }
     NoticeLine { }
+}
+
+// Toast: a short message beside the bubble that goes away on its own (or on a
+// click). Info gets a check, warnings and errors an exclamation mark.
+export component ToastPanel inherits VerticalLayout {
+    property <color> tint: AppState.toast-tone == NoteTone.warn ? Palette.warn : AppState.toast-tone == NoteTone.error ? Palette.tally : Palette.phosphor;
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { AppState.dismiss(); }
+        HorizontalLayout {
+            spacing: Space.m;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    border-radius: self.width / 2;
+                    background: root.tint.with-alpha(0.16);
+                    Image {
+                        source: AppState.toast-tone == NoteTone.info ? @image-url("icons/check.svg") : @image-url("icons/alert.svg");
+                        colorize: root.tint;
+                        width: Size.icon;
+                        height: Size.icon;
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: 2px;
+                alignment: center;
+                horizontal-stretch: 1;
+                if AppState.toast-title != "": Text {
+                    text: AppState.toast-title;
+                    font-size: Type.title;
+                    font-weight: Type.semibold;
+                    letter-spacing: Type.title-tracking;
+                    color: Palette.text;
+                }
+                Text {
+                    text: AppState.toast-text;
+                    font-size: AppState.toast-title != "" ? Type.note : Type.body;
+                    color: AppState.toast-title != "" ? Palette.muted : Palette.text;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
 }

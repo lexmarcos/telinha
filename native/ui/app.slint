@@ -9,7 +9,7 @@ import { AppState } from "state.slint";
 import { Bubble, Face } from "bubble.slint";
 import { Dots, DotData } from "dots.slint";
 import { Surface } from "surface.slint";
-import { MenuPanel, QualityPanel, JoinPanel, DiscordPanel } from "panels.slint";
+import { MenuPanel, QualityPanel, JoinPanel, DiscordPanel, ToastPanel } from "panels.slint";
 import { NoteTone } from "note.slint";
 
 export { AppState, Motion, DotData, NoteTone, Face, Palette }
@@ -23,7 +23,7 @@ export component Bolha inherits Window {
     in property <angle> spin;
     in property <float> content-fade: 1;
     in property <length> panel-h;
-    // Panel: which one (1 menu, 2 quality, 3 join, 4 Discord), whether it fills the
+    // Panel: which one (1 menu, 2 quality, 3 join, 4 Discord, 5 toast), whether it fills the
     // window, which side of the bubble, and how much height the window reserves.
     in property <int> panel-kind;
     in property <bool> panel-shown;
@@ -115,6 +115,7 @@ export component Bolha inherits Window {
                         if root.panel-kind == 2: QualityPanel { }
                         if root.panel-kind == 3: JoinPanel { }
                         if root.panel-kind == 4: DiscordPanel { }
+                        if root.panel-kind == 5: ToastPanel { }
                     }
                 }
             }

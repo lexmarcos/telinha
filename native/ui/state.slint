@@ -14,6 +14,10 @@ export global AppState {
     in property <int> dots-extra;
     in property <string> notice;
     in property <NoteTone> notice-tone;
+    // Toast beside the bubble (panel 5): what happened while no panel was open.
+    in property <string> toast-title;
+    in property <string> toast-text;
+    in property <NoteTone> toast-tone;
 
     // Quality (segmented thumbs come from springs: resolution, fps,
     // priority, sound, who can watch)
@@ -40,7 +44,8 @@ export global AppState {
     in property <string> discord-name;
     in property <int> call-sel;
 
-    callback open(int); // 1 menu, 2 quality, 3 join, 4 Discord
+    callback open(int); // 1 menu, 2 quality, 3 join, 4 Discord, 5 toast
+    callback dismiss();
     callback create();
     callback start-live();
     callback stop-live();

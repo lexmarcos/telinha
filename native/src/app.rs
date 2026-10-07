@@ -38,6 +38,8 @@ enum Panel {
     Quality = 2,
     Join = 3,
     Discord = 4,
+    /// A short message beside the bubble that closes on its own.
+    Toast = 5,
 }
 
 impl Panel {
@@ -46,6 +48,7 @@ impl Panel {
             2 => Self::Quality,
             3 => Self::Join,
             4 => Self::Discord,
+            5 => Self::Toast,
             _ => Self::Menu,
         }
     }
@@ -67,6 +70,12 @@ struct Controller {
     screen: Option<(u32, u32)>,
     monitor: Option<(f32, f32)>,
     notice: Option<(String, NoteTone)>,
+    /// Title, text and tone of the toast (panel 5).
+    toast: (String, String, NoteTone),
+    toast_timer: slint::Timer,
+    /// The current stream only lets people in the Discord call watch (the bot
+    /// announces it); otherwise the invite is copied when it starts.
+    live_gated: bool,
     join_text: String,
     joining: bool,
 
@@ -136,6 +145,9 @@ pub fn run() {
         screen: None,
         monitor: None,
         notice: None,
+        toast: (String::new(), String::new(), NoteTone::Info),
+        toast_timer: slint::Timer::default(),
+        live_gated: false,
         join_text: String::new(),
         joining: false,
         panel: None,
@@ -195,12 +207,22 @@ impl Controller {
             with(|c| {
                 let quality = c.config.quality;
                 let discord = if c.config.call_only { c.config.discord_session.clone() } else { None };
+                c.live_gated = discord.is_some();
                 c.send(Command::StartLive { quality, discord });
                 c.close_panel();
             })
         });
         st.on_stop_live(|| with(|c| c.stop_live()));
-        st.on_copy_invite(|| with(|c| c.copy_invite()));
+        st.on_copy_invite(|| {
+            with(|c| {
+                if c.copy_invite() {
+                    c.tell("Convite copiado", "", NoteTone::Info);
+                } else {
+                    c.tell("", "Não consegui copiar o convite.", NoteTone::Error);
+                }
+            })
+        });
+        st.on_dismiss(|| with(|c| c.close_panel()));
         st.on_hide(|| with(|c| c.hide()));
         st.on_leave(|| {
             with(|c| {
@@ -293,7 +315,9 @@ impl Controller {
         if std::mem::take(&mut self.dragging) {
             return;
         }
-        if self.panel.is_some() && self.open.target() > 0.0 {
+        if self.panel == Some(Panel::Toast) && self.open.target() > 0.0 {
+            self.open_panel(Panel::Menu);
+        } else if self.panel.is_some() && self.open.target() > 0.0 {
             self.close_panel();
         } else {
             self.open_panel(Panel::Menu);
@@ -329,6 +353,33 @@ impl Controller {
         }
         self.render();
         self.animate();
+    }
+
+    /// Tells the person something: inside the open panel, or in a toast
+    /// beside the bubble when no panel is open (so it is not missed).
+    fn tell(&mut self, title: &str, text: &str, tone: NoteTone) {
+        let panel_open = self.panel.is_some_and(|p| p != Panel::Toast) && self.open.target() > 0.0;
+        if panel_open {
+            let line = match (title.is_empty(), text.is_empty()) {
+                (true, _) => text.to_owned(),
+                (_, true) => format!("{title}."),
+                _ => format!("{title}. {text}"),
+            };
+            self.notice = Some((line, tone));
+            self.render();
+            return;
+        }
+        self.toast = (title.to_owned(), text.to_owned(), tone);
+        self.open_panel(Panel::Toast);
+        // Problems stay longer than good news.
+        let secs = if tone == NoteTone::Info { 4 } else { 8 };
+        self.toast_timer.start(slint::TimerMode::SingleShot, Duration::from_secs(secs), || {
+            with(|c| {
+                if c.panel == Some(Panel::Toast) {
+                    c.close_panel();
+                }
+            })
+        });
     }
 
     fn close_panel(&mut self) {
@@ -478,6 +529,10 @@ impl Controller {
         let (notice, tone) = self.notice.clone().unwrap_or((String::new(), NoteTone::Info));
         st.set_notice(notice.into());
         st.set_notice_tone(tone);
+        let (title, text, tone) = &self.toast;
+        st.set_toast_title(title.into());
+        st.set_toast_text(text.into());
+        st.set_toast_tone(*tone);
 
         // Quality
         let q = self.config.quality;
@@ -630,15 +685,17 @@ impl Controller {
         self.close_panel();
     }
 
-    fn copy_invite(&mut self) {
-        let Session::Channel { invite, .. } = &self.session else { return };
+    /// Puts the channel invite on the clipboard. `false` if it could not.
+    fn copy_invite(&mut self) -> bool {
+        let Session::Channel { invite, .. } = &self.session else { return false };
         let invite = invite.clone();
+        if std::env::var_os("TELINHA_MOCK").is_some() {
+            return true; // screenshots and tests do not touch the real clipboard
+        }
         if self.clipboard.is_none() {
             self.clipboard = arboard::Clipboard::new().map_err(|e| tracing::warn!("clipboard: {e}")).ok();
         }
-        let ok = self.clipboard.as_mut().is_some_and(|c| c.set_text(invite).is_ok());
-        self.notice = Some(if ok { ("Convite copiado.".into(), NoteTone::Info) } else { ("Não consegui copiar o convite.".into(), NoteTone::Error) });
-        self.render();
+        self.clipboard.as_mut().is_some_and(|c| c.set_text(invite).is_ok())
     }
 
     fn join_submit(&mut self) {
@@ -712,12 +769,18 @@ impl Controller {
                     self.session = Session::Idle;
                 }
                 self.joining = false;
-                self.notice = Some((msg, NoteTone::Error));
+                self.tell("", &msg, NoteTone::Error);
             }
             Event::Viewers(v) => self.viewers = v,
             Event::Live(on) => {
+                let started = on && matches!(self.session, Session::Channel { live: false, .. });
                 if let Session::Channel { live, .. } = &mut self.session {
                     *live = on;
+                }
+                // Without the Discord bot announcing it, the invite is how
+                // friends get in: it is ready to paste as soon as the stream starts.
+                if started && !self.live_gated && self.copy_invite() {
+                    self.tell("Convite copiado", "É só colar no chat da galera.", NoteTone::Info);
                 }
                 self.tally.set_target(if on { 1.0 } else { 0.0 });
                 self.animate();
@@ -730,8 +793,8 @@ impl Controller {
                 self.screen = Some((width, height));
                 self.sync_thumbs(true);
             }
-            Event::Notice(msg) => self.notice = Some((msg, NoteTone::Warn)),
-            Event::Info(msg) => self.notice = Some((msg, NoteTone::Info)),
+            Event::Notice(msg) => self.tell("", &msg, NoteTone::Warn),
+            Event::Info(msg) => self.tell("", &msg, NoteTone::Info),
             Event::Left => {
                 self.session = Session::Idle;
                 self.viewers.clear();
@@ -811,6 +874,8 @@ fn shots(dir: PathBuf) {
             c.send(Command::StartLive { quality, discord: None });
             c.close_panel();
         }),
+        // The invite toast (no Discord) closes on its own.
+        ("aviso-sumiu", 4200, |_| {}),
         ("menu-ao-vivo", 700, |c| c.open_panel(Panel::Menu)),
         ("qualidade", 800, |c| c.open_panel(Panel::Quality)),
         ("qualidade-nitidez", 700, |c| {
