@@ -32,7 +32,7 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
 
       - name: System packages
-        run: sudo apt-get update && sudo apt-get install -y ninja-build clang libclang-dev libdrm-dev libpipewire-0.3-0t64 python3-venv zip
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang llvm libclang-dev libdrm-dev libpipewire-0.3-0t64 python3-venv zip
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -42,13 +42,22 @@ jobs:
         with:
           tool: cargo-deb,cargo-zigbuild,cargo-xwin
 
-      - uses: actions/cache@v4
+      - id: deps
+        uses: actions/cache/restore@v4
         with:
           path: native/.deps
           key: deps-${{ hashFiles('native/scripts/fetch-deps.sh', 'native/scripts/ffmpeg-windows.sh') }}
 
       - name: Dependencies (FFmpeg, libva, Zig, packaging tools)
         run: sh scripts/fetch-deps.sh && rm -rf .deps/FFmpeg-Builds .deps/debs
+
+      # Saved right away: the Windows FFmpeg takes ~20 minutes and must not be
+      # rebuilt just because a later step failed.
+      - if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: native/.deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
 
       - name: Packages
         run: sh scripts/package.sh tudo

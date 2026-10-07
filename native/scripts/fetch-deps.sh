@@ -32,7 +32,7 @@ if [ ! -d "$D/ffmpeg-win" ]; then
 fi
 
 [ -d "$D/venv" ] || python3 -m venv "$D/venv"
-"$D/venv/bin/pip" install -q meson ziglang
+"$D/venv/bin/pip" install -q meson ziglang patchelf
 
 cat > "$D/zigcc-2.35" <<ZIG
 #!/bin/sh
