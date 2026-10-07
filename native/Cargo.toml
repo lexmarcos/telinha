@@ -1,6 +1,6 @@
 [package]
 name = "telinha"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Transmissão de tela de baixa latência para o Telinha"
 license = "MIT"
@@ -66,6 +66,8 @@ slint = { version = "1.18", default-features = false, features = ["renderer-femt
 tray-icon = "0.26"
 wasapi = "0.25"
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+# Self-update: unpacks the new version's zip (update.rs).
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [build-dependencies]
 slint-build = "1.18"

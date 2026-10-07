@@ -22,4 +22,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TELINHA_DEV_RPATH");
     // Embedded default server (option_env!): changing the variable triggers a rebuild.
     println!("cargo:rerun-if-env-changed=TELINHA_SERVER");
+    // Public key that signs the updates (update.rs); without it the app does not update itself.
+    println!("cargo:rerun-if-env-changed=TELINHA_UPDATE_KEY");
 }

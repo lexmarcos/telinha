@@ -24,6 +24,13 @@ export component MenuPanel inherits VerticalLayout {
         subtitle: AppState.subtitle;
     }
     Gap { size: Space.s - 2px; }
+    if AppState.update-version != "": MenuItem {
+        icon: @image-url("icons/download.svg");
+        label: AppState.update-progress < 0 ? "Atualizar para a versão " + AppState.update-version
+            : "Baixando a atualização… " + round(AppState.update-progress * 100) + "%";
+        tone: Tone.primary;
+        clicked => { AppState.update(); }
+    }
     if AppState.session != 2: MenuItem {
         icon: @image-url("icons/plus.svg"); label: "Abrir um canal novo"; tone: Tone.primary;
         clicked => { AppState.create(); }

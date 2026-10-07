@@ -76,6 +76,9 @@ struct Controller {
     /// The current stream only lets people in the Discord call watch (the bot
     /// announces it); otherwise the invite is copied when it starts.
     live_gated: bool,
+    /// A newer version on the server, and its download (0..1, negative when idle).
+    update: Option<crate::update::Release>,
+    update_progress: f32,
     join_text: String,
     joining: bool,
 
@@ -148,6 +151,8 @@ pub fn run() {
         toast: (String::new(), String::new(), NoteTone::Info),
         toast_timer: slint::Timer::default(),
         live_gated: false,
+        update: None,
+        update_progress: -1.0,
         join_text: String::new(),
         joining: false,
         panel: None,
@@ -178,6 +183,8 @@ pub fn run() {
 
     if let Some(dir) = std::env::var_os("TELINHA_SHOTS").map(PathBuf::from) {
         shots(dir);
+    } else {
+        watch_updates();
     }
     // The window hides to the tray without quitting: only "Fechar o Telinha" quits.
     slint::run_event_loop_until_quit().expect("laço da interface");
@@ -223,6 +230,7 @@ impl Controller {
             })
         });
         st.on_dismiss(|| with(|c| c.close_panel()));
+        st.on_update(|| with(|c| c.start_update()));
         st.on_hide(|| with(|c| c.hide()));
         st.on_leave(|| {
             with(|c| {
@@ -529,6 +537,8 @@ impl Controller {
         let (notice, tone) = self.notice.clone().unwrap_or((String::new(), NoteTone::Info));
         st.set_notice(notice.into());
         st.set_notice_tone(tone);
+        st.set_update_version(self.update.as_ref().map(|r| r.version.clone()).unwrap_or_default().into());
+        st.set_update_progress(self.update_progress);
         let (title, text, tone) = &self.toast;
         st.set_toast_title(title.into());
         st.set_toast_text(text.into());
@@ -672,6 +682,62 @@ impl Controller {
         self.config.position = Some(self.bubble_position());
         self.config.save();
         let _ = slint::quit_event_loop();
+    }
+
+    /* ---------------- atualização ---------------- */
+
+    fn update_found(&mut self, r: crate::update::Release) {
+        let news = self.update.as_ref().is_none_or(|u| u.version != r.version);
+        self.update = Some(r.clone());
+        if news {
+            self.tell(&format!("Versão {} disponível", r.version), "Clique na bolha para atualizar.", NoteTone::Info);
+        }
+        self.render();
+    }
+
+    fn start_update(&mut self) {
+        let Some(r) = self.update.clone() else { return };
+        if self.update_progress >= 0.0 {
+            return; // already downloading
+        }
+        if matches!(self.session, Session::Channel { live: true, .. }) {
+            self.tell("", "Pare a transmissão antes de atualizar.", NoteTone::Warn);
+            return;
+        }
+        if !crate::update::can_install(&r) {
+            // This copy cannot replace itself: the download page can.
+            if let Some(page) = crate::update::page() {
+                let _ = crate::engine::gate::open_browser(&page);
+            }
+            self.tell("", "Baixe a nova versão na página que abriu no navegador.", NoteTone::Info);
+            return;
+        }
+        self.update_progress = 0.0;
+        self.render();
+        tokio::spawn(async move {
+            // One UI update per percent, not per downloaded chunk.
+            let shown = std::sync::atomic::AtomicU32::new(0);
+            let progress = move |p: f32| {
+                let pct = (p.clamp(0.0, 1.0) * 100.0) as u32;
+                if shown.swap(pct, std::sync::atomic::Ordering::Relaxed) != pct {
+                    post(move |c| {
+                        c.update_progress = pct as f32 / 100.0;
+                        c.render();
+                    });
+                }
+            };
+            let r = crate::update::install(r, progress).await;
+            post(move |c| match r {
+                // The new version is starting: this one gets out of the way.
+                Ok(()) => c.quit(),
+                Err(e) => {
+                    tracing::warn!("update: {e}");
+                    c.update_progress = -1.0;
+                    c.tell("Não deu para atualizar", &e, NoteTone::Error);
+                    c.render();
+                }
+            });
+        });
     }
 
     /* ---------------- ações ---------------- */
@@ -850,6 +916,27 @@ fn name_hash(name: &str) -> usize {
     name.chars().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32)) as usize
 }
 
+/// Looks for a new version a little after opening and then every 6 hours, and
+/// says so when the app has just been updated.
+fn watch_updates() {
+    if std::env::var_os("TELINHA_ATUALIZADO").is_some() {
+        slint::Timer::single_shot(Duration::from_millis(1200), || {
+            with(|c| c.tell("Telinha atualizado", &format!("Agora na versão {}.", crate::update::CURRENT), NoteTone::Info));
+        });
+    }
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        loop {
+            match crate::update::check().await {
+                Ok(Some(r)) => post(move |c| c.update_found(r)),
+                Ok(None) => {}
+                Err(e) => tracing::warn!("update check: {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+        }
+    });
+}
+
 /* ---------------- roteiro de fotos (TELINHA_SHOTS=pasta) ---------------- */
 
 /// Walks through the main states with a fake engine and saves a screenshot of
@@ -883,6 +970,11 @@ fn shots(dir: PathBuf) {
             c.quality_changed();
         }),
         ("discord", 800, |c| c.open_panel(Panel::Discord)),
+        ("atualizacao", 900, |c| {
+            c.close_panel();
+            c.update_found(crate::update::Release::sample("0.3.0"));
+        }),
+        ("menu-atualizacao", 800, |c| c.open_panel(Panel::Menu)),
         ("meio-da-troca", 90, |c| c.open_panel(Panel::Menu)),
         ("fechado", 900, |c| c.close_panel()),
         ("abrindo", 70, |c| c.open_panel(Panel::Menu)),

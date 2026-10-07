@@ -20,6 +20,8 @@ WHAT="${1:-tudo}"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 if [ -z "${TELINHA_SERVER+set}" ] && [ -f .env.build ]; then . ./.env.build; fi
 export TELINHA_SERVER="${TELINHA_SERVER:-}"
+# Public key of the update signatures (see src/update.rs); empty: no self-update.
+export TELINHA_UPDATE_KEY="${TELINHA_UPDATE_KEY:-}"
 # Build paths (this machine's folders and user name) stay out of the binaries.
 REMAP="--remap-path-prefix=$HOME=~ --remap-path-prefix=$ROOT=."
 [ -n "$TELINHA_SERVER" ] || echo "warning: no TELINHA_SERVER; the app will ask for the invite link on first run"

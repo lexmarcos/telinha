@@ -45,6 +45,8 @@ sh scripts/package.sh tudo
 
 The files show up in `native/dist`.
 
+Apps built this way can also update themselves. Make a signing key, add its public half to `.env.build` as `TELINHA_UPDATE_KEY`, and publish each version to your site's `download` folder with `native/scripts/updates.py`. The app checks it, says when there is a new version, and installs it with one click. Your site then shows an **App para computador** link to a download page.
+
 ## Already have a reverse proxy?
 
 Use `deploy/docker-compose.yml` instead of the setup script:

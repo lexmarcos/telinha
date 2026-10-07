@@ -10,6 +10,7 @@ mod config;
 mod engine;
 mod tray;
 mod ui;
+mod update;
 mod video;
 
 fn main() {
@@ -29,6 +30,25 @@ fn main() {
                 println!("audio: {} samples", s.len());
             }
             Err(e) => println!("audio failed: {e}"),
+        }
+        return;
+    }
+
+    // Update from the command line (same as the menu item): checks, downloads,
+    // installs and starts the new version.
+    if std::env::args().any(|a| a == "--atualizar") {
+        let rt = tokio::runtime::Runtime::new().expect("tokio");
+        let r = rt.block_on(async {
+            match update::check().await? {
+                None => Ok(println!("already up to date ({}), or this build does not update itself", update::CURRENT)),
+                Some(r) => {
+                    println!("updating {} -> {}", update::CURRENT, r.version);
+                    update::install(r, |p| eprint!("\r{:3.0}%", p * 100.0)).await.map(|_| println!("\nnew version started"))
+                }
+            }
+        });
+        if let Err(e) = r {
+            println!("update failed: {e}");
         }
         return;
     }
@@ -84,6 +104,12 @@ fn main() {
             unsafe { std::env::set_var("SLINT_BACKEND", "winit-software") };
         }
     }
+
+    // Just updated: the old copy is still closing (tray icon, window).
+    if std::env::var_os("TELINHA_ATUALIZADO").is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(800));
+    }
+    update::cleanup();
 
     // Engine, Discord and tray on tokio; the UI on the main thread.
     let rt = tokio::runtime::Runtime::new().expect("tokio");

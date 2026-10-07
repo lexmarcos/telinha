@@ -18,6 +18,10 @@ export global AppState {
     in property <string> toast-title;
     in property <string> toast-text;
     in property <NoteTone> toast-tone;
+    // Update: the new version ("" when up to date) and the download, 0..1
+    // (negative while not downloading).
+    in property <string> update-version;
+    in property <float> update-progress: -1;
 
     // Quality (segmented thumbs come from springs: resolution, fps,
     // priority, sound, who can watch)
@@ -46,6 +50,7 @@ export global AppState {
 
     callback open(int); // 1 menu, 2 quality, 3 join, 4 Discord, 5 toast
     callback dismiss();
+    callback update();
     callback create();
     callback start-live();
     callback stop-live();

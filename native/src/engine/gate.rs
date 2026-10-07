@@ -181,7 +181,7 @@ pub async fn login(server: String) -> Result<(String, String), String> {
     Err("O login com o Discord não terminou. Tente de novo.".into())
 }
 
-fn open_browser(url: &str) -> Result<(), String> {
+pub fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let r = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
     #[cfg(not(target_os = "windows"))]
