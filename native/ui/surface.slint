@@ -7,11 +7,12 @@ import { Shadow } from "shadow.slint";
 
 export component Surface inherits Rectangle {
     Shadow { width: parent.width; height: parent.height; radius: Radius.panel; spread: 16px; offset-y: 8px; strength: 0.6; }
+    Shadow { width: parent.width; height: parent.height; radius: Radius.panel; spread: 8px; offset-y: 0; strength: 0.14; tint: Palette.halo; }
     Rectangle {
         border-radius: Radius.panel;
         background: Palette.room.with-alpha(0.96);
         border-width: 1px;
-        border-color: Palette.line;
+        border-color: Palette.rim.with-alpha(0.3);
     }
     // Light hitting the material's top edge.
     Rectangle {

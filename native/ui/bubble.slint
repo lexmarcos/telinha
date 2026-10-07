@@ -27,13 +27,16 @@ export component Bubble inherits Rectangle {
         transform-origin: { x: self.width / 2, y: self.height / 2 };
         transform-scale: 1 - (1 - Motion.press-scale) * root.press;
 
+        // Dark shadow for light wallpapers, light halo for dark ones.
         Shadow { width: parent.width; height: parent.height; radius: root.outer; spread: 10px; offset-y: 4px; strength: 0.5; }
-        // Device frame.
+        Shadow { width: parent.width; height: parent.height; radius: root.outer; spread: 7px; offset-y: 0; strength: 0.3; tint: Palette.halo; }
+        // Device frame: a bit lighter than the room and with a bright rim, so it does not merge with black.
         Rectangle {
             border-radius: root.outer;
-            background: Palette.room;
-            border-width: 1px;
-            border-color: Palette.phosphor.with-alpha(touch.has-hover ? 0.38 : 0.18);
+            // Solid: the software renderer draws gradients without the rounded corners.
+            background: Palette.room-raised.mix(Palette.room, 0.5);
+            border-width: Size.rim;
+            border-color: touch.has-hover ? Palette.rim-hover : Palette.rim;
             animate border-color { duration: Motion.hover; }
         }
         // Tube glass: scan lines and a highlight at the top.
@@ -43,9 +46,20 @@ export component Bubble inherits Rectangle {
             border-radius: self.width / 2;
             clip: true;
             background: Palette.screen;
-            for i in 17: Rectangle { y: 1.5px + i * 3px; height: 1px; background: Palette.phosphor.with-alpha(0.035); }
+            // The software renderer clips to a square: scan lines are cut to the
+            // circle's width and the highlight stays inside it.
+            for i in 17: Rectangle {
+                property <length> r: Size.tube / 2;
+                property <length> dy: 2px + i * 3px - self.r;
+                property <length> half: sqrt(max(0, (self.r * self.r - self.dy * self.dy) / 1px / 1px)) * 1px;
+                x: self.r - self.half;
+                y: 1.5px + i * 3px;
+                width: 2 * self.half;
+                height: 1px;
+                background: Palette.phosphor.with-alpha(0.035);
+            }
             Rectangle {
-                x: -7.3px; y: -14.6px; width: 37.4px; height: 37.4px;
+                x: 6px; y: 4px; width: 26px; height: 26px;
                 border-radius: self.width / 2;
                 background: Palette.white.with-alpha(0.035);
             }

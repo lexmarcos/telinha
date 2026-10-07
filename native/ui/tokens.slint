@@ -13,6 +13,10 @@ export global Palette {
     out property <color> warn: #FFC56B;
     out property <color> white: #FFFFFF;
     out property <color> shadow: #000000;
+    // Edge and halo that keep the bubble and panels visible on dark wallpapers.
+    out property <color> rim: #CFE0FF73;
+    out property <color> rim-hover: #CFE0FFA6;
+    out property <color> halo: #9DB8FF;
     // Viewer avatars (the same as the website), picked by name.
     out property <[color]> avatars: [#CFE0FF, #FFD9A8, #BFF0D4, #F5C6FF, #FFE48A, #A8ECFF, #FFC2C2];
 }
@@ -29,6 +33,7 @@ export global Size {
     out property <length> bubble: 64px;
     out property <length> tube: 52px;
     out property <length> tally-ring: 3px;
+    out property <length> rim: 1.5px;
     out property <length> dot: 18px;
     out property <length> dot-overlap: 5px;
     out property <int> dots-max: 5;
