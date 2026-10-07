@@ -191,7 +191,9 @@ async function finish(live: Live) {
 function announcement(live: Live) {
   return {
     // <#id> becomes the clickable call name: shows which call it is even in a text channel.
-    content: `📺 **${live.user.name}** está transmitindo a tela na call <#${live.channel}>. Só quem está nela consegue assistir.`,
+    // A mention (not the Discord display name), short and clear. allowed_mentions
+    // empty: it shows as @person without pinging anyone.
+    content: `<@${live.user.id}> iniciou uma transmissão. Clique no botão abaixo para ver.`,
     // Link button: opens the browser directly. The bot identifies who clicked
     // through Discord login (automatic after the first authorization).
     components: [{ type: 1, components: [{ type: 2, style: 5, label: "Assistir", url: `https://${HOST}/discord/assistir/${live.id}` }] }],
