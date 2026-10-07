@@ -1,6 +1,6 @@
-//! A sessão no canal: fala com o servidor de sinalização, mantém a lista de
-//! quem está no canal, abre as conexões com quem assiste e cuida da
-//! transmissão. Roda como uma tarefa só, recebendo tudo por mensagens.
+//! The channel session: talks to the signaling server, keeps the list of
+//! who is in the channel, opens connections to viewers and handles the
+//! stream. Runs as a single task, receiving everything through messages.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,23 +28,23 @@ struct Member {
     id: String,
     name: String,
     sharing: bool,
-    /// Recebe vídeo por WebCodecs (Chrome/Edge). Só esses recebem do app.
+    /// Receives video via WebCodecs (Chrome/Edge). Only these receive from the app.
     wc: bool,
-    /// Transmite só para quem está na call do Discord (pede passe).
+    /// Streams only to people in the Discord call (requires a pass).
     discord: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    /// Eu sou convidado: conexão com o anfitrião.
+    /// I am a guest: connection to the host.
     HostLink,
-    /// Eu sou anfitrião: conexão de um convidado.
+    /// I am the host: connection from a guest.
     Guest,
-    /// Eu transmito: vídeo pelo canal de dados (WebCodecs, atraso mínimo).
+    /// I stream: video over the data channel (WebCodecs, minimal latency).
     Turbo,
-    /// Eu transmito: vídeo RTP comum (repasse, conexão ruim, Firefox/Safari).
+    /// I stream: plain RTP video (relay, bad connection, Firefox/Safari).
     Media,
-    /// Eu transmito: alguém veio entregar o passe do Discord.
+    /// I stream: someone came to hand over the Discord pass.
     Pass,
 }
 
@@ -57,14 +57,14 @@ struct Conn {
     remote_set: bool,
     pending: Vec<RTCIceCandidateInit>,
     open: bool,
-    /// Nome e capacidade que vieram na oferta (convidado do anfitrião).
+    /// Name and capability sent in the offer (guest of the host).
     meta: Value,
     sender: Option<turbo::Sender>,
     track: Option<Arc<webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample>>,
     rtp_sender: Option<rtp::Sender>,
     audio_track: Option<Arc<webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample>>,
     audio_sender: Option<rtp::AudioSender>,
-    /// Chamada só de áudio (acompanha o vídeo do canal de dados).
+    /// Audio-only call (goes with the data channel video).
     audio_only: bool,
     health: Health,
 }
@@ -81,7 +81,7 @@ struct Live {
     control: Arc<video::Control>,
     frames: broadcast::Sender<Arc<EncodedFrame>>,
     quality: Quality,
-    /// Taxa em vigor (a adaptação baixa quando alguém recebe mal).
+    /// Current bitrate (adaptation lowers it when someone receives poorly).
     bitrate: Arc<AtomicU32>,
     keys: Arc<KeyLimiter>,
     epoch: Instant,
@@ -111,16 +111,16 @@ struct Session {
     live: Option<Live>,
     quality: Quality,
     inputs: Option<mpsc::Receiver<Input>>,
-    /// Quem recebe por RTP depois de ir mal no canal de dados (ou pelo repasse).
+    /// Who receives via RTP after doing poorly on the data channel (or via relay).
     demoted: std::collections::HashSet<String>,
-    /// Sessão do Discord para o porteiro da próxima transmissão.
+    /// Discord session for the gatekeeper of the next stream.
     discord: Option<String>,
-    /// Porteiro da transmissão em andamento (só quem está na call assiste).
+    /// Gatekeeper of the current stream (only people in the call can watch).
     gate: Option<super::gate::Gate>,
 }
 
 pub async fn run(mut cmds: mpsc::Receiver<Command>, ui: mpsc::Sender<Event>) {
-    // Fora de um canal, só espera um comando para entrar ou abrir.
+    // Outside a channel, just wait for a command to join or open one.
     while let Some(cmd) = cmds.recv().await {
         let started = match cmd {
             Command::Create { name, server } => start(&ui, name, server, None).await,
@@ -143,7 +143,7 @@ pub async fn run(mut cmds: mpsc::Receiver<Command>, ui: mpsc::Sender<Event>) {
     }
 }
 
-/// Aceita "4821", "https://servidor/#4821" ou "servidor/#4821".
+/// Accepts "4821", "https://server/#4821" or "server/#4821".
 fn parse_invite(input: &str, server: Option<String>) -> Result<(String, String), String> {
     let input = input.trim();
     let digits: String = input.rsplit('#').next().unwrap_or(input).chars().filter(char::is_ascii_digit).collect();
@@ -166,7 +166,7 @@ async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, c
     let (sig_tx, mut sig_rx) = mpsc::channel(256);
     let (peer_tx, peer_rx) = mpsc::channel(1024);
 
-    // Anfitrião registra o id do canal (tenta outro número se estiver em uso).
+    // Host registers the channel id (tries another number if it is taken).
     let (me, code, sig) = match code {
         Some(code) => {
             let me = format!("telinha-app-{:012x}", rand::random::<u64>() & 0xffff_ffff_ffff);
@@ -247,7 +247,7 @@ enum Input {
 }
 
 impl Session {
-    /// Junta sinalização e eventos das conexões num canal só (`inputs`).
+    /// Merges signaling and connection events into a single channel (`inputs`).
     fn spawn_signal_forwarder(&mut self, mut sig_rx: mpsc::Receiver<Signal>, mut peer_rx: mpsc::Receiver<PeerEvent>) {
         let (tx, rx) = mpsc::channel(1024);
         let t2 = tx.clone();
@@ -271,7 +271,7 @@ impl Session {
 
 impl Session {
     async fn serve(&mut self, cmds: &mut mpsc::Receiver<Command>) {
-        let mut inputs = self.inputs.take().expect("entradas da sessão");
+        let mut inputs = self.inputs.take().expect("session inputs");
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         let join_deadline = Instant::now() + Duration::from_secs(15);
         loop {
@@ -313,10 +313,10 @@ impl Session {
             .members
             .iter()
             .filter(|m| m.id != self.me)
-            // Com o porteiro, só conta quem mostrou passe (com o nome do Discord).
+            // With the gatekeeper, only those who showed a pass count (with their Discord name).
             .filter_map(|m| match &self.gate {
                 Some(g) => g.allowed.get(&m.id).map(|(_, name)| Viewer { name: name.clone(), supported: true }),
-                // Quem não tem WebCodecs recebe por RTP: todo mundo assiste.
+                // Those without WebCodecs receive via RTP: everyone can watch.
                 None => Some(Viewer { name: m.name.clone(), supported: true }),
             })
             .collect();
@@ -325,7 +325,7 @@ impl Session {
 
     /* ---------------- conexões ---------------- */
 
-    /// Abre uma conexão de dados no formato do PeerJS (eu ofereço).
+    /// Opens a PeerJS-style data connection (I make the offer).
     async fn open_data(&mut self, dst: &str, kind: Kind, metadata: Value) -> Result<String, String> {
         let conn = format!("dc_{:012x}", rand::random::<u64>() & 0xffff_ffff_ffff);
         let pc = peer::new_connection(&self.ice, &conn, false, self.peers.clone()).await?;
@@ -377,9 +377,9 @@ impl Session {
         Ok(conn)
     }
 
-    /// Chamada de mídia do PeerJS (eu ofereço): vídeo da placa em RTP e o som
-    /// do computador, ou só o som (`audio_only`, para quem recebe o vídeo pelo
-    /// canal de dados).
+    /// PeerJS media call (I make the offer): hardware-encoded video over RTP plus
+    /// the computer's audio, or audio only (`audio_only`, for those receiving
+    /// video over the data channel).
     async fn open_media(&mut self, dst: &str, audio_only: bool) -> Result<String, String> {
         let conn = format!("mc_{:012x}", rand::random::<u64>() & 0xffff_ffff_ffff);
         let pc = peer::new_connection(&self.ice, &conn, true, self.peers.clone()).await?;
@@ -422,20 +422,20 @@ impl Session {
         Ok(conn)
     }
 
-    /// Tira alguém do canal de dados e passa para RTP.
+    /// Moves someone off the data channel to RTP.
     async fn demote(&mut self, conn: &str, why: &str) {
         let Some(peer) = self.conns.get(conn).map(|c| c.peer.clone()) else { return };
-        tracing::info!(peer, why, "passando para vídeo RTP");
+        tracing::info!(peer, why, "switching to RTP video");
         self.demoted.insert(peer.clone());
         self.close_conn(conn).await;
-        // A chamada só de áudio dele vira inútil: a de RTP leva vídeo e som juntos.
+        // Their audio-only call becomes useless: the RTP one carries video and audio together.
         let audio_calls: Vec<String> = self.conns.iter().filter(|(_, c)| c.peer == peer && c.audio_only).map(|(k, _)| k.clone()).collect();
         for c in audio_calls {
             self.close_conn(&c).await;
         }
         if self.live.is_some() {
             if let Err(e) = self.open_media(&peer, false).await {
-                tracing::warn!("não abriu vídeo RTP para {peer}: {e}");
+                tracing::warn!("failed to open RTP video for {peer}: {e}");
             }
         }
     }
@@ -499,16 +499,16 @@ impl Session {
                     self.on_conn_closed(&id).await;
                 }
             }
-            Signal::Error(e) => tracing::warn!("servidor: {e}"),
+            Signal::Error(e) => tracing::warn!("server: {e}"),
             _ => {}
         }
         Ok(())
     }
 
     async fn on_offer(&mut self, src: String, payload: Value) {
-        // O anfitrião aceita convidados entrando no canal; quem transmite com o
-        // porteiro aceita entregas de passe. Vídeo de outras pessoas ainda não
-        // é assistido pelo app.
+        // The host accepts guests joining the channel; a streamer with the
+        // gatekeeper accepts pass deliveries. The app does not yet watch
+        // other people's video.
         let pass = payload["metadata"]["kind"] == "passe";
         if payload["type"] != "data" || payload["metadata"]["kind"] == "turbo" {
             return;
@@ -518,17 +518,18 @@ impl Session {
         }
         let mut meta = payload["metadata"].clone();
         if pass {
-            let gate = self.gate.as_mut().expect("conferido acima");
+            let gate = self.gate.as_mut().expect("checked above");
             let verdict = gate.check(meta["passe"].as_str().unwrap_or_default(), &self.code, &self.me);
             meta = match verdict {
                 Ok((user, name)) => {
-                    tracing::info!(quem = %name, "passe aceito");
+                    tracing::info!(who = %name, "pass accepted");
                     gate.admit(src.clone(), user, name);
                     json!({ "ok": true })
                 }
                 Err(why) => {
-                    tracing::info!("passe recusado: {why}");
-                    json!({ "ok": false, "motivo": why })
+                    tracing::info!("pass rejected: {why}");
+                    // Bot has not confirmed yet: the viewer retries shortly.
+                    json!({ "ok": false, "motivo": why, "tentar": !gate.ready() })
                 }
             };
         }
@@ -600,7 +601,7 @@ impl Session {
                 if matches!(state, RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed) {
                     self.on_conn_closed(&conn).await;
                 } else if state == RTCPeerConnectionState::Connected {
-                    // Vídeo RTP conectado: começa a mandar a partir de uma keyframe.
+                    // RTP video connected: start sending from a keyframe.
                     if let (Some(live), Some(c)) = (&self.live, self.conns.get_mut(&conn)) {
                         if c.kind == Kind::Media && !c.open {
                             c.open = true;
@@ -636,14 +637,14 @@ impl Session {
                 self.broadcast_roster().await;
             }
             (Kind::Turbo, Which::Video) => {
-                // Canal de vídeo aberto: começa a mandar a partir de uma keyframe.
+                // Video channel open: start sending from a keyframe.
                 if let (Some(live), Some(video)) = (&self.live, c.video.clone()) {
                     c.sender = Some(turbo::spawn(video, live.frames.subscribe(), live.control.clone(), live.keys.clone(), live.bitrate.clone(), live.epoch));
                 }
             }
             (Kind::Turbo, Which::Control) => c.open = true,
             (Kind::Pass, Which::Control) => {
-                // Diz a quem entregou o passe se deu certo (e por que não).
+                // Tell whoever delivered the pass whether it worked (and why not).
                 c.open = true;
                 if let Some(ch) = c.control.clone() {
                     let mut msg = c.meta.clone();
@@ -662,7 +663,7 @@ impl Session {
         match c.kind {
             Kind::HostLink => {
                 let _ = self.ui.send(Event::Failed("O canal saiu do ar.".into())).await;
-                // Sem anfitrião não há canal: a sessão termina no próximo comando.
+                // Without a host there is no channel: the session ends on the next command.
                 self.members.clear();
                 self.publish_viewers().await;
             }
@@ -715,7 +716,7 @@ impl Session {
             }
             (Kind::Turbo, "rx") => self.on_report(&conn, &v).await,
             (Kind::Turbo, "unsupported") => {
-                // O navegador não decodifica esse vídeo: para de mandar.
+                // The browser cannot decode this video: stop sending.
                 let peer = self.conns.get(&conn).map(|c| c.peer.clone()).unwrap_or_default();
                 self.close_conn(&conn).await;
                 if let Some(m) = self.members.iter_mut().find(|m| m.id == peer) {
@@ -728,7 +729,7 @@ impl Session {
         Ok(())
     }
 
-    /// Anfitrião manda a lista de quem está no canal para todo mundo.
+    /// Host sends the list of who is in the channel to everyone.
     async fn broadcast_roster(&mut self) {
         if let Some(me) = self.members.iter_mut().find(|m| m.id == self.me) {
             me.sharing = self.live.is_some();
@@ -762,7 +763,7 @@ impl Session {
                 let audio_changed = quality.system_audio != self.quality.system_audio;
                 self.quality = quality;
                 if audio_changed && self.live.is_some() {
-                    // Ligar ou desligar o som muda as trilhas: reabre a transmissão.
+                    // Toggling audio changes the tracks: restart the stream.
                     self.stop_live().await;
                     if let Err(e) = self.start_live().await {
                         let _ = self.ui.send(Event::Failed(e)).await;
@@ -790,13 +791,13 @@ impl Session {
             self.gate = Some(super::gate::Gate::open(&self.server, session, &self.code, &self.me));
         }
         let audio = if self.quality.system_audio {
-            crate::audio::start().map_err(|e| tracing::warn!("sem som do computador: {e}")).ok()
+            crate::audio::start().map_err(|e| tracing::warn!("no computer audio: {e}")).ok()
         } else {
             None
         };
         let (frames, _) = broadcast::channel(8);
-        // A taxa de verdade depende do tamanho da tela, que a captura informa no
-        // primeiro quadro; começa pela de 1080p e corrige no primeiro segundo.
+        // The real bitrate depends on the screen size, which capture reports on the
+        // first frame; start with the 1080p one and correct it within the first second.
         let bitrate = self.quality.bitrate((1920, 1080));
         let control = video::start(source, Settings { quality: self.quality, bitrate }, frames.clone());
         self.live = Some(Live {
@@ -842,9 +843,9 @@ impl Session {
         }
     }
 
-    /// Abre vídeo para quem chegou e fecha de quem saiu. Navegador com
-    /// WebCodecs recebe pelo canal de dados (atraso mínimo); o resto, e quem
-    /// já foi mal por lá, recebe RTP.
+    /// Opens video for newcomers and closes it for those who left. Browsers with
+    /// WebCodecs receive over the data channel (minimal latency); the rest, and
+    /// those who already did poorly there, receive RTP.
     async fn sync_viewers(&mut self) {
         if self.live.is_none() {
             return;
@@ -874,30 +875,30 @@ impl Session {
                 if !has(Kind::Turbo, false) {
                     let meta = json!({ "kind": "turbo", "name": self.name });
                     if let Err(e) = self.open_data(&id, Kind::Turbo, meta).await {
-                        tracing::warn!("não abriu vídeo para {id}: {e}");
+                        tracing::warn!("failed to open video for {id}: {e}");
                     }
                 }
                 if has_audio && !has(Kind::Media, true) {
                     if let Err(e) = self.open_media(&id, true).await {
-                        tracing::warn!("não abriu som para {id}: {e}");
+                        tracing::warn!("failed to open audio for {id}: {e}");
                     }
                 }
             } else if !has(Kind::Media, false) {
                 if let Err(e) = self.open_media(&id, false).await {
-                    tracing::warn!("não abriu vídeo RTP para {id}: {e}");
+                    tracing::warn!("failed to open RTP video for {id}: {e}");
                 }
             }
         }
     }
 
-    /// Relatório de quem assiste. Se alguém recebe bem menos do que foi
-    /// mandado, a taxa do vídeo (que é uma só para todos) desce; se todos
-    /// recebem bem por um tempo, volta a subir até a ideal.
+    /// Viewer report. If someone receives much less than was sent, the video
+    /// bitrate (shared by everyone) drops; if everyone receives well for a
+    /// while, it climbs back up to the ideal.
     async fn on_report(&mut self, conn: &str, v: &Value) {
-        // Pelo repasse o canal de dados engasga (ida e volta longa + perda):
-        // essa pessoa recebe RTP, que reenvia e aguenta perda.
+        // Over a relay the data channel stalls (long round trip + loss):
+        // this person gets RTP, which retransmits and tolerates loss.
         if v["relay"].as_bool() == Some(true) {
-            self.demote(conn, "repasse").await;
+            self.demote(conn, "relay").await;
             return;
         }
         let Some(c) = self.conns.get_mut(conn) else { return };
@@ -909,12 +910,12 @@ impl Session {
         let lost = now.2.saturating_sub(prev.2);
         let bad = (sent > 50_000 && got < sent * 8 / 10) || lost >= 2;
         if self.adapt(conn, bad) {
-            self.demote(conn, "recebendo mal pelo canal de dados").await;
+            self.demote(conn, "receiving poorly over the data channel").await;
         }
     }
 
-    /// Ajusta a taxa (uma só para todos) pela saúde de uma conexão. Devolve
-    /// `true` se a conexão continua ruim mesmo no piso.
+    /// Adjusts the bitrate (shared by everyone) based on one connection's health.
+    /// Returns `true` if the connection is still bad even at the floor.
     fn adapt(&mut self, conn: &str, bad: bool) -> bool {
         let Some(live) = &self.live else { return false };
         let Some(c) = self.conns.get_mut(conn) else { return false };
@@ -927,7 +928,7 @@ impl Session {
         }
         let ideal = live.quality.bitrate(live.control.stats().native.unwrap_or((1920, 1080)));
         let current = live.bitrate.load(Ordering::Relaxed);
-        // Nitidez aceita cair menos na taxa (prefere perder quadros).
+        // Sharpness mode lowers the bitrate less (prefers dropping frames).
         let floor = match live.quality.priority {
             Priority::Fluidez => 1_500_000,
             Priority::Nitidez => (ideal / 2).max(1_500_000),
@@ -946,7 +947,7 @@ impl Session {
             current
         };
         if next != current {
-            tracing::info!(de = current, para = next, "ajustando a taxa de bits");
+            tracing::info!(from = current, to = next, "adjusting bitrate");
             live.bitrate.store(next, Ordering::Relaxed);
             live.control.reconfigure(Settings { quality: live.quality, bitrate: next });
         }
@@ -954,7 +955,7 @@ impl Session {
     }
 
     async fn on_tick(&mut self) {
-        // Porteiro do Discord: resposta do bot e novas tentativas.
+        // Discord gatekeeper: bot response and retries.
         if let Some(change) = match &mut self.gate {
             Some(g) => g.poll().await,
             None => None,
@@ -966,18 +967,27 @@ impl Session {
                 Change::Ready { .. } => Event::Info("O Assistir está no chat da sua call.".into()),
                 Change::Failed(e) => Event::Notice(format!("{e} Tento de novo a cada 15 segundos.")),
             };
-            tracing::info!("porteiro: {event:?}");
+            tracing::info!("gatekeeper: {event:?}");
             let _ = self.ui.send(event).await;
         }
         let Some(live) = &mut self.live else { return };
         let st = live.control.stats();
+        if video::NVENC_DRIVER_TOO_OLD.swap(false, Ordering::Relaxed) {
+            let using = st.encoder.as_ref().map_or("outro codificador".to_owned(), |e| e.name.clone());
+            let msg = format!(
+                "O driver da sua placa NVIDIA é antigo demais para o NVENC (precisa da versão {} ou mais nova). Atualize pelo app da NVIDIA; até lá, a transmissão usa {using}.",
+                video::NVENC_MIN_DRIVER
+            );
+            tracing::warn!("{msg}");
+            let _ = self.ui.send(Event::Notice(msg)).await;
+        }
         if let Some(e) = &st.error {
             let msg = format!("A transmissão parou: {e}");
             self.stop_live().await;
             let _ = self.ui.send(Event::Failed(msg)).await;
             return;
         }
-        // Corrige a taxa ideal quando o tamanho real da tela fica conhecido.
+        // Correct the ideal bitrate once the real screen size is known.
         if let Some(native) = st.native {
             let ideal = live.quality.bitrate(native);
             if live.last_captured == 0 && live.bitrate.load(Ordering::Relaxed) != ideal {
@@ -993,7 +1003,7 @@ impl Session {
         if let Some(info) = st.encoder.clone() {
             let _ = self.ui.send(Event::Encoder(info)).await;
         }
-        // RTP: perda informada pelos relatórios de recepção (mais de ~5% é ruim).
+        // RTP: loss from receiver reports (more than ~5% is bad).
         let media: Vec<(String, bool)> = self
             .conns
             .iter()
@@ -1003,7 +1013,7 @@ impl Session {
             self.adapt(&conn, bad);
         }
         let Some(live) = &mut self.live else { return };
-        // Conta pra quem assiste como está o lado de cá (painel "Lá na origem").
+        // Tell viewers how the sender side is doing ("Lá na origem" panel).
         let fps = live.capture_fps;
         for c in self.conns.values().filter(|c| c.kind == Kind::Turbo && c.open) {
             let dropped = c.sender.as_ref().map_or(0, |s| s.counters.dropped.load(Ordering::Relaxed));

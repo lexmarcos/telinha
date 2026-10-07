@@ -1,15 +1,15 @@
-// Telinha: compartilhamento de tela entre amigos via PeerJS.
+// Telinha: screen sharing between friends over PeerJS.
 //
-// Quem abre o canal vira o "anfitrião": registra o id fixo `telinha-canal-v1-NNNN`
-// no servidor de sinalização do PeerJS e mantém a lista de quem está na sala.
-// Todos se conectam ao anfitrião por um canal de dados e recebem essa lista.
-// Quem transmite liga (peer.call) direto para cada pessoa da lista, e quem
-// assiste só atende. A mídia nunca passa pelo anfitrião.
+// Whoever opens the channel becomes the "host": it registers the fixed id
+// `telinha-canal-v1-NNNN` on the PeerJS signaling server and keeps the list of
+// who is in the room. Everyone connects to the host over a data channel and
+// receives that list. A sharer calls (peer.call) each person on the list
+// directly, and viewers only answer. Media never goes through the host.
 //
-// Sinalização e repasse (TURN) ficam no servidor que serve o site (pasta
-// deploy/). Se ele não responder, ou se o app roda em localhost, cai para o
-// servidor público do PeerJS, só com STUN. Para testar localmente contra o
-// servidor, abra com ?servidor=dominio.do.servidor.
+// Signaling and relay (TURN) live on the server that serves the site (deploy/
+// folder). If it does not respond, or the app runs on localhost, it falls back
+// to the public PeerJS server with STUN only. To test locally against the
+// server, open with ?servidor=server.domain.
 
 import { createStatsPanel } from "./stats.js";
 import { turboSupport, openVideoChannel, TurboSender, TurboReceiver } from "./turbo.js";
@@ -41,31 +41,42 @@ const state = {
   code: "",
   name: "",
   isHost: false,
-  hostConn: null,              // conexão de dados com o anfitrião (quem entrou)
-  guests: new Map(),           // anfitrião: peerId -> DataConnection
-  roster: new Map(),           // anfitrião: lista oficial, peerId -> { name, sharing }
+  hostConn: null,              // data connection to the host (guests)
+  guests: new Map(),           // host: peerId -> DataConnection
+  roster: new Map(),           // host: official roster, peerId -> { name, sharing }
   members: new Map(),          // peerId -> { name, sharing }
   localStream: null,
-  outgoing: new Map(),         // peerId -> MediaConnection (minha tela indo para ele)
-  incoming: new Map(),         // peerId -> MediaConnection (a tela dele vindo para mim)
+  outgoing: new Map(),         // peerId -> MediaConnection (my screen going to them)
+  incoming: new Map(),         // peerId -> MediaConnection (their screen coming to me)
   streams: new Map(),          // peerId -> { stream, name, local, thumb }
-  turboOut: null,              // TurboSender quando transmito em atraso mínimo
-  turboIn: new Map(),          // peerId -> { conn, rx } (vídeo dele chegando por WebCodecs)
-  audioIn: new Map(),          // peerId -> MediaStream só com o áudio dele (modo atraso mínimo)
-  demoted: new Set(),          // quem voltou pro WebRTC por congestionamento
+  turboOut: null,              // TurboSender when sharing in minimum-latency mode
+  turboIn: new Map(),          // peerId -> { conn, rx } (their video arriving via WebCodecs)
+  audioIn: new Map(),          // peerId -> MediaStream with only their audio (minimum-latency mode)
+  demoted: new Set(),          // peers moved back to WebRTC due to congestion
   featured: null,
   inRoom: false,
 };
 
-/* ---------------- Entrada ---------------- */
+/* ---------------- Entry ---------------- */
 
 ui.name.value = safeGet("telinha:name") || "";
-// Convite: #1234. Pelo botão Assistir do bot do Discord vem também um passe
-// (#1234/passe), que sai da barra de endereço para não ir junto num copiar-colar.
+// Invite: #1234. The Discord bot's Watch button also brings a pass
+// (#1234/passe), which is removed from the address bar so it is not copy-pasted along.
 const [hashRaw = "", hashPass = ""] = location.hash.slice(1).split("/");
 const hashCode = hashRaw.replace(/\D/g, "").slice(0, 4);
-const discordPass = hashPass.trim();
+let discordPass = hashPass.trim();
 if (discordPass) history.replaceState(null, "", `${location.pathname}${location.search}#${hashCode}`);
+// Watch link opened in a tab already in the channel: the browser only changes
+// the "#" and does not reload the page, so the new pass arrives here.
+window.addEventListener("hashchange", () => {
+  const [raw = "", pass = ""] = location.hash.slice(1).split("/");
+  if (!pass.trim()) return;
+  discordPass = pass.trim();
+  history.replaceState(null, "", `${location.pathname}${location.search}#${raw.replace(/\D/g, "").slice(0, 4)}`);
+  passStatus.clear();
+  if (state.peer) for (const [id, m] of state.members) if (id !== state.peer.id && m.sharing && m.discord) deliverPass(id);
+  renderStreams();
+});
 if (hashCode.length === 4) {
   ui.code.value = hashCode;
   setTimeout(() => (ui.name.value ? ui.tune : ui.name).focus(), 950);
@@ -113,7 +124,7 @@ function setBusy(btn, text) {
 function showLobbyError(msg) { ui.lobbyError.textContent = msg; ui.lobbyError.hidden = false; }
 function hideLobbyError() { ui.lobbyError.hidden = true; }
 
-/* ---------------- Abrir canal (anfitrião) ---------------- */
+/* ---------------- Open channel (host) ---------------- */
 
 async function host(attempt = 0) {
   state.name = displayName();
@@ -138,7 +149,7 @@ async function host(attempt = 0) {
 }
 
 function acceptGuest(conn) {
-  if (conn.metadata?.kind === "turbo") return; // vídeo em atraso mínimo, tratado em wirePeer
+  if (conn.metadata?.kind === "turbo") return; // minimum-latency video, handled in wirePeer
   conn.on("open", () => {
     const name = String(conn.metadata?.name || "Alguém").slice(0, 24);
     state.guests.set(conn.peer, conn);
@@ -149,7 +160,7 @@ function acceptGuest(conn) {
     if (msg?.t === "sharing" && state.roster.has(conn.peer)) {
       const m = state.roster.get(conn.peer);
       m.sharing = !!msg.on;
-      m.discord = !!msg.on && !!msg.discord; // só quem está na call do Discord assiste
+      m.discord = !!msg.on && !!msg.discord; // only people in the Discord call can watch
       broadcastRoster();
     }
   });
@@ -169,7 +180,7 @@ function broadcastRoster() {
   applyRoster(members);
 }
 
-/* ---------------- Sintonizar (convidado) ---------------- */
+/* ---------------- Tune in (guest) ---------------- */
 
 async function join(code) {
   state.name = displayName();
@@ -196,12 +207,12 @@ async function join(code) {
   }
 }
 
-let ownServer = null; // guarda só o sucesso; uma falha é tentada de novo na próxima vez
+let ownServer = null; // caches only success; a failure is retried next time
 async function peerOptions() {
   if (!SERVER) return { config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } };
   if (ownServer && ownServer.expires > Date.now()) return ownServer.options;
-  // Cair no servidor público separa a pessoa dos amigos que estão na VPS,
-  // então só desiste depois de duas tentativas com folga.
+  // Falling back to the public server splits the person from friends on the VPS,
+  // so only give up after two generous attempts.
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetch(`https://${SERVER}/api/ice`, { signal: AbortSignal.timeout(8000) });
@@ -213,7 +224,7 @@ async function peerOptions() {
       return options;
     } catch {}
   }
-  console.warn("[telinha] servidor próprio indisponível, usando o PeerJS público");
+  console.warn("[telinha] own server unavailable, using public PeerJS");
   state.fallback = true;
   return { config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } };
 }
@@ -230,7 +241,7 @@ async function openPeer(id) {
 
 function connectTo(peer, id, metadata) {
   return new Promise((resolve, reject) => {
-    // JSON (e não o BinaryPack padrão) para o app nativo também entender quando for o anfitrião.
+    // JSON (not the default BinaryPack) so the native app understands it when it is the host.
     const conn = peer.connect(id, { metadata, reliable: true, serialization: "json" });
     const timer = setTimeout(() => reject({ type: "timeout" }), 15000);
     const onErr = (err) => { clearTimeout(timer); reject(err); };
@@ -257,7 +268,7 @@ function peerErrorText(err) {
   }
 }
 
-/* ---------------- Peer: chamadas e reconexão ---------------- */
+/* ---------------- Peer: calls and reconnection ---------------- */
 
 function wirePeer(peer) {
   peer.on("connection", (conn) => { if (conn.metadata?.kind === "turbo") acceptTurbo(conn); });
@@ -282,26 +293,26 @@ function wirePeer(peer) {
   peer.on("disconnected", () => { if (!peer.destroyed) peer.reconnect(); });
   window.addEventListener("pagehide", () => state.turboOut?.stop());
   peer.on("error", (err) => {
-    if (err.type === "peer-unavailable") return; // alguém saiu no meio de uma chamada
+    if (err.type === "peer-unavailable") return; // someone left mid-call
     console.warn("[telinha]", err.type, err);
   });
 }
 
-/* Vídeo em atraso mínimo chegando (WebCodecs) */
+/* Incoming minimum-latency video (WebCodecs) */
 
 function acceptTurbo(conn) {
   if (!TURBO.receive) { conn.close(); return; }
   const id = conn.peer;
   state.turboIn.get(id)?.close();
-  state.audioIn.delete(id); // áudio de uma conexão anterior; o novo chega logo depois desta
+  state.audioIn.delete(id); // audio from a previous connection; the new one arrives right after this
   const rx = new TurboReceiver(openVideoChannel(conn.peerConnection), {
     requestKey: () => { if (conn.open) conn.send({ t: "key" }); },
     onUnsupported: () => { if (conn.open) conn.send({ t: "unsupported" }); },
     report: (r) => { if (conn.open) conn.send({ t: "rx", ...r, relay: entry.relay }); },
   });
-  // A espera por quadro perdido acompanha a ida e volta real da conexão; e
-  // quem manda fica sabendo se o caminho é pelo repasse (lá o canal de dados
-  // engasga, e o vídeo vai melhor pelo WebRTC comum).
+  // The wait for a lost frame tracks the connection's real round trip; and
+  // the sender learns whether the path goes through the relay (there the data
+  // channel stalls, and video works better over plain WebRTC).
   const rtt = setInterval(async () => {
     const stats = await conn.peerConnection?.getStats().catch(() => null);
     stats?.forEach((r) => {
@@ -338,7 +349,7 @@ function acceptTurboAudio(call) {
   call.on("error", end);
 }
 
-// Junta o vídeo decodificado com o áudio (que vem pelo WebRTC) numa trilha só.
+// Combines the decoded video with the audio (which comes over WebRTC) into one stream.
 function showTurbo(id) {
   const entry = state.turboIn.get(id);
   if (!entry) return;
@@ -353,12 +364,12 @@ function closeIncoming(id) {
   removeStream(id);
 }
 
-/* ---------------- Passe do Discord ---------------- */
+/* ---------------- Discord pass ---------------- */
 
-// Quem transmite pelo app com "só a call" manda vídeo só para quem entrega um
-// passe assinado pelo bot do Discord. O passe vai direto para essa pessoa
-// (nunca pela lista do canal, que todo mundo vê).
-const passStatus = new Map(); // id de quem transmite → { ok, motivo } | "enviando"
+// A sharer using the app with "call only" sends video only to those who present
+// a pass signed by the Discord bot. The pass goes directly to that person
+// (never through the channel roster, which everyone sees).
+const passStatus = new Map(); // sharer id → { ok, motivo } | "enviando"
 
 function passTarget() {
   try {
@@ -373,9 +384,14 @@ function deliverPass(id) {
   const conn = state.peer.connect(id, { metadata: { kind: "passe", passe: discordPass }, reliable: true, serialization: "json" });
   conn.on("data", (msg) => {
     if (msg?.t !== "passe") return;
+    setTimeout(() => conn.close(), 500);
+    // The sharer is still linking the stream to Discord: try again.
+    if (!msg.ok && msg.tentar) {
+      setTimeout(() => { passStatus.delete(id); if (state.members.get(id)?.discord) deliverPass(id); }, 3000);
+      return;
+    }
     passStatus.set(id, { ok: !!msg.ok, motivo: msg.motivo });
     renderStreams();
-    setTimeout(() => conn.close(), 500);
   });
   conn.on("error", () => { passStatus.delete(id); });
 }
@@ -394,7 +410,7 @@ function applyRoster(list) {
       closeIncoming(id);
     }
   }
-  // A primeira lista que chega é o estado inicial, não novidade.
+  // The first roster received is the initial state, not news.
   if (state.members.size) {
     for (const [id, m] of next) {
       const prev = state.members.get(id);
@@ -414,7 +430,7 @@ function applyRoster(list) {
   if ("open" in qp.dataset) renderQuality();
 }
 
-/* ---------------- Transmitir ---------------- */
+/* ---------------- Share ---------------- */
 
 ui.shareBtn.addEventListener("click", () => (state.localStream ? stopShare() : startShare()));
 
@@ -426,7 +442,7 @@ async function startShare() {
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: state.quality.fps, max: 60 } }, // sem limite de tamanho: a qualidade decide
+      video: { frameRate: { ideal: state.quality.fps, max: 60 } }, // no size limit: quality settings decide
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       systemAudio: "include",
       selfBrowserSurface: "exclude",
@@ -443,7 +459,7 @@ async function startShare() {
   state.codec = await hardwareCodec(video);
   state.audioSource = stream.getAudioTracks().length ? "tela" : null;
   if (!state.audioSource && safeGet("telinha:systemAudio") !== "off") {
-    const track = await captureSystemAudio(false).catch(() => null); // só se a permissão já existe
+    const track = await captureSystemAudio(false).catch(() => null); // only if permission was already granted
     if (track) { stream.addTrack(track); state.audioSource = "computador"; }
   }
 
@@ -477,18 +493,18 @@ function announceSharing(on) {
 
 function useTurbo() { return state.quality.turbo && TURBO.send; }
 
-// Trilhas mudaram: reabre as conexões (o PeerJS não renegocia).
+// Tracks changed: reopen connections (PeerJS does not renegotiate).
 function restartTransport() {
   if (!state.localStream) return;
   stopTransport();
   startTransport();
 }
 
-/* ---------------- Som do computador ----------------
- * No Windows o Chrome manda o som do sistema junto com a tela inteira (caixa
- * "Compartilhar áudio do sistema"). No Linux e no Mac ele só manda o som de
- * abas; lá a saída de som vira uma entrada virtual ("Som do computador", ver
- * som-linux.conf) e a gente pega como se fosse um microfone. */
+/* ---------------- Computer audio ----------------
+ * On Windows Chrome sends system audio along with the whole screen ("Share
+ * system audio" checkbox). On Linux and Mac it only sends tab audio; there the
+ * audio output becomes a virtual input ("Som do computador", see
+ * som-linux.conf) and we capture it as if it were a microphone. */
 
 const SYSTEM_AUDIO_RE = /som do computador|monitor of|blackhole|loopback/i;
 const OS = /win/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? "windows"
@@ -503,7 +519,7 @@ async function captureSystemAudio(ask) {
   if (!navigator.mediaDevices?.getUserMedia) return null;
   let device = await findSystemAudioDevice();
   if (!device && ask) {
-    // o nome dos dispositivos só aparece depois da permissão de microfone
+    // device names only appear after microphone permission
     const probe = await navigator.mediaDevices.getUserMedia({ audio: true });
     probe.getTracks().forEach((t) => t.stop());
     device = await findSystemAudioDevice();
@@ -536,7 +552,7 @@ function disableSystemAudio() {
   renderQuality();
 }
 
-// Som de jogo e música: Opus em estéreo e com mais banda (o padrão é voz mono ~32 kb/s).
+// Game and music audio: stereo Opus with more bandwidth (default is mono voice ~32 kb/s).
 function hiFiAudio(sdp) {
   const pt = sdp.match(/a=rtpmap:(\d+) opus\/48000/i)?.[1];
   if (!pt) return sdp;
@@ -562,7 +578,7 @@ function stopTransport() {
   state.demoted.clear();
 }
 
-// Quem consegue receber por WebCodecs ganha o caminho de atraso mínimo; o resto, WebRTC.
+// Peers that can receive via WebCodecs get the minimum-latency path; the rest, WebRTC.
 function connectMember(id) {
   if (state.turboOut && state.members.get(id)?.wc && !state.demoted.has(id)) turboMember(id);
   else callMember(id);
@@ -589,8 +605,8 @@ function turboMember(id) {
     }
     else if (msg?.t === "unsupported") demote(id);
   });
-  // Conta pra quem assiste como está o lado de cá (captura, codificador, aba
-  // escondida), pra dar pra achar o gargalo olhando só o painel de quem assiste.
+  // Tells viewers how this side is doing (capture, encoder, hidden tab), so the
+  // bottleneck can be found from the viewer's panel alone.
   let info = 0;
   conn.on("open", () => {
     const tracks = state.localStream?.getAudioTracks() ?? [];
@@ -613,8 +629,8 @@ function turboMember(id) {
   conn.on("error", end);
 }
 
-// Fila cheia o tempo todo ou navegador sem o codec: essa pessoa volta pro WebRTC,
-// que sabe baixar a qualidade sozinho.
+// Queue always full or browser lacks the codec: this person goes back to WebRTC,
+// which can lower quality on its own.
 function demote(id, congested = false) {
   const handle = state.outgoing.get(id);
   if (handle?.kind !== "turbo") return;
@@ -635,15 +651,15 @@ function callMember(id) {
   tuneSender(call.peerConnection);
 }
 
-/* ---------------- Latência (ideias do Sunshine/Moonlight) ----------------
+/* ---------------- Latency (ideas from Sunshine/Moonlight) ----------------
  *
- * - Codificador de hardware: o Sunshine usa NVENC/QuickSync/VAAPI. Aqui quem
- *   transmite descobre qual codec a placa de vídeo codifica (powerEfficient) e
- *   avisa quem assiste, que põe esse codec na frente da resposta.
- * - Teto de bitrate do tamanho do vídeo (o Sunshine limita o buffer a um
- *   quadro): sem rajadas acima do necessário, menos perda e fila no repasse.
- * - Modo: fluidez mantém os quadros por segundo (jogos), nitidez mantém a
- *   resolução (texto, código). */
+ * - Hardware encoder: Sunshine uses NVENC/QuickSync/VAAPI. Here the sharer
+ *   finds which codec the GPU encodes (powerEfficient) and tells viewers,
+ *   who put that codec first in their answer.
+ * - Bitrate cap sized to the video (Sunshine limits the buffer to one frame):
+ *   no bursts beyond what is needed, less loss and queuing on the relay.
+ * - Mode: smoothness keeps frames per second (games), sharpness keeps
+ *   resolution (text, code). */
 
 async function hardwareCodec(track) {
   if (!navigator.mediaCapabilities?.encodingInfo) return null;
@@ -684,7 +700,7 @@ function tuneSender(pc) {
   pc.addEventListener("connectionstatechange", () => { if (pc.connectionState === "connected") applySenderParams(pc); });
 }
 
-/* ---------------- Qualidade da transmissão ---------------- */
+/* ---------------- Stream quality ---------------- */
 
 const PRIORITIES = {
   fluidez: { hint: "motion", degradation: "maintain-framerate", note: "Mantém o movimento suave. Bom pra jogos e vídeos." },
@@ -703,17 +719,17 @@ function loadQuality() {
   };
 }
 
-// Tamanho que vai sair, respeitando a proporção da tela capturada e nunca
-// aumentando além do original.
+// Output size, keeping the captured screen's aspect ratio and never
+// scaling above the original.
 function targetSize() {
   const { width, height } = state.native ?? { width: 1920, height: 1080 };
   const h = state.quality.res === "original" ? height : Math.min(height, Number(state.quality.res));
   return { width: Math.round((h * width) / height / 2) * 2, height: h };
 }
 
-// Orçamento por pessoa, proporcional aos pixels por segundo (~0,08 bit por pixel).
-// Medido: um teto do tamanho do vídeo reduz perda e fila no repasse; abaixo de
-// ~0,07 o codificador começa a baixar a resolução sozinho.
+// Per-person budget, proportional to pixels per second (~0.08 bit per pixel).
+// Measured: a cap sized to the video reduces loss and queuing on the relay;
+// below ~0.07 the encoder starts lowering resolution on its own.
 function targetBitrate() {
   const { width, height } = targetSize();
   return Math.min(20e6, Math.max(2.5e6, width * height * state.quality.fps * 0.08));
@@ -742,10 +758,10 @@ function applySenderParams(pc) {
     const captured = sender.track.getSettings().height || height;
     p.encodings[0].maxBitrate = Math.round(targetBitrate());
     p.encodings[0].maxFramerate = state.quality.fps;
-    p.encodings[0].scaleResolutionDownBy = Math.max(1, captured / height); // se a captura não aceitou reduzir
+    p.encodings[0].scaleResolutionDownBy = Math.max(1, captured / height); // if the capture did not accept downscaling
     p.degradationPreference = PRIORITIES[state.quality.priority].degradation;
     sender.setParameters(p).catch(() => {
-      delete p.degradationPreference; // nem todo navegador aceita
+      delete p.degradationPreference; // not every browser supports it
       sender.setParameters(p).catch(() => {});
     });
   }
@@ -759,7 +775,7 @@ function setQuality(change) {
   if (switchTransport) restartTransport();
 }
 
-/* Painel: nasce do botão e volta pra ele */
+/* Panel: grows out of the button and returns to it */
 
 const qp = ui.qualityPanel;
 const segs = { res: $("resSeg"), fps: $("fpsSeg"), priority: $("prioSeg"), turbo: $("turboSeg") };
@@ -814,7 +830,7 @@ function renderQuality() {
     .filter((h) => h < native.height)
     .map((h) => ({ value: String(h), label: `${h}p` }));
   resOptions.push({ value: "original", label: "Original" });
-  // escolha salva maior que a tela atual vira "Original" na tela
+  // a saved choice larger than the current screen shows as "Original"
   const shownRes = resOptions.some((o) => o.value === state.quality.res) ? state.quality.res : "original";
   renderSeg(segs.res, "res", resOptions, shownRes);
   renderSeg(segs.fps, "fps", [{ value: 30, label: "30" }, { value: 60, label: "60" }]);
@@ -830,7 +846,7 @@ function renderQuality() {
     : "Usa o WebRTC padrão do navegador, que se adapta bem a conexões instáveis.";
   const mbps = (n) => n.toLocaleString("pt-BR", { maximumFractionDigits: 1 });
   const viewers = Math.max(0, state.members.size - 1);
-  const perPerson = Math.round(targetBitrate() / 1e5) / 10; // em Mb/s, já arredondado
+  const perPerson = Math.round(targetBitrate() / 1e5) / 10; // in Mb/s, already rounded
 
   $("qualityUpload").textContent = viewers > 1
     ? `Até ${mbps(perPerson)} Mb/s de upload por pessoa. Com ${viewers} pessoas assistindo, até ${mbps(perPerson * viewers)} Mb/s.`
@@ -848,7 +864,7 @@ function openQuality(viaKeyboard) {
   qp.style.bottom = `${innerHeight - b.top + 10}px`;
   qp.style.maxHeight = `${b.top - 22}px`;
   qp.style.transformOrigin = `${b.left + b.width / 2 - left}px 100%`;
-  qp.getBoundingClientRect(); // fixa o estado inicial antes da transição
+  qp.getBoundingClientRect(); // commits the initial state before the transition
   qp.dataset.open = "";
   ui.qualityBtn.setAttribute("aria-expanded", "true");
   if (viaKeyboard) qp.querySelector("input:checked")?.focus();
@@ -881,7 +897,7 @@ function renderShareButton() {
   if (!live) closeQuality();
 }
 
-/* ---------------- Telas na sala ---------------- */
+/* ---------------- Screens in the room ---------------- */
 
 function addStream(id, stream, name, local) {
   const existing = state.streams.get(id);
@@ -898,13 +914,13 @@ function addStream(id, stream, name, local) {
   state.streams.set(id, { stream, name, local, thumb });
   stream.addEventListener("removetrack", () => { if (!stream.getVideoTracks().length) removeStream(id); });
 
-  // A tela de alguém tem prioridade sobre a própria pré-visualização.
+  // Someone else's screen takes priority over our own preview.
   const cur = state.streams.get(state.featured);
   if (!cur || (cur.local && !local)) state.featured = id;
   renderStreams();
 }
 
-// Palco vazio: explica o que fazer quando a transmissão é só para a call.
+// Empty stage: explains what to do when the stream is call-only.
 function renderEmpty() {
   const me = state.peer?.id;
   const gated = [...state.members].find(([id, m]) => id !== me && m.sharing && m.discord);
@@ -920,6 +936,8 @@ function renderEmpty() {
     st === "enviando" ? "Conferindo seu passe…"
     : st?.ok ? "Passe aceito. A imagem já vai aparecer."
     : st?.motivo ? st.motivo
+    // Pass from a previous stream (the sharer's app restarted).
+    : discordPass ? "Seu passe é de uma transmissão anterior. Clique em Assistir de novo no chat da call."
     : "Entre na call do Discord e clique em Assistir no chat dela.";
 }
 
@@ -956,7 +974,7 @@ function renderStreams() {
       ui.feature.muted = s.local || state.muted;
       ui.feature.volume = state.volume;
       ui.feature.play().catch(() => {
-        // autoplay com som bloqueado: toca mudo e oferece o botão
+        // autoplay with sound blocked: play muted and offer the button
         ui.feature.muted = true;
         ui.feature.play().catch(() => {});
         if (!s.local && s.stream.getAudioTracks().length) ui.unmute.hidden = false;
@@ -975,13 +993,13 @@ function renderStreams() {
     item.thumb.querySelector(".thumb-name > span").textContent = item.local ? "Você" : item.name;
     if (item.thumb.parentNode !== ui.strip) {
       ui.strip.append(item.thumb);
-      item.thumb.querySelector("video").play().catch(() => {}); // sair do DOM pausa o vídeo
+      item.thumb.querySelector("video").play().catch(() => {}); // leaving the DOM pauses the video
     }
   }
   if (!showStrip) for (const item of state.streams.values()) item.thumb.remove();
 }
 
-/* Volume, tela cheia, janela flutuante */
+/* Volume, fullscreen, picture-in-picture */
 state.volume = Number(safeGet("telinha:volume") ?? 1);
 state.muted = false;
 ui.volume.value = state.volume;
@@ -1042,7 +1060,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "i" || e.key === "I") stats.toggle();
 });
 
-// Esconde a barra da transmissão quando o mouse fica parado sobre a tela.
+// Hides the stream bar when the mouse rests over the screen.
 let idleTimer;
 function wake() {
   ui.stage.classList.remove("idle-cursor");
@@ -1057,7 +1075,7 @@ ui.stage.addEventListener("pointermove", wake);
 ui.stage.addEventListener("pointerdown", wake);
 ui.stage.addEventListener("focusin", wake);
 
-/* ---------------- Pessoas ---------------- */
+/* ---------------- People ---------------- */
 
 const AVATAR_COLORS = ["#cfe0ff", "#ffd9a8", "#bff0d4", "#f5c6ff", "#ffe48a", "#a8ecff", "#ffc2c2"];
 function renderPeople() {
@@ -1087,7 +1105,7 @@ function initials(name) {
 }
 function hash(s) { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; }
 
-/* ---------------- Entrar / sair da sala ---------------- */
+/* ---------------- Join / leave room ---------------- */
 
 function enterRoom() {
   state.inRoom = true;
@@ -1101,7 +1119,7 @@ function enterRoom() {
   renderShareButton();
   renderMute();
 
-  // A telinha da entrada se expande e vira a sala.
+  // The entry screen expands and becomes the room.
   const r = ui.tv.getBoundingClientRect();
   ui.room.hidden = false;
   ui.lobby.classList.add("leaving");
@@ -1136,7 +1154,7 @@ function offAir() {
 
 window.addEventListener("beforeunload", () => state.peer?.destroy());
 
-/* Convite */
+/* Invite */
 for (const btn of document.querySelectorAll('[data-action="invite"]')) {
   btn.addEventListener("click", async () => {
     const url = `${location.origin}${location.pathname}#${state.code}`;
@@ -1149,7 +1167,7 @@ for (const btn of document.querySelectorAll('[data-action="invite"]')) {
   });
 }
 
-/* ---------------- Avisos ---------------- */
+/* ---------------- Notices ---------------- */
 
 function toast(text) {
   const el = document.createElement("div");
@@ -1163,7 +1181,7 @@ function toast(text) {
   }, 3200);
 }
 
-/* ---------------- Chiado da TV ---------------- */
+/* ---------------- TV static ---------------- */
 
 const staticCtx = $("static").getContext("2d");
 const img = staticCtx.createImageData(160, 100);
