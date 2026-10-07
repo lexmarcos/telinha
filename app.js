@@ -68,14 +68,25 @@ if (!/android|iphone|ipad/i.test(navigator.userAgent)) {
 }
 // Invite: #1234. The Discord bot's Watch button also brings a pass
 // (#1234/passe), which is removed from the address bar so it is not copy-pasted along.
-const [hashRaw = "", hashPass = ""] = location.hash.slice(1).split("/");
-const hashCode = hashRaw.replace(/\D/g, "").slice(0, 4);
-let discordPass = hashPass.trim();
+// The bot's /new-telinha opens #novo/<name>/<avatar>: a new channel right away,
+// as that Discord person.
+const [hashRaw = "", hashPass = "", hashAvatar = ""] = location.hash.slice(1).split("/");
+const opening = hashRaw === "novo";
+const hashCode = opening ? "" : hashRaw.replace(/\D/g, "").slice(0, 4);
+let discordPass = opening ? "" : hashPass.trim();
 if (discordPass) history.replaceState(null, "", `${location.pathname}${location.search}#${hashCode}`);
+if (opening) {
+  const decode = (s) => { try { return decodeURIComponent(s); } catch { return ""; } };
+  const name = decode(hashPass).trim().slice(0, 24);
+  if (!ui.name.value.trim() && name) ui.name.value = name;
+  if (isDiscordAvatar(decode(hashAvatar))) safeSet("telinha:avatar", decode(hashAvatar));
+  history.replaceState(null, "", `${location.pathname}${location.search}`);
+}
 // Watch link opened in a tab already in the channel: the browser only changes
 // the "#" and does not reload the page, so the new pass arrives here.
 window.addEventListener("hashchange", () => {
   const [raw = "", pass = ""] = location.hash.slice(1).split("/");
+  if (raw === "novo") return location.reload(); // another "Abrir canal novo" click
   if (!pass.trim()) return;
   discordPass = pass.trim();
   history.replaceState(null, "", `${location.pathname}${location.search}#${raw.replace(/\D/g, "").slice(0, 4)}`);
@@ -97,6 +108,7 @@ if (hashCode.length === 4) {
   if (ui.name.value.trim()) setTimeout(() => join(hashCode), 0);
   else setTimeout(() => ui.name.focus(), 950);
 }
+if (opening) setTimeout(() => host(), 0);
 syncLobby();
 
 /** Only Discord's avatar CDN: nobody can make others load an arbitrary URL. */

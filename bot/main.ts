@@ -246,6 +246,22 @@ async function interaction(req: Request) {
       ? `Pronto: os anúncios do Telinha vão sair em <#${chosen}>. O botão Assistir continua só funcionando para quem está na call.`
       : "Pronto: os anúncios do Telinha voltam a sair no chat da própria call.");
   }
+  if (it.type === 2 && it.data?.name === "new-telinha") {
+    // Discord cannot open the browser by itself: a link button does it in one
+    // click. The link carries the person's Discord name and avatar, so the site
+    // opens the channel as them.
+    const name = it.member?.nick ?? who.global_name ?? who.username;
+    const avatar = who.avatar ? `https://cdn.discordapp.com/avatars/${who.id}/${who.avatar}.png?size=64` : "";
+    const url = `https://${HOST}/#novo/${encodeURIComponent(name)}${avatar ? `/${encodeURIComponent(avatar)}` : ""}`;
+    return json({
+      type: 4,
+      data: {
+        flags: 64,
+        content: "Clique no botão para abrir um canal novo do Telinha no navegador.",
+        components: [{ type: 1, components: [{ type: 2, style: 5, label: "Abrir canal novo", url }] }],
+      },
+    });
+  }
   if (it.type === 2 && it.data?.name === "telinha") {
     // Re-announces the stream of whoever is in this call (if the announcement is gone).
     const mine = it.guild_id ? await voiceChannel(it.guild_id, who.id) : null;
@@ -352,6 +368,7 @@ setInterval(() => {
 // Commands (re-registered on every start; Discord ignores them if unchanged).
 await discord(`/applications/${CLIENT_ID}/commands`, "PUT", [
   { name: "telinha", description: "Mostra o botão para assistir quem está transmitindo nesta call", contexts: [0], integration_types: [0] },
+  { name: "new-telinha", description: "Abre um canal novo do Telinha no navegador", contexts: [0, 1], integration_types: [0] },
   {
     name: "telinha-canal",
     description: "Escolhe onde o Telinha anuncia as transmissões (sem canal: no chat da própria call)",
