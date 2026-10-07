@@ -1,11 +1,12 @@
 #!/bin/sh
-# Baixa e prepara o que o app precisa para compilar e empacotar, em .deps/
-# (nada é instalado no sistema, nem precisa de sudo):
-#   - FFmpeg 9 pré-compilado (BtbN, LGPL) para Linux e Windows
-#   - libva 2.22 (o VAAPI do FFmpeg novo exige >= 2.21; as distros LTS têm 2.20)
-#   - cabeçalhos do PipeWire (extraídos dos .deb do Ubuntu)
-#   - Zig (compila mirando glibc 2.35), appimagetool e NSIS
-# Requisitos no sistema: curl, python3, ninja, clang, libdrm (cabeçalhos), apt-get.
+# Downloads and prepares what the app needs to build and package, in .deps/
+# (nothing is installed system-wide, no sudo needed):
+#   - FFmpeg 9 (BtbN, LGPL): prebuilt for Linux; for Windows, built with the NVENC
+#     of older drivers (scripts/ffmpeg-windows.sh, needs Docker)
+#   - libva 2.22 (the new FFmpeg's VAAPI requires >= 2.21; LTS distros ship 2.20)
+#   - PipeWire headers (extracted from Ubuntu .debs)
+#   - Zig (builds targeting glibc 2.35), appimagetool and NSIS
+# System requirements: curl, python3, ninja, clang, libdrm (headers), apt-get.
 set -eu
 cd "$(dirname "$0")/.."
 D="$PWD/.deps"
@@ -19,9 +20,15 @@ if [ ! -d "$D/ffmpeg-linux" ]; then
 fi
 if [ ! -d "$D/ffmpeg-win" ]; then
   echo "FFmpeg (Windows)"
-  curl -fsSL -o "$D/win.zip" "$B/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip"
-  unzip -q "$D/win.zip" -d "$D" && rm "$D/win.zip"
-  mv "$D"/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0 "$D/ffmpeg-win"
+  if command -v docker >/dev/null 2>&1; then
+    # Built with the NVENC that runs on NVIDIA drivers from 2023 onward.
+    sh scripts/ffmpeg-windows.sh
+  else
+    echo "warning: no Docker, using the prebuilt BtbN FFmpeg: its NVENC requires driver 610+"
+    curl -fsSL -o "$D/win.zip" "$B/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip"
+    unzip -q "$D/win.zip" -d "$D" && rm "$D/win.zip"
+    mv "$D"/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0 "$D/ffmpeg-win"
+  fi
 fi
 
 [ -d "$D/venv" ] || python3 -m venv "$D/venv"
@@ -45,7 +52,7 @@ if [ ! -f "$D/libva/lib/libva.so.2" ]; then
 fi
 
 if [ ! -d "$D/sysroot/usr/include/pipewire-0.3" ]; then
-  echo "cabeçalhos do PipeWire"
+  echo "PipeWire headers"
   (cd "$D/debs" && apt-get download libpipewire-0.3-dev libspa-0.2-dev)
   for f in "$D"/debs/lib*-dev_*.deb; do dpkg-deb -x "$f" "$D/sysroot"; done
   ln -sf /usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0 "$D/sysroot/usr/lib/x86_64-linux-gnu/libpipewire-0.3.so"
@@ -63,4 +70,4 @@ command -v cargo-deb >/dev/null || cargo install cargo-deb --locked
 command -v cargo-zigbuild >/dev/null || cargo install cargo-zigbuild --locked
 command -v cargo-xwin >/dev/null || cargo install cargo-xwin --locked
 rustup target add x86_64-pc-windows-msvc >/dev/null
-echo "pronto"
+echo "done"
