@@ -28,7 +28,9 @@ DOCKER
 # Same name as the original image: BtbN's build.sh uses the local one.
 docker build -q -t "$IMAGE" "$D/nvenc-antigo" >/dev/null
 
-(cd "$D/FFmpeg-Builds" && rm -rf artifacts && ./build.sh win64 lgpl-shared 9.0)
+# In GitHub Actions, build.sh would name the image after the running repository
+# (GITHUB_REPOSITORY) instead of using the one prepared above.
+(cd "$D/FFmpeg-Builds" && rm -rf artifacts && env -u GITHUB_REPOSITORY ./build.sh win64 lgpl-shared 9.0)
 ZIP=$(ls "$D"/FFmpeg-Builds/artifacts/*win64-lgpl-shared-9.0.zip)
 rm -rf "$D/ffmpeg-win" "$D/ffmpeg-win.tmp"
 mkdir -p "$D/ffmpeg-win.tmp"
