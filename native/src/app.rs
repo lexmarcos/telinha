@@ -90,6 +90,8 @@ struct Controller {
     /// before and after (the window resizes twice, not every frame).
     hold_h: f32,
     dragging: bool,
+    /// When the connecting spinner started turning.
+    spin_from: Instant,
     timer: slint::Timer,
 
     engine: tokio::sync::mpsc::Sender<Command>,
@@ -148,6 +150,7 @@ pub fn run() {
         fade: Spring::new(1.0, motion::FADE),
         hold_h: 0.0,
         dragging: false,
+        spin_from: Instant::now(),
         timer: slint::Timer::default(),
         engine,
         tray,
@@ -375,8 +378,14 @@ impl Controller {
 
     /* ---------------- molas ---------------- */
 
+    /// The bubble spinner turns while connecting (still with reduced motion).
+    fn spinning(&self) -> bool {
+        self.session == Session::Connecting && !reduced_motion()
+    }
+
     fn animating(&self) -> bool {
-        self.fresh_panel
+        self.spinning()
+            || self.fresh_panel
             || self.open.is_moving()
             || self.press.is_moving()
             || self.tally.is_moving()
@@ -422,6 +431,9 @@ impl Controller {
         ui.set_panel_h(self.panel_h.value());
         ui.set_hold_h(self.hold_h);
         ui.set_content_fade(self.fade.value());
+        // One turn every 1.4 s.
+        let turns = if self.spinning() { self.spin_from.elapsed().as_secs_f32() / 1.4 } else { 0.0 };
+        ui.set_spin(turns.fract() * 360.0);
         let thumbs: Vec<f32> = self.thumbs.iter().map(Spring::value).collect();
         ui.global::<AppState>().set_thumbs(ModelRc::new(VecModel::from(thumbs)));
     }
@@ -682,7 +694,11 @@ impl Controller {
 
     fn on_engine(&mut self, e: Event) {
         match e {
-            Event::Connecting => self.session = Session::Connecting,
+            Event::Connecting => {
+                self.session = Session::Connecting;
+                self.spin_from = Instant::now();
+                self.animate();
+            }
             Event::Joined { code, invite, server } => {
                 self.session = Session::Channel { code, invite, live: false };
                 self.joining = false;
@@ -785,7 +801,10 @@ fn shots(dir: PathBuf) {
             c.join_text = "4821".into();
             c.open_panel(Panel::Join);
         }),
-        ("no-canal", 1800, |c| c.join_submit()),
+        // Two frames of the spinner (the fake engine connects in 900 ms).
+        ("conectando", 200, |c| c.join_submit()),
+        ("conectando-2", 250, |_| {}),
+        ("no-canal", 1400, |_| {}),
         ("menu-canal", 700, |c| c.open_panel(Panel::Menu)),
         ("ao-vivo", 1200, |c| {
             let quality = c.config.quality;

@@ -20,6 +20,7 @@ export component Bolha inherits Window {
     in property <float> open;
     in property <float> press;
     in property <float> tally;
+    in property <angle> spin;
     in property <float> content-fade: 1;
     in property <length> panel-h;
     // Panel: which one (1 menu, 2 quality, 3 join, 4 Discord), whether it fills the
@@ -67,6 +68,7 @@ export component Bolha inherits Window {
             code: AppState.code;
             tally: root.tally;
             press: root.press;
+            spin: root.spin;
             pointer-down => { root.bubble-down(); }
             pointer-up => { root.bubble-up(); }
             drag-start => { root.bubble-drag(); }

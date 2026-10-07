@@ -13,6 +13,8 @@ export component Bubble inherits Rectangle {
     // App springs: 0..1 (the "on air" ring overshoots 1 a little on the bounce).
     in property <float> tally;
     in property <float> press;
+    // Spinner angle while connecting (the app turns it every frame).
+    in property <angle> spin;
     callback pointer-down();
     callback pointer-up();
     callback drag-start();
@@ -76,18 +78,20 @@ export component Bubble inherits Rectangle {
                 color: Palette.phosphor;
             }
         }
-        // Connecting: the app's only spinner, a slow arc around the tube.
+        // Connecting: the app's only spinner, a slow quarter arc around the tube.
+        // The software renderer ignores transform-rotation on a Path, so the arc
+        // ends are computed from the angle. The angle comes from the app:
+        // animation-tick() alone does not ask for new frames there.
         if root.face == Face.connecting: Path {
+            property <angle> a: root.spin;
             width: root.width;
             height: root.height;
             viewbox-width: 64;
             viewbox-height: 64;
             stroke: Palette.phosphor;
             stroke-width: 2.5px;
-            transform-origin: { x: self.width / 2, y: self.height / 2 };
-            transform-rotation: Motion.reduced ? 0deg : animation-tick() / 1.4s * 360deg;
-            MoveTo { x: 32; y: 2.5; }
-            ArcTo { x: 61.5; y: 32; radius-x: 29.5; radius-y: 29.5; sweep: true; }
+            MoveTo { x: 32 + 29.5 * sin(a); y: 32 - 29.5 * cos(a); }
+            ArcTo { x: 32 + 29.5 * sin(a + 90deg); y: 32 - 29.5 * cos(a + 90deg); radius-x: 29.5; radius-y: 29.5; sweep: true; }
         }
         // On air: red ring arriving with a bounce + recording dot.
         if root.tally > 0.01: Rectangle {
