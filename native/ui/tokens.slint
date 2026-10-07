@@ -1,5 +1,5 @@
-// Tokens do design system (DESIGN.md). Nenhum componente define cor, tamanho,
-// raio ou tempo próprios: tudo sai daqui.
+// Design system tokens (DESIGN.md). No component defines its own color, size,
+// radius or timing: everything comes from here.
 
 export global Palette {
     out property <color> room: #0D1430;
@@ -13,7 +13,7 @@ export global Palette {
     out property <color> warn: #FFC56B;
     out property <color> white: #FFFFFF;
     out property <color> shadow: #000000;
-    // Avatares de quem assiste (os mesmos do site), escolhidos pelo nome.
+    // Viewer avatars (the same as the website), picked by name.
     out property <[color]> avatars: [#CFE0FF, #FFD9A8, #BFF0D4, #F5C6FF, #FFE48A, #A8ECFF, #FFC2C2];
 }
 
@@ -39,12 +39,12 @@ export global Size {
     out property <length> icon: 16px;
     out property <length> segment-h: 32px;
     out property <length> button-h: 36px;
-    // Folga em volta do conteúdo para a sombra caber dentro da janela.
+    // Margin around the content so the shadow fits inside the window.
     out property <length> shadow-room: 18px;
 }
 
 export global Radius {
-    // Hierarquia: superfície grande > controle > marcador. Nunca um raio único.
+    // Hierarchy: large surface > control > thumb. Never a single radius.
     out property <length> panel: 20px;
     out property <length> item: 10px;
     out property <length> track: 11px;
@@ -60,7 +60,7 @@ export global Type {
     out property <length> digits-bubble: 17px;
     out property <length> digits-field: 30px;
     out property <length> dot: 8.5px;
-    // Tracking por tamanho: título um pouco fechado, rótulo pequeno um pouco aberto.
+    // Tracking by size: title slightly tight, small label slightly loose.
     out property <length> title-tracking: -0.15px;
     out property <length> label-tracking: 0.2px;
     out property <int> regular: 400;
@@ -68,13 +68,13 @@ export global Type {
 }
 
 export global Motion {
-    // Ligado pelo app quando o sistema pede menos animação: sem escala nem
-    // quique, só troca de opacidade.
+    // Set by the app when the system asks for reduced motion: no scaling or
+    // bounce, only opacity changes.
     in property <bool> reduced: false;
-    // Escala de onde o painel nasce e quanto a bolha encolhe no aperto.
+    // Scale the panel starts from and how much the bubble shrinks on press.
     out property <float> panel-from-scale: 0.92;
     out property <float> press-scale: 0.94;
-    // Micro-resposta de itens e botões no aperto (o resto usa as molas do app).
+    // Micro-response of items and buttons on press (everything else uses the app's springs).
     out property <duration> press: 90ms;
     out property <duration> hover: 120ms;
 }

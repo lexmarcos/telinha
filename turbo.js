@@ -1,27 +1,27 @@
-// Modo "atraso mínimo": vídeo por WebCodecs + canal de dados, no espírito do
+// "Minimum delay" mode: video over WebCodecs + data channel, in the spirit of
 // Sunshine/Moonlight.
 //
-// Quem transmite codifica cada quadro UMA vez (VideoEncoder em modo realtime,
-// taxa constante, keyframe só quando alguém pede) e manda os mesmos pedaços
-// para todo mundo por um canal sem ordem e com reenvio curto. Quem assiste
-// remonta, decodifica com optimizeForLatency e entrega o quadro na hora para
-// uma trilha de vídeo comum, sem buffer de espera.
+// The streamer encodes each frame ONCE (VideoEncoder in realtime mode,
+// constant bitrate, keyframe only on request) and sends the same chunks
+// to everyone over an unordered channel with short retransmission. Viewers
+// reassemble, decode with optimizeForLatency and hand the frame right away to
+// a regular video track, with no wait buffer.
 //
-// Pacote (little endian):
-//   u8 0x54 | u8 flags (1 = keyframe, 2 = traz config) | u16 índice | u16 total
-//   u16 tamanho da config | u32 sequência | f64 timestamp (µs) | [config JSON] | dados
+// Packet (little endian):
+//   u8 0x54 | u8 flags (1 = keyframe, 2 = has config) | u16 index | u16 total
+//   u16 config size | u32 sequence | f64 timestamp (µs) | [config JSON] | data
 
 const MAGIC = 0x54;
 const HEADER = 20;
 const FRAG = 16000;
-const HOLD_MS = 150;        // espera mínima por um quadro que ficou faltando
-const HOLD_MAX_MS = 600;    // ... e máxima (com ida e volta longa, pelo repasse)
-const PACKET_LIFETIME_MS = 400; // reenvio do lado de quem manda; no direto ele acontece em ~1 ms
-const KEY_INTERVAL_MS = 1000; // keyframe pedida por fila cheia: no máximo 1 por segundo
-const VIEWER_KEY_MS = 500;    // keyframe pedida por quem perdeu um quadro
-const REPORT_MS = 1000;       // relatório de quem assiste para quem transmite
-// Codificadores de hardware (NVENC/QuickSync via Media Foundation, VAAPI)
-// trabalham com alguns quadros em andamento; só descarta se a fila passar disso.
+const HOLD_MS = 150;        // minimum wait for a missing frame
+const HOLD_MAX_MS = 600;    // ... and maximum (long round trip, via relay)
+const PACKET_LIFETIME_MS = 400; // sender-side retransmission; on a direct path it takes ~1 ms
+const KEY_INTERVAL_MS = 1000; // keyframe requested due to full queue: at most 1 per second
+const VIEWER_KEY_MS = 500;    // keyframe requested by a viewer that lost a frame
+const REPORT_MS = 1000;       // report from viewer to streamer
+// Hardware encoders (NVENC/QuickSync via Media Foundation, VAAPI)
+// keep a few frames in flight; only drop if the queue goes past that.
 const MAX_ENCODE_QUEUE = 3;
 const CHANNEL = { negotiated: true, id: 100, ordered: false, maxPacketLifeTime: PACKET_LIFETIME_MS };
 
@@ -32,16 +32,16 @@ export function turboSupport() {
   };
 }
 
-// Os dois lados criam o mesmo canal (negociado, id fixo) sobre a conexão já aberta.
+// Both sides create the same channel (negotiated, fixed id) over the already open connection.
 export function openVideoChannel(pc) {
   const ch = pc.createDataChannel("telinha-video", CHANNEL);
   ch.binaryType = "arraybuffer";
   return ch;
 }
 
-/* ---------------- Quem transmite ---------------- */
+/* ---------------- Streamer ---------------- */
 
-// Preferência: H.264 na placa de vídeo, depois H.264 e VP8 por software.
+// Preference: H.264 on the GPU, then H.264 and VP8 in software.
 const CANDIDATES = [
   ["avc1.640034", "prefer-hardware"],
   ["avc1.4d0034", "prefer-hardware"],
@@ -56,7 +56,7 @@ function encoderConfig({ codec, hw, mode }, width, height, bitrate, framerate) {
     latencyMode: "realtime",
     bitrateMode: mode,
     hardwareAcceleration: hw,
-    ...(codec.startsWith("avc1") ? { avc: { format: "annexb" } } : {}), // SPS/PPS em toda keyframe
+    ...(codec.startsWith("avc1") ? { avc: { format: "annexb" } } : {}), // SPS/PPS on every keyframe
   };
 }
 
@@ -85,7 +85,7 @@ export class TurboSender {
     this.size = null;
     this.dirty = false;
     this.closed = false;
-    this.pending = new Map(); // timestamp -> instante do encode()
+    this.pending = new Map(); // timestamp -> time of encode()
     this.stats = { encodeMs: null, frames: 0, captured: 0, skipped: 0 };
     this.reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
     this.done = this.#loop();
@@ -101,9 +101,9 @@ export class TurboSender {
 
   removeViewer(id) { this.viewers.delete(id); }
 
-  // Quem assiste conta o que chegou. O canal descarta em silêncio o que passa
-  // do tempo de vida, então a fila daqui não mostra o congestionamento; o
-  // relatório mostra. Três relatórios ruins seguidos: a pessoa volta pro WebRTC.
+  // Viewers count what arrived. The channel silently drops anything past its
+  // lifetime, so the queue here does not show congestion; the report does.
+  // Three bad reports in a row: that person falls back to WebRTC.
   report(id, { bytes, lost }) {
     const v = this.viewers.get(id);
     if (!v) return;
@@ -155,7 +155,7 @@ export class TurboSender {
       try { result = await this.reader.read(); } catch { break; }
       if (result.done) break;
       try { await this.#encode(result.value); } catch (err) {
-        console.warn("[turbo] codificação", err);
+        console.warn("[turbo] encoding", err);
         try { result.value.close(); } catch {}
       }
     }
@@ -168,7 +168,7 @@ export class TurboSender {
     if (!this.encoder || this.encoder.state !== "configured" || this.dirty || this.size?.w !== w || this.size?.h !== h) {
       await this.#configure(w, h);
     }
-    // Fila do codificador cheia: descarta antes de codificar, como o Sunshine.
+    // Encoder queue full: drop before encoding, like Sunshine.
     if (!this.encoder || this.encoder.encodeQueueSize >= MAX_ENCODE_QUEUE) { frame.close(); this.stats.skipped++; return; }
     const keyFrame = this.needKey;
     this.needKey = false;
@@ -184,7 +184,7 @@ export class TurboSender {
     if (!this.encoder || this.encoder.state === "closed") {
       this.encoder = new VideoEncoder({
         output: (chunk) => this.#output(chunk),
-        error: (err) => { console.warn("[turbo] codificador", err); this.encoder = null; },
+        error: (err) => { console.warn("[turbo] encoder", err); this.encoder = null; },
       });
     }
     this.encoder.configure(encoderConfig(this.choice, w, h, this.bitrate, this.framerate));
@@ -208,9 +208,9 @@ export class TurboSender {
   #sendTo(v, data, key, ts) {
     const ch = v.channel;
     if (ch.readyState !== "open") { v.needKey = true; return; }
-    const budget = Math.max(256e3, (this.bitrate / 8) * 0.3); // ~300 ms de vídeo na fila
+    const budget = Math.max(256e3, (this.bitrate / 8) * 0.3); // ~300 ms of video in the queue
     if (v.needKey && !key) {
-      // espera a fila esvaziar antes de pedir a keyframe, senão ela também não cabe
+      // wait for the queue to drain before requesting the keyframe, or it won't fit either
       if (ch.bufferedAmount < budget / 2) this.requestKey();
       return;
     }
@@ -220,7 +220,7 @@ export class TurboSender {
       const now = performance.now();
       v.drops.push(now);
       while (v.drops.length && now - v.drops[0] > 3000) v.drops.shift();
-      if (v.drops.length > 20) v.onCongested?.(); // fila cheia o tempo todo: essa pessoa volta pro WebRTC
+      if (v.drops.length > 20) v.onCongested?.(); // queue full all the time: this person falls back to WebRTC
       return;
     }
     const count = Math.max(1, Math.ceil(data.byteLength / FRAG));
@@ -248,13 +248,13 @@ export class TurboSender {
   }
 }
 
-/* ---------------- Quem assiste ---------------- */
+/* ---------------- Viewer ---------------- */
 
 export class TurboReceiver {
   constructor(channel, { requestKey, onUnsupported, report }) {
     this.generator = new MediaStreamTrackGenerator({ kind: "video" });
     this.writer = this.generator.writable.getWriter();
-    this.frames = new Map(); // seq -> quadro sendo montado
+    this.frames = new Map(); // seq -> frame being assembled
     this.expected = null;
     this.waitingKey = true;
     this.decoder = null;
@@ -262,10 +262,10 @@ export class TurboReceiver {
     this.errors = 0;
     this.timer = 0;
     this.closed = false;
-    this.pending = new Map(); // timestamp -> instante do decode()
+    this.pending = new Map(); // timestamp -> time of decode()
     this.stats = { codec: null, width: 0, height: 0, frames: 0, bytes: 0, lost: 0, keyRequests: 0, assemblyMs: null, decodeMs: null };
     this.reportTimer = report ? setInterval(() => report({ bytes: this.payload, lost: this.stats.lost }), REPORT_MS) : 0;
-    this.payload = 0; // só os dados de vídeo, para comparar com o que foi enviado
+    this.payload = 0; // video data only, to compare with what was sent
     this.onUnsupported = onUnsupported;
     this.hold = HOLD_MS;
     let last = 0;
@@ -282,7 +282,7 @@ export class TurboReceiver {
 
   get track() { return this.generator; }
 
-  /// Um reenvio leva uma ida e volta: espera por quadro faltante acompanha a conexão.
+  /// A retransmission takes one round trip: the wait for a missing frame tracks the connection.
   setRtt(ms) {
     if (ms > 0) this.hold = Math.min(HOLD_MAX_MS, Math.max(HOLD_MS, ms * 2.5));
   }
@@ -305,7 +305,7 @@ export class TurboReceiver {
     const idx = dv.getUint16(2, true), count = dv.getUint16(4, true), cfgLen = dv.getUint16(6, true);
     const seq = dv.getUint32(8, true), ts = dv.getFloat64(12, true);
     this.stats.bytes += buf.byteLength;
-    if (this.expected !== null && seq < this.expected) return; // chegou tarde demais
+    if (this.expected !== null && seq < this.expected) return; // arrived too late
     if (idx >= count) return;
 
     let f = this.frames.get(seq);
@@ -330,7 +330,7 @@ export class TurboReceiver {
     this.#drain();
   }
 
-  // Decodifica em ordem. Uma keyframe completa mais à frente pula a fila.
+  // Decode in order. A complete keyframe further ahead jumps the queue.
   #drain() {
     for (let guard = 0; guard < 1000; guard++) {
       if (this.waitingKey || this.expected === null) {
@@ -360,7 +360,7 @@ export class TurboReceiver {
     this.timer = setTimeout(() => { this.timer = 0; this.#check(); }, this.hold / 3);
   }
 
-  // Quadro que não chegou a tempo vira perda: pede keyframe e segue sem ele.
+  // A frame that did not arrive in time is a loss: request a keyframe and move on without it.
   #check() {
     const now = performance.now();
     if (this.waitingKey) {
@@ -375,7 +375,7 @@ export class TurboReceiver {
         this.requestKey();
       }
     }
-    for (const [seq, f] of this.frames) if (now - f.at > 2000) this.frames.delete(seq); // lixo antigo
+    for (const [seq, f] of this.frames) if (now - f.at > 2000) this.frames.delete(seq); // stale leftovers
     this.#drain();
   }
 
@@ -423,7 +423,7 @@ export class TurboReceiver {
 
   #fail(err) {
     if (this.closed) return;
-    console.warn("[turbo] decodificação", err);
+    console.warn("[turbo] decoding", err);
     try { this.decoder?.close(); } catch {}
     this.decoder = null;
     this.config = null;

@@ -1,5 +1,5 @@
-//! Motor de mentira para desenvolver e testar a interface: simula abrir e
-//! entrar em canal, gente chegando e a transmissão. Ligado com TELINHA_MOCK=1.
+//! Mock engine for developing and testing the UI: simulates opening and
+//! joining a channel, people arriving, and the stream. Enabled with TELINHA_MOCK=1.
 
 use std::time::Duration;
 

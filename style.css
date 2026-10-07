@@ -38,7 +38,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 
 :focus-visible { outline: 2px solid var(--phosphor); outline-offset: 3px; }
 
-/* ---------- Botões ---------- */
+/* ---------- Buttons ---------- */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
   min-height: 3rem; padding: 0 1.4rem;
@@ -64,7 +64,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .icon-btn-lg { width: 3rem; height: 3rem; background: rgba(200, 212, 255, 0.08); }
 .icon-btn-leave:hover { background: var(--tally-soft); color: #ffb3ad; }
 
-/* ---------- Entrada ---------- */
+/* ---------- Entry ---------- */
 .lobby {
   min-height: 100dvh; overflow-y: auto;
   display: grid; justify-items: center; align-content: center; gap: 2rem;
@@ -79,7 +79,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 }
 .brand p { margin: 0.5rem 0 0; color: var(--muted); font-size: 1.0625rem; letter-spacing: -0.01em; }
 
-/* A telinha: o número do canal aparece nela */
+/* The little screen: the channel number shows on it */
 .tv {
   position: relative; width: min(34rem, 100%); aspect-ratio: 16 / 10;
   border-radius: var(--r-lg); overflow: hidden;
@@ -157,7 +157,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 }
 .footnote { margin: 0; max-width: 26rem; text-align: center; color: var(--muted); font-size: 0.8125rem; opacity: 0.8; }
 
-/* ---------- Sala ---------- */
+/* ---------- Room ---------- */
 .room {
   position: fixed; inset: 0;
   display: grid; grid-template-columns: 1fr auto; gap: 0.75rem;
@@ -202,7 +202,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   box-shadow: 0 10px 30px rgba(0,0,0,0.4);
 }
 
-/* Material translúcido para a cromagem flutuante */
+/* Translucent material for the floating chrome */
 .glass, .stage-bar, .dock, .channel {
   background: var(--glass);
   -webkit-backdrop-filter: blur(24px) saturate(170%);
@@ -240,7 +240,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .channel-word { font: 700 0.8125rem/1 var(--osd); color: var(--phosphor); opacity: 0.7; }
 .channel-digits { font: 900 1.25rem/1 var(--osd); color: var(--phosphor); letter-spacing: 0.06em; }
 
-/* Lista lateral de transmissões */
+/* Side list of streams */
 .strip {
   list-style: none; margin: 0; padding: 0;
   width: 15rem; display: flex; flex-direction: column; gap: 0.625rem;
@@ -282,7 +282,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .dock-share.live { background: var(--tally); color: #fff; }
 .dock-share.live:hover { background: #ff5a4f; }
 
-/* Qualidade: botão no dock + painel que nasce dele */
+/* Quality: dock button + the panel that grows from it */
 .quality-btn {
   display: inline-flex; align-items: center; gap: 0.45rem;
   height: 3rem; padding: 0 1rem 0 0.85rem; border: 0; border-radius: 999px;
@@ -326,7 +326,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   font-size: 0.875rem; line-height: 1.4; font-variant-numeric: tabular-nums;
 }
 
-/* Controle segmentado: o marcador desliza até a opção escolhida */
+/* Segmented control: the marker slides to the chosen option */
 .seg {
   --n: 2; --i: 0;
   position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
@@ -364,7 +364,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .people li.sharing { box-shadow: 0 0 0 2px #1a2452, 0 0 0 4px var(--tally); }
 .people li.more { background: rgba(200,212,255,0.16); color: var(--text); }
 
-/* Fora do ar */
+/* Off air */
 .offair {
   position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 1rem;
   background: rgba(5, 8, 22, 0.6);
@@ -380,7 +380,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .offair-card p { margin: 0 0 1.25rem; color: var(--muted); }
 @keyframes fade { from { opacity: 0; } }
 
-/* Avisos */
+/* Notices */
 .toasts {
   position: fixed; top: 1rem; left: 50%; translate: -50% 0; z-index: 20;
   display: grid; gap: 0.5rem; justify-items: center; pointer-events: none;
@@ -397,7 +397,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-120%) scale(0.96); } }
 @keyframes toast-out { to { opacity: 0; transform: translateY(-120%) scale(0.96); } }
 
-/* ---------- Telas menores ---------- */
+/* ---------- Smaller screens ---------- */
 @media (max-width: 760px) {
   .room { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
   .strip { width: auto; flex-direction: row; overflow-x: auto; }
@@ -408,7 +408,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   .actions { grid-template-columns: 1fr; }
 }
 
-/* ---------- Acessibilidade ---------- */
+/* ---------- Accessibility ---------- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; transition-duration: 1ms !important; }
   .tv { animation: fade 300ms ease both !important; }

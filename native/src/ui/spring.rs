@@ -1,5 +1,5 @@
-//! Molas interrompíveis: mudar o alvo no meio do caminho continua do valor e
-//! da velocidade atuais, nunca pula (DESIGN.md, "Movimento").
+//! Interruptible springs: changing the target midway continues from the
+//! current value and velocity, never jumps (DESIGN.md, "Movimento").
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -12,7 +12,7 @@ pub fn reduced_motion() -> bool {
     REDUCED_MOTION.load(Ordering::Relaxed)
 }
 
-/// Lê a preferência do sistema uma vez, na abertura do app.
+/// Reads the system preference once, at app startup.
 pub fn detect_reduced_motion() {
     let reduced = system_reduced_motion();
     REDUCED_MOTION.store(reduced, Ordering::Relaxed);
@@ -66,7 +66,7 @@ impl Spring {
         }
     }
 
-    /// Pula direto pro alvo (estado inicial, sem animação).
+    /// Jumps straight to the target (initial state, no animation).
     pub fn snap(&mut self, value: f32) {
         self.value = value;
         self.target = value;
@@ -78,7 +78,7 @@ impl Spring {
         (self.value - self.target).abs() > 0.0005 || self.velocity.abs() > 0.002
     }
 
-    /// Avança até `now`. Integra em passos de 1 ms (estável para qualquer mola).
+    /// Advances to `now`. Integrates in 1 ms steps (stable for any spring).
     pub fn tick(&mut self, now: Instant) {
         if !self.is_moving() {
             self.value = self.target;

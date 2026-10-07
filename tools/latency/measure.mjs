@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Glass-to-glass latency harness for Telinha.
 //
-//   node measure.mjs --app <dir> [--server dominio] [--seconds 20] [--relay] [--turbo] [--label name] [--warmup 3] [--headed]
+//   node measure.mjs --app <dir> [--server domain] [--seconds 20] [--relay] [--turbo] [--label name] [--warmup 3] [--headed]
 //
-// --nativo <binário> põe o app nativo (native/) no lugar do Chrome que transmite: ele
-// entra no canal pelo link e manda a tela de teste dele (mesma grade de horário).
-// Precisa de --server. Ex.: --nativo ../../native/target/release/telinha
+// --nativo <binary> puts the native app (native/) in place of the streaming Chrome: it
+// joins the channel via the link and sends its own test screen (same time grid).
+// Requires --server. E.g.: --nativo ../../native/target/release/telinha
 //
-// --server aponta o app para o servidor de sinalização/TURN (deploy/). Sem ele,
-// o app servido em localhost usa o PeerJS público, só com STUN, e --relay não conecta.
+// --server points the app at the signaling/TURN server (deploy/). Without it,
+// the app served on localhost uses public PeerJS, STUN only, and --relay does not connect.
 //
 // Flow: serve <dir> on a free localhost port, open two isolated browser contexts.
 //   A ("viewer") creates the channel and only watches.
@@ -58,10 +58,10 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--warmup") opt.warmup = Number(argv[++i]);
   else if (a === "--label") opt.label = argv[++i];
   else if (a === "--relay") opt.relay = true;
-  else if (a === "--turbo") opt.turbo = true; // modo "atraso mínimo" (WebCodecs) do app
+  else if (a === "--turbo") opt.turbo = true; // the app's "minimum delay" mode (WebCodecs)
   else if (a === "--headed") opt.headed = true;
   else if (a === "--retries") opt.retries = Number(argv[++i]);
-  else if (a === "--foto") opt.photo = argv[++i]; // salva o último quadro que chegou (PNG, tamanho real)
+  else if (a === "--foto") opt.photo = argv[++i]; // saves the last received frame (PNG, full size)
   else { console.error(`unknown arg ${a}`); process.exit(2); }
 }
 if (!opt.app) { console.error("usage: node measure.mjs --app <dir> [--seconds 20] [--relay] [--label name]"); process.exit(2); }
@@ -424,7 +424,7 @@ async function mkPage(name, { sender }) {
   await p.setViewport({ width: 1280, height: 800 });
   await p.evaluateOnNewDocument(installPcWrapper, opt.relay);
   if (sender) await p.evaluateOnNewDocument(installFakeScreen);
-  // mesma qualidade nos dois modos, para comparar só o transporte
+  // same quality in both modes, to compare only the transport
   await p.evaluateOnNewDocument((turbo) => {
     try { localStorage.setItem("telinha:quality", JSON.stringify({ res: "original", fps: 60, priority: "fluidez", turbo })); } catch {}
   }, opt.turbo);
@@ -444,11 +444,11 @@ async function mkPage(name, { sender }) {
   return p;
 }
 
-/* App nativo como quem transmite: os números do lado dele não existem na página. */
+/* Native app as the streamer: its side's numbers do not exist in the page. */
 let nativeProc = null;
 async function nativeSender(viewer, code) {
   const { spawn } = await import("node:child_process");
-  if (!opt.server) throw new Error("--nativo precisa de --server");
+  if (!opt.server) throw new Error("--nativo requires --server");
   nativeProc = spawn(opt.native, ["--entrar", `https://${opt.server}/#${code}`, "--segundos", String(opt.seconds + opt.warmup + 90)], {
     env: { TELINHA_FONTE_TESTE: "1", ...process.env, TELINHA_NOME: "Nativo" },
     stdio: ["ignore", "ignore", "pipe"],

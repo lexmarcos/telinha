@@ -1,10 +1,10 @@
-//! Som do computador: captura a saída de som, codifica em Opus (estéreo,
-//! quadros de 10 ms, modo de baixo atraso e taxa constante, como o Sunshine)
-//! e publica os pacotes para as conexões.
+//! Computer audio: captures the sound output, encodes it as Opus (stereo,
+//! 10 ms frames, low-delay mode and constant bitrate, like Sunshine)
+//! and publishes the packets to the connections.
 //!
-//! Linux: o som de cada app pelo PipeWire, menos o Discord.
-//! Windows: loopback do WASAPI, sem o Discord quando ele estiver aberto (assim
-//! quem está na chamada não ouve a própria voz de volta).
+//! Linux: each app's audio through PipeWire, except Discord.
+//! Windows: WASAPI loopback, without Discord when it is open (so people
+//! in the call do not hear their own voice back).
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -35,7 +35,7 @@ pub struct OpusPacket {
 pub struct Audio {
     stop: Arc<AtomicBool>,
     pub packets: broadcast::Sender<Arc<OpusPacket>>,
-    /// Descrição para o log ("todo o som menos o Discord").
+    /// Description for the log ("all audio except Discord").
     pub source: String,
 }
 
@@ -78,11 +78,11 @@ pub fn start() -> Result<Audio, String> {
             }
         })
         .map_err(|e| e.to_string())?;
-    tracing::info!(fonte = %source, "som do computador ligado");
+    tracing::info!(fonte = %source, "computer audio on");
     Ok(Audio { stop, packets, source })
 }
 
-/// Grava `secs` segundos do som, sem codificar (para testes).
+/// Records `secs` seconds of audio, without encoding (for tests).
 pub fn record(secs: u64) -> Result<Vec<f32>, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(1024);
@@ -103,7 +103,7 @@ pub fn record(secs: u64) -> Result<Vec<f32>, String> {
     Ok(out)
 }
 
-/* ---------------- Opus pelo FFmpeg (libopus) ---------------- */
+/* ---------------- Opus via FFmpeg (libopus) ---------------- */
 
 struct Opus {
     ctx: *mut ff::AVCodecContext,
@@ -143,7 +143,7 @@ impl Opus {
         }
     }
 
-    /// Junta amostras e devolve os pacotes Opus de cada quadro completo.
+    /// Buffers samples and returns the Opus packets for each complete frame.
     fn push(&mut self, samples: &[f32]) -> Vec<OpusPacket> {
         self.pending.extend_from_slice(samples);
         let per = self.frame_size * CHANNELS;

@@ -1,10 +1,10 @@
-//! Escolhe de onde vem a imagem da tela em cada sistema.
+//! Picks where the screen image comes from on each OS.
 
 use crate::config::Quality;
 use crate::video::Source;
 
-/// TELINHA_FONTE_TESTE=1 troca a tela pela tela de teste (para medir latência);
-/// com o caminho de uma imagem, usa ela de fundo (para medir a nitidez).
+/// TELINHA_FONTE_TESTE=1 replaces the screen with the test pattern (to measure latency);
+/// with an image path, uses it as the background (to measure sharpness).
 pub async fn open(quality: Quality) -> Result<Source, String> {
     if let Some(v) = std::env::var_os("TELINHA_FONTE_TESTE") {
         use crate::video::source::test::TestPattern;

@@ -1,10 +1,10 @@
-# Entra na rede do proxy reverso que já existe na VPS (PROXY_NETWORK no .env),
-# para ele alcançar o serviço `telinha` na porta 9000.
+# Joins the reverse proxy's existing network on the VPS (PROXY_NETWORK in .env),
+# so it can reach the `telinha` service on port 9000.
 services:
   telinha:
     build: .
     restart: unless-stopped
-    env_file: .env # TURN_SECRET e TURN_HOST
+    env_file: .env # TURN_SECRET and TURN_HOST
     volumes:
       - ./public:/srv/public:ro
     mem_limit: 256m

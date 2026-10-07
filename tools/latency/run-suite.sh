@@ -2,7 +2,7 @@
 # Runs measure.mjs several times, waiting for the machine to be free of other puppeteer
 # Chrome instances first, and flags runs where another one showed up mid-run.
 # usage: run-suite.sh <appdir> <outfile> <label> [direct-runs=3] [relay-runs=1] [seconds=20]
-# extra measure.mjs flags via env, e.g. EXTRA="--warmup 15 --server dominio.do.servidor"
+# extra measure.mjs flags via env, e.g. EXTRA="--warmup 15 --server server.domain"
 APP=$1; OUT=$2; LABEL=$3; N=${4:-3}; R=${5:-1}; SECS=${6:-20}
 HERE=$(cd "$(dirname "$0")" && pwd)
 dirs() { ps -eo args | grep -o -- '--user-data-dir=[^ ]*puppeteer[^ ]*' | sort -u | wc -l; }

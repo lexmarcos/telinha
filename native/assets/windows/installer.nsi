@@ -1,6 +1,6 @@
-; Instalador do Telinha para Windows (NSIS, Modern UI 2).
-; Instala só para o usuário atual: não pede permissão de administrador.
-; Gerado por scripts/package.sh, que define VERSION e STAGE.
+; Telinha installer for Windows (NSIS, Modern UI 2).
+; Installs for the current user only: does not ask for administrator rights.
+; Built by scripts/package.sh, which defines VERSION and STAGE.
 
 Unicode true
 !include "MUI2.nsh"
@@ -33,7 +33,7 @@ VIAddVersionKey /LANG=${LANG_PORTUGUESEBR} "ProductVersion" "${VERSION}"
 
 Section "Telinha"
   SetOutPath "$INSTDIR"
-  ; Fecha uma cópia aberta antes de trocar os arquivos.
+  ; Closes a running copy before replacing the files.
   nsExec::Exec 'taskkill /IM telinha.exe /F'
   File "${STAGE}\*.exe"
   File "${STAGE}\*.dll"
@@ -42,7 +42,7 @@ Section "Telinha"
   CreateDirectory "$SMPROGRAMS\Telinha"
   CreateShortcut "$SMPROGRAMS\Telinha\Telinha.lnk" "$INSTDIR\telinha.exe"
   CreateShortcut "$DESKTOP\Telinha.lnk" "$INSTDIR\telinha.exe"
-  ; Aparece em "Aplicativos instalados" para desinstalar.
+  ; Shows up in "Installed apps" for uninstalling.
   !define UNINST "Software\Microsoft\Windows\CurrentVersion\Uninstall\Telinha"
   WriteRegStr HKCU "${UNINST}" "DisplayName" "Telinha"
   WriteRegStr HKCU "${UNINST}" "DisplayVersion" "${VERSION}"

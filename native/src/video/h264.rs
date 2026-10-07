@@ -1,8 +1,8 @@
-//! Utilidades de H.264 em Annex B: achar unidades NAL, montar o codec string
-//! do WebCodecs a partir do SPS e garantir SPS/PPS em toda keyframe (quem
-//! entra no meio decodifica a partir dela).
+//! Annex B H.264 utilities: find NAL units, build the WebCodecs codec string
+//! from the SPS, and ensure SPS/PPS on every keyframe (viewers who join
+//! mid-stream decode from it).
 
-/// Posições (início do conteúdo, fim) de cada NAL, sem o código de início.
+/// Positions (content start, end) of each NAL, without the start code.
 pub fn nal_units(data: &[u8]) -> Vec<(usize, usize)> {
     let mut starts = Vec::new();
     let mut i = 0;
@@ -17,7 +17,7 @@ pub fn nal_units(data: &[u8]) -> Vec<(usize, usize)> {
     let mut out = Vec::with_capacity(starts.len());
     for (k, &s) in starts.iter().enumerate() {
         let mut e = starts.get(k + 1).map_or(data.len(), |&n| n - 3);
-        // O código de início de 4 bytes deixa um zero sobrando no fim do anterior.
+        // A 4-byte start code leaves an extra zero at the end of the previous one.
         while e > s && data[e - 1] == 0 && k + 1 < starts.len() {
             e -= 1;
         }
@@ -30,13 +30,13 @@ pub fn nal_type(data: &[u8], (s, _): (usize, usize)) -> u8 {
     data.get(s).map_or(0, |b| b & 0x1f)
 }
 
-/// "avc1.PPCCLL" a partir do SPS (perfil, restrições e nível).
+/// "avc1.PPCCLL" from the SPS (profile, constraints and level).
 pub fn codec_string(sps: &[u8]) -> Option<String> {
     (sps.len() >= 4).then(|| format!("avc1.{:02x}{:02x}{:02x}", sps[1], sps[2], sps[3]))
 }
 
-/// Guarda o último SPS/PPS visto e os coloca na frente de uma keyframe que
-/// venha sem eles.
+/// Keeps the last seen SPS/PPS and prepends them to any keyframe that
+/// arrives without them.
 #[derive(Default)]
 pub struct Headers {
     sps: Option<Vec<u8>>,

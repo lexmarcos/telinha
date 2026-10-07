@@ -1,18 +1,18 @@
-/* Painel de estatísticas da conexão (stats.js). Fica no canto superior direito do palco. */
+/* Connection stats panel (stats.js). Sits in the top-right corner of the stage. */
 
 .stats-panel {
   --stats-gap: 0.75rem;
   position: absolute; z-index: 2;
   top: var(--stats-gap); right: var(--stats-gap);
   width: 18rem; max-width: calc(100% - 2 * var(--stats-gap));
-  /* deixa livre a barra de controles embaixo */
+  /* keeps the control bar at the bottom clear */
   max-height: calc(100% - var(--stats-gap) - 5.25rem);
   display: flex; flex-direction: column;
   border-radius: 20px; overflow: hidden;
   font: 400 0.8125rem/1.35 var(--font, system-ui, sans-serif);
   font-variant-numeric: tabular-nums;
   color: var(--text);
-  /* mais denso que --glass: o painel é só texto e costuma ficar sobre telas claras */
+  /* denser than --glass: the panel is text only and often sits over bright screens */
   background: rgba(13, 19, 46, 0.86);
   -webkit-backdrop-filter: blur(24px) saturate(170%);
   backdrop-filter: blur(24px) saturate(170%);
@@ -71,7 +71,7 @@
 .stats-hero-value[data-empty] { color: var(--muted); font-weight: 400; }
 .stats-hero-unit { margin-left: 0.2em; font-size: 0.875rem; font-weight: 500; letter-spacing: 0; color: var(--muted); }
 
-/* Caminho: direta ou pelo repasse (TURN). O repasse ganha um tom âmbar, sem alarme. */
+/* Path: direct or via relay (TURN). Relay gets an amber tint, not an alarm. */
 .stats-path {
   display: inline-flex; align-items: center; gap: 0.375rem; flex: none;
   max-width: 60%; padding: 0.2rem 0.6rem; border-radius: 999px;
@@ -97,7 +97,7 @@
 .stats-grid dd { margin: 0; text-align: right; min-width: 0; overflow-wrap: anywhere; }
 .stats-unit { color: var(--muted); }
 
-/* No celular o número do canal ocupa o canto esquerdo: o painel desce e usa a largura toda. */
+/* On phones the channel number takes the left corner: the panel moves down and uses the full width. */
 @media (max-width: 760px) {
   .stats-panel {
     top: 3.5rem; left: var(--stats-gap); width: auto;
@@ -113,6 +113,6 @@
   .stats-panel { animation: none; }
 }
 
-/* separador "Lá na origem" no bloco de quem assiste */
+/* "Lá na origem" separator in the viewer block */
 .stats-grid .stats-sep { margin-top: 0.35rem; padding-top: 0.45rem; border-top: 1px solid var(--line); }
 dt.stats-sep { font-weight: 600; color: var(--text); }

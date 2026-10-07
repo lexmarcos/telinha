@@ -1,4 +1,4 @@
-// Servidor estático para testar localmente: bun server.ts
+// Static server for local testing: bun server.ts
 const port = Number(process.env.PORT ?? 5180);
 const root = import.meta.dir;
 
@@ -11,4 +11,4 @@ Bun.serve({
     return new Response(file);
   },
 });
-console.log(`Telinha em http://localhost:${port}`);
+console.log(`Telinha at http://localhost:${port}`);

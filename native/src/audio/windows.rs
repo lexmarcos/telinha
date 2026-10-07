@@ -1,6 +1,6 @@
-//! Som do computador no Windows: loopback do WASAPI. Com o Discord aberto,
-//! usa o "process loopback" no modo de exclusão (Windows 10 2004+): pega todo
-//! o som menos o do Discord, e quem está na chamada não ouve a própria voz.
+//! Computer audio on Windows: WASAPI loopback. With Discord open, it uses
+//! "process loopback" in exclusion mode (Windows 10 2004+): it takes all
+//! audio except Discord's, so people in the call do not hear their own voice.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +10,7 @@ use wasapi::{AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode, W
 
 use super::{CHANNELS, RATE};
 
-/// Processo raiz do Discord (o pai das outras instâncias), se estiver aberto.
+/// Discord's root process (the parent of the other instances), if it is open.
 fn discord_pid() -> Option<u32> {
     use sysinfo::{ProcessRefreshKind, RefreshKind, System};
     let sys = System::new_with_specifics(RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()));
@@ -34,7 +34,7 @@ pub fn start(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<String, 
         .name("telinha-wasapi".into())
         .spawn(move || {
             if let Err(e) = run(tx, stop, discord) {
-                tracing::error!("som pelo WASAPI: {e}");
+                tracing::error!("WASAPI audio: {e}");
             }
         })
         .map_err(|e| e.to_string())?;
@@ -49,7 +49,7 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, exclude: Option<u32>) ->
         Some(pid) => match AudioClient::new_application_loopback_client(pid, false) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("sem exclusão do Discord (Windows antigo?): {e}");
+                tracing::warn!("no Discord exclusion (old Windows?): {e}");
                 default_loopback()?
             }
         },
@@ -70,7 +70,7 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, exclude: Option<u32>) ->
             let _ = tx.try_send(samples);
         }
         if event.wait_for_event(200).is_err() {
-            // Sem som tocando o evento não dispara; segue esperando.
+            // With no audio playing the event does not fire; keep waiting.
             continue;
         }
     }
@@ -78,7 +78,7 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, exclude: Option<u32>) ->
     Ok(())
 }
 
-/// Loopback comum: capturar a saída padrão como se fosse uma entrada.
+/// Plain loopback: capture the default output as if it were an input.
 fn default_loopback() -> Result<AudioClient, String> {
     let device = DeviceEnumerator::new().map_err(|e| e.to_string())?.get_default_device(&Direction::Render).map_err(|e| e.to_string())?;
     device.get_iaudioclient().map_err(|e| e.to_string())

@@ -1,4 +1,4 @@
-//! Conexões WebRTC (webrtc-rs) no formato que o PeerJS do site espera.
+//! WebRTC connections (webrtc-rs) in the format the site's PeerJS expects.
 
 use std::sync::Arc;
 
@@ -11,9 +11,9 @@ use webrtc::peer_connection::{
     RTCIceServer, RTCPeerConnectionIceEvent, RTCPeerConnectionState, Registry, register_default_interceptors,
 };
 
-/// Canal de vídeo do modo atraso mínimo: negociado nos dois lados com o mesmo
-/// id, sem ordem e com reenvio por até 400 ms. No direto o reenvio sai em ~1 ms;
-/// pelo repasse (ida e volta de ~130 ms) os 400 ms dão tempo de tentar de novo.
+/// Minimum-latency video channel: negotiated on both sides with the same id,
+/// unordered, with retransmission for up to 400 ms. On a direct link a resend
+/// takes ~1 ms; over the relay (~130 ms round trip) 400 ms leaves time to retry.
 pub const VIDEO_CHANNEL_ID: u16 = 100;
 pub const VIDEO_PACKET_LIFETIME_MS: u16 = 400;
 
@@ -55,7 +55,7 @@ impl PeerConnectionEventHandler for Handler {
     }
 }
 
-/// `video`: conexão de mídia (RTP com H.264/Opus); sem isso, só canais de dados.
+/// `video`: media connection (RTP with H.264/Opus); otherwise data channels only.
 pub async fn new_connection(ice: &[RTCIceServer], conn: &str, video: bool, tx: mpsc::Sender<PeerEvent>) -> Result<Arc<dyn PeerConnection>, String> {
     let mut media = if video {
         super::rtp::media_engine()?
@@ -80,8 +80,8 @@ pub async fn new_connection(ice: &[RTCIceServer], conn: &str, video: bool, tx: m
     Ok(Arc::new(pc))
 }
 
-/// Canal de controle do PeerJS (o "DataConnection"): confiável, em ordem,
-/// rótulo = id da conexão.
+/// PeerJS control channel (the "DataConnection"): reliable, ordered,
+/// label = connection id.
 pub async fn control_channel(pc: &Arc<dyn PeerConnection>, label: &str) -> Result<Arc<dyn DataChannel>, String> {
     pc.create_data_channel(label, Some(RTCDataChannelInit { ordered: true, ..Default::default() })).await.map_err(|e| e.to_string())
 }
@@ -100,7 +100,7 @@ pub async fn video_channel(pc: &Arc<dyn PeerConnection>) -> Result<Arc<dyn DataC
     .map_err(|e| e.to_string())
 }
 
-/// Repassa os eventos de um canal para a sessão.
+/// Forwards a channel's events to the session.
 pub fn pump(channel: Arc<dyn DataChannel>, conn: String, which: Which, tx: mpsc::Sender<PeerEvent>) {
     tokio::spawn(async move {
         while let Some(ev) = channel.poll().await {
@@ -120,8 +120,8 @@ pub fn pump(channel: Arc<dyn DataChannel>, conn: String, which: Which, tx: mpsc:
     });
 }
 
-/// Mensagem JSON no formato da serialização "json" do PeerJS: texto UTF-8
-/// enviado como binário (o navegador decodifica com TextDecoder).
+/// JSON message in PeerJS "json" serialization format: UTF-8 text
+/// sent as binary (the browser decodes it with TextDecoder).
 pub async fn send_json(channel: &Arc<dyn DataChannel>, v: &Value) {
     let _ = channel.send(BytesMut::from(v.to_string().as_bytes())).await;
 }

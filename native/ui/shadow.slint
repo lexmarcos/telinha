@@ -1,15 +1,15 @@
-// Sombra em camadas. O desenho por software não tem drop-shadow, então a
-// sombra é feita de anéis cada vez maiores e mais fracos, com o mesmo raio da
-// superfície. Fica embaixo da superfície e com a mesma geometria dela.
+// Layered shadow. The software renderer has no drop-shadow, so the
+// shadow is made of increasingly larger and fainter rings, with the same radius as the
+// surface. It sits under the surface with the same geometry.
 
 import { Palette } from "tokens.slint";
 
 export component Shadow inherits Rectangle {
     in property <length> radius;
-    // Até onde a sombra vai além da superfície e quanto desce.
+    // How far the shadow extends beyond the surface and how far down it goes.
     in property <length> spread: 14px;
     in property <length> offset-y: 6px;
-    // Opacidade somada das camadas (a parte mais escura, colada na borda).
+    // Combined opacity of the layers (the darkest part, right at the edge).
     in property <float> strength: 0.5;
     property <int> layers: 7;
 
@@ -20,7 +20,7 @@ export component Shadow inherits Rectangle {
         width: root.width + 2 * self.grow;
         height: root.height + 2 * self.grow;
         border-radius: root.radius + self.grow;
-        // As camadas de fora são mais fracas: a sombra se desfaz em vez de terminar.
+        // Outer layers are fainter: the shadow fades out instead of ending abruptly.
         background: Palette.shadow.with-alpha(root.strength / root.layers * (1 - i / (root.layers + 1)));
     }
 }

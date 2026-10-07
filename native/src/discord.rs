@@ -1,11 +1,11 @@
-//! Rich Presence: mostra no perfil do Discord que você está num canal do
-//! Telinha (ou transmitindo), com um botão que leva ao canal. Fala com o
-//! Discord aberto no computador pelo IPC local, o mesmo do discord-rpc: sem
-//! servidor e sem bot. Funciona com o Discord oficial e com o Vesktop (arRPC).
+//! Rich Presence: shows on the Discord profile that you are in a Telinha
+//! channel (or streaming), with a button that leads to the channel. Talks to
+//! the Discord running on the computer over local IPC, the same as discord-rpc:
+//! no server and no bot. Works with official Discord and with Vesktop (arRPC).
 //!
-//! A imagem é o ícone do aplicativo no Developer Portal.
-//! O ID do aplicativo vem de TELINHA_DISCORD_ID (na compilação, como o
-//! servidor, ou no ambiente). Sem ele, nada disso liga.
+//! The image is the application icon in the Developer Portal.
+//! The application ID comes from TELINHA_DISCORD_ID (at build time, like the
+//! server, or from the environment). Without it, none of this turns on.
 
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ pub struct Presence {
     pub invite: String,
     pub live: bool,
     pub viewers: usize,
-    /// Desde quando (segundos Unix): o Discord mostra o tempo decorrido.
+    /// Since when (Unix seconds): Discord shows the elapsed time.
     pub since: i64,
 }
 
@@ -29,8 +29,8 @@ pub fn client_id() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
-/// Mantém o perfil em dia com `rx` enquanto o app roda. Se o Discord não
-/// estiver aberto, tenta de novo de tempos em tempos.
+/// Keeps the profile up to date with `rx` while the app runs. If Discord is
+/// not open, retries from time to time.
 pub async fn run(mut rx: watch::Receiver<Option<Presence>>) {
     let Some(id) = client_id() else { return };
     loop {
@@ -59,18 +59,18 @@ async fn session(io: Box<dyn Io>, id: &str, rx: &mut watch::Receiver<Option<Pres
     send(&mut write, OP_HANDSHAKE, &json!({ "v": 1, "client_id": id })).await?;
     match recv(&mut read).await? {
         (OP_FRAME, v) if v["evt"] == "READY" => {
-            tracing::info!(usuario = %v["data"]["user"]["username"].as_str().unwrap_or("?"), "Discord conectado");
+            tracing::info!(usuario = %v["data"]["user"]["username"].as_str().unwrap_or("?"), "Discord connected");
         }
-        (_, v) => return Err(format!("o Discord recusou: {}", v["message"].as_str().unwrap_or("sem motivo"))),
+        (_, v) => return Err(format!("Discord refused: {}", v["message"].as_str().unwrap_or("no reason"))),
     }
 
-    // Respostas e erros chegam aqui; só interessam para o log e para saber se caiu.
+    // Replies and errors arrive here; they only matter for the log and to detect a drop.
     let (closed_tx, mut closed) = tokio::sync::oneshot::channel::<String>();
     tokio::spawn(async move {
         let why = loop {
             match recv(&mut read).await {
-                Ok((OP_CLOSE, v)) => break format!("o Discord fechou: {}", v["message"].as_str().unwrap_or("")),
-                Ok((_, v)) if v["evt"] == "ERROR" => tracing::warn!("Discord: {}", v["data"]["message"].as_str().unwrap_or("erro")),
+                Ok((OP_CLOSE, v)) => break format!("Discord closed: {}", v["message"].as_str().unwrap_or("")),
+                Ok((_, v)) if v["evt"] == "ERROR" => tracing::warn!("Discord: {}", v["data"]["message"].as_str().unwrap_or("error")),
                 Ok((_, v)) => tracing::debug!(resposta = %v, "Discord"),
                 Err(e) => break e,
             }
@@ -90,7 +90,7 @@ async fn session(io: Box<dyn Io>, id: &str, rx: &mut watch::Receiver<Option<Pres
         send(&mut write, OP_FRAME, &cmd).await?;
         tokio::select! {
             changed = rx.changed() => if changed.is_err() {
-                // App fechando: limpa o perfil antes de sair.
+                // App closing: clear the profile before leaving.
                 let clear = json!({ "cmd": "SET_ACTIVITY", "args": { "pid": std::process::id() }, "nonce": "fim" });
                 let _ = send(&mut write, OP_FRAME, &clear).await;
                 return Ok(());
@@ -129,15 +129,15 @@ async fn recv(r: &mut (impl AsyncRead + Unpin)) -> Result<(u32, Value), String> 
     let op = u32::from_le_bytes(head[..4].try_into().unwrap());
     let len = u32::from_le_bytes(head[4..].try_into().unwrap()) as usize;
     if len > 1 << 20 {
-        return Err("resposta grande demais".into());
+        return Err("reply too large".into());
     }
     let mut body = vec![0u8; len];
     r.read_exact(&mut body).await.map_err(|e| e.to_string())?;
     Ok((op, serde_json::from_slice(&body).unwrap_or(Value::Null)))
 }
 
-/// O socket discord-ipc-N, onde quer que o Discord (ou o Vesktop, em Flatpak
-/// ou Snap) tenha criado.
+/// The discord-ipc-N socket, wherever Discord (or Vesktop, in Flatpak
+/// or Snap) created it.
 #[cfg(unix)]
 async fn connect() -> Option<Box<dyn Io>> {
     let mut bases: Vec<std::path::PathBuf> = ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"].iter().filter_map(std::env::var_os).map(Into::into).collect();

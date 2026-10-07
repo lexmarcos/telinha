@@ -1,5 +1,5 @@
-// Campo de texto. O do canal é a telinha do site: dígitos Doto acesos sobre o
-// vidro; um link de convite colado aparece em letra comum.
+// Text field. The channel one is the website's small screen: lit Doto digits on the
+// glass; a pasted invite link shows in a regular font.
 
 import { Palette, Radius, Space, Type, Motion } from "tokens.slint";
 
@@ -7,7 +7,7 @@ export component Field inherits Rectangle {
     in property <string> placeholder;
     in-out property <string> value;
     in property <bool> channel: false;
-    // O app diz se o conteúdo é só dígitos (aí usa a fonte Doto).
+    // The app says whether the content is digits only (then it uses the Doto font).
     in property <bool> digits: false;
     callback edited(string);
     callback accepted();

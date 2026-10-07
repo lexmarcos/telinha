@@ -1,5 +1,5 @@
-// Controle segmentado. O marcador desliza com a mola do app (`thumb` é a
-// posição animada, em índices; pode ser fracionária no meio do caminho).
+// Segmented control. The thumb slides with the app's spring (`thumb` is the
+// animated position, in indices; it can be fractional midway).
 
 import { Palette, Size, Radius, Type, Motion } from "tokens.slint";
 
@@ -21,7 +21,7 @@ export component Segmented {
         height: parent.height - 2 * root.inset;
         border-radius: Radius.thumb;
         background: Palette.phosphor.with-alpha(0.2);
-        // Luz no topo do marcador: o mesmo material dos painéis, em pequeno.
+        // Light on top of the thumb: the same material as the panels, in miniature.
         Rectangle {
             x: Radius.thumb; y: 0; width: parent.width - 2 * Radius.thumb; height: 1px;
             background: @linear-gradient(90deg, Palette.white.with-alpha(0) 0%, Palette.white.with-alpha(0.18) 50%, Palette.white.with-alpha(0) 100%);

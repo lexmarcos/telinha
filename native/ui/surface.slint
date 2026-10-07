@@ -1,6 +1,6 @@
-// Material dos painéis: sala escura quase opaca, luz fina no topo e sombra
-// larga para fora. Superfície grande = sombra maior. Nunca empilhar material
-// translúcido sobre material translúcido.
+// Panel material: nearly opaque dark room, thin light on top and a wide
+// outer shadow. Larger surface = larger shadow. Never stack translucent
+// material on top of translucent material.
 
 import { Palette, Radius, Size, Space, Type, Motion } from "tokens.slint";
 import { Shadow } from "shadow.slint";
@@ -13,7 +13,7 @@ export component Surface inherits Rectangle {
         border-width: 1px;
         border-color: Palette.line;
     }
-    // Luz batendo na borda de cima do material.
+    // Light hitting the material's top edge.
     Rectangle {
         x: Radius.panel; y: 0; width: parent.width - 2 * Radius.panel; height: 1px;
         background: @linear-gradient(90deg, Palette.white.with-alpha(0) 0%, Palette.white.with-alpha(0.16) 50%, Palette.white.with-alpha(0) 100%);
@@ -21,7 +21,7 @@ export component Surface inherits Rectangle {
     @children
 }
 
-// Botão só de ícone (a seta de voltar, sempre no mesmo lugar: à esquerda).
+// Icon-only button (the back arrow, always in the same place: on the left).
 export component IconButton inherits Rectangle {
     in property <image> icon;
     callback clicked();
@@ -34,7 +34,7 @@ export component IconButton inherits Rectangle {
     Image { source: root.icon; colorize: Palette.text; width: Size.icon; height: Size.icon; }
 }
 
-// Cabeçalho do painel: título, linha de apoio e, em subpainéis, voltar.
+// Panel header: title, supporting line and, in subpanels, back.
 export component Header inherits HorizontalLayout {
     in property <string> title;
     in property <string> subtitle;
@@ -54,7 +54,7 @@ export component Header inherits HorizontalLayout {
     }
 }
 
-// Nome de um grupo de controles ("Resolução").
+// Name of a group of controls ("Resolução").
 export component Label inherits Text {
     font-size: Type.label;
     font-weight: Type.semibold;

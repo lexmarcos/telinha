@@ -1,5 +1,5 @@
-//! Contrato entre a interface e o motor de transmissão. A interface manda
-//! `Command`s e recebe `Event`s; o motor roda em segundo plano.
+//! Contract between the UI and the streaming engine. The UI sends
+//! `Command`s and receives `Event`s; the engine runs in the background.
 
 pub mod gate;
 pub mod mock;
@@ -11,22 +11,22 @@ pub mod turbo;
 
 use crate::config::Quality;
 
-/// Alguém assistindo (os pontinhos embaixo da bolha).
+/// Someone watching (the dots below the bubble).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Viewer {
     pub name: String,
-    /// Recebe o vídeo nativo (navegador com WebCodecs). Sem isso, aparece apagado.
+    /// Receives the native video (browser with WebCodecs). Otherwise shown dimmed.
     pub supported: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// Abre um canal novo (este app vira o anfitrião).
+    /// Opens a new channel (this app becomes the host).
     Create { name: String, server: Option<String> },
-    /// Entra num canal pelo número ou pelo link de convite.
+    /// Joins a channel by number or invite link.
     Join { input: String, name: String, server: Option<String> },
-    /// `discord`: sessão do login com o Discord quando só quem está na call
-    /// pode assistir (porteiro); `None` deixa aberto para quem tiver o link.
+    /// `discord`: Discord login session when only people in the call may
+    /// watch (gatekeeper); `None` leaves it open to anyone with the link.
     StartLive { quality: Quality, discord: Option<String> },
     StopLive,
     SetQuality { quality: Quality },
@@ -35,7 +35,7 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncoderInfo {
-    /// Nome para gente: "NVENC", "VAAPI", "OpenH264".
+    /// Human-readable name: "NVENC", "VAAPI", "OpenH264".
     pub name: String,
     pub hardware: bool,
     pub width: u32,
@@ -50,17 +50,17 @@ pub enum Event {
     Viewers(Vec<Viewer>),
     Live(bool),
     Encoder(EncoderInfo),
-    /// Tamanho da tela que vai ser capturada (para as opções de resolução).
+    /// Size of the screen to be captured (for the resolution options).
     Screen { width: u32, height: u32 },
     Notice(String),
-    /// Aviso bom (não é problema).
+    /// Positive notice (not a problem).
     Info(String),
     Left,
 }
 
-/// Liga o motor (ou o de mentira, com TELINHA_MOCK=1) em segundo plano.
-/// Cada evento vai para `on_event`; os comandos entram pelo canal devolvido.
-/// Precisa ser chamado dentro do tokio.
+/// Starts the engine (or the mock one, with TELINHA_MOCK=1) in the background.
+/// Each event goes to `on_event`; commands come in through the returned channel.
+/// Must be called inside tokio.
 pub fn spawn(on_event: impl Fn(Event) + Send + 'static) -> tokio::sync::mpsc::Sender<Command> {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel(64);

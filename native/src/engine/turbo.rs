@@ -1,10 +1,10 @@
-//! Protocolo do modo atraso mínimo, idêntico ao turbo.js do site:
+//! Minimum-latency mode protocol, identical to the site's turbo.js:
 //!
-//!   u8 0x54 | u8 flags (1 = keyframe, 2 = traz config) | u16 índice | u16 total
-//!   u16 tamanho da config | u32 sequência | f64 timestamp (µs) | [config JSON] | dados
+//!   u8 0x54 | u8 flags (1 = keyframe, 2 = has config) | u16 index | u16 total
+//!   u16 config length | u32 sequence | f64 timestamp (µs) | [config JSON] | data
 //!
-//! Cada pessoa que assiste tem um remetente próprio, que recebe os quadros já
-//! codificados (uma vez só, para todos) e cuida da fila daquela conexão.
+//! Each viewer has its own sender, which receives the already encoded frames
+//! (encoded once, for everyone) and manages that connection's queue.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -20,8 +20,8 @@ const MAGIC: u8 = 0x54;
 const HEADER: usize = 20;
 const FRAG: usize = 16000;
 
-/// Corta um quadro em pacotes. A config (codec e tamanho) vai no primeiro
-/// pacote das keyframes, para quem entrar no meio saber configurar o decodificador.
+/// Splits a frame into packets. The config (codec and size) goes in the first
+/// packet of keyframes, so viewers joining midway can configure the decoder.
 pub fn packets(seq: u32, frame: &EncodedFrame, ts_us: f64) -> Vec<BytesMut> {
     let config = frame.key.then(|| format!(r#"{{"codec":"{}","w":{},"h":{}}}"#, frame.codec, frame.width, frame.height));
     let count = frame.data.len().div_ceil(FRAG).max(1);
@@ -44,7 +44,7 @@ pub fn packets(seq: u32, frame: &EncodedFrame, ts_us: f64) -> Vec<BytesMut> {
         .collect()
 }
 
-/// Contadores de um remetente (lidos pela sessão para relatórios e painel).
+/// A sender's counters (read by the session for reports and the panel).
 #[derive(Default)]
 pub struct Counters {
     pub frames: AtomicU64,
@@ -52,7 +52,7 @@ pub struct Counters {
     pub dropped: AtomicU64,
 }
 
-/// Limita pedidos de keyframe vindos de vários lugares ao mesmo tempo.
+/// Rate-limits keyframe requests coming from several places at once.
 pub struct KeyLimiter {
     last: std::sync::Mutex<Option<Instant>>,
 }
@@ -107,7 +107,7 @@ pub fn spawn(
             let frame = match tokio::time::timeout(Duration::from_millis(500), frames.recv()).await {
                 Ok(Ok(f)) => f,
                 Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
-                    // Ficou para trás: perdeu quadros, precisa de keyframe.
+                    // Fell behind: frames were lost, a keyframe is needed.
                     c.dropped.fetch_add(n, Ordering::Relaxed);
                     need_key = true;
                     continue;
@@ -118,7 +118,7 @@ pub fn spawn(
             let budget = (bitrate.load(Ordering::Relaxed) as usize / 8 * 3 / 10).max(256 * 1024); // ~300 ms
             let queued = channel.outstanding_bytes().await.unwrap_or(0);
             if need_key && !frame.key {
-                // Só pede a keyframe quando a fila esvaziou, senão ela também não cabe.
+                // Only request the keyframe once the queue drained, otherwise it won't fit either.
                 if queued < budget / 2 {
                     keys.request(&control, Duration::from_secs(1));
                 }
@@ -156,7 +156,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn corta_igual_ao_site() {
+    fn splits_like_the_site() {
         let f = EncodedFrame {
             data: bytes::Bytes::from(vec![7u8; 40_000]),
             key: true,
@@ -175,7 +175,7 @@ mod tests {
         let cfg = std::str::from_utf8(&p0[HEADER..HEADER + cfg_len]).unwrap();
         assert_eq!(cfg, r#"{"codec":"avc1.640028","w":1920,"h":1080}"#);
         assert_eq!(u32::from_le_bytes([p0[8], p0[9], p0[10], p0[11]]), 9);
-        assert_eq!(ps[1][1], 1); // keyframe sem config
+        assert_eq!(ps[1][1], 1); // keyframe without config
         let total: usize = ps.iter().enumerate().map(|(i, p)| p.len() - HEADER - if i == 0 { cfg_len } else { 0 }).sum();
         assert_eq!(total, 40_000);
     }

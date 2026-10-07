@@ -1,95 +1,95 @@
 # Telinha
 
-Compartilhamento de tela entre amigos pelo navegador, usando PeerJS (WebRTC).
+Screen sharing between friends in the browser, using PeerJS (WebRTC).
 
-Uma pessoa abre um canal e recebe um número de 4 dígitos. Os outros digitam o número ou abrem o link de convite. Qualquer pessoa no canal pode transmitir, e várias pessoas podem transmitir ao mesmo tempo.
+One person opens a channel and gets a 4-digit number. The others type the number or open the invite link. Anyone in the channel can stream, and several people can stream at the same time.
 
-## Rodar localmente
+## Run locally
 
 ```sh
 bun server.ts        # http://localhost:5180
 ```
 
-## Publicar
+## Deploy
 
-O app é estático, mas a sinalização e o repasse (TURN) rodam num servidor seu: o app usa o próprio endereço de onde foi aberto. Rodando em `localhost`, ele usa o PeerJS público (só STUN); para testar localmente contra o seu servidor, abra com `?servidor=seu.dominio`.
+The app is static, but signaling and relay (TURN) run on your own server: the app uses the address it was opened from. When running on `localhost`, it uses the public PeerJS server (STUN only); to test locally against your server, open it with `?servidor=your.domain`.
 
-A pasta `deploy/` tem tudo para uma VPS com Docker e um proxy reverso (Caddy) já rodando:
+The `deploy/` folder has everything for a VPS with Docker and a reverse proxy (Caddy) already running:
 
-- `server.js` + `Dockerfile` + `docker-compose.yml`: container `telinha` em `/opt/telinha`, com o site (`/opt/telinha/public`), a sinalização do PeerJS em `/peer` e credenciais temporárias do TURN em `/api/ice`. Ele entra na rede Docker do proxy (`PROXY_NETWORK`).
-- `.env.example`: copie para `/opt/telinha/.env` e preencha (segredo do TURN, domínio, IP público, rede do proxy, pasta de certificados do Caddy). O `.env` nunca vai para o repositório.
-- `Caddyfile.snippet`: bloco para o Caddyfile do proxy.
-- `turnserver.conf`: modelo do coturn (instalado via apt). Gere o `/etc/turnserver.conf` trocando os `__CAMPOS__` pelos valores do `.env`:
+- `server.js` + `Dockerfile` + `docker-compose.yml`: `telinha` container in `/opt/telinha`, with the site (`/opt/telinha/public`), PeerJS signaling at `/peer` and temporary TURN credentials at `/api/ice`. It joins the proxy's Docker network (`PROXY_NETWORK`).
+- `.env.example`: copy to `/opt/telinha/.env` and fill it in (TURN secret, domain, public IP, proxy network, Caddy certificates folder). The `.env` never goes into the repository.
+- `Caddyfile.snippet`: block for the proxy's Caddyfile.
+- `turnserver.conf`: coturn template (installed via apt). Generate `/etc/turnserver.conf` by replacing the `__FIELDS__` with the values from `.env`:
 
   ```sh
   . /opt/telinha/.env
   sed -e "s/__TURN_SECRET__/$TURN_SECRET/" -e "s/__PUBLIC_IP__/$PUBLIC_IP/" -e "s/__TURN_HOST__/$TURN_HOST/" \
     /opt/telinha/turnserver.conf > /etc/turnserver.conf
   ```
-- `turn-certs.sh`: copia o certificado do Caddy para o coturn (TURN sobre TLS na porta 5349). Instale em `/usr/local/bin/telinha-turn-certs` e rode pelo cron todo dia.
+- `turn-certs.sh`: copies Caddy's certificate to coturn (TURN over TLS on port 5349). Install it at `/usr/local/bin/telinha-turn-certs` and run it daily from cron.
 
-Atualizar só o site:
+Update only the site:
 
 ```sh
-scp index.html style.css app.js stats.js stats.css turbo.js som-linux.conf root@SUA_VPS:/opt/telinha/public/
+scp index.html style.css app.js stats.js stats.css turbo.js som-linux.conf root@YOUR_VPS:/opt/telinha/public/
 ```
 
-Portas abertas no firewall: 3478 udp/tcp, 5349 tcp e 49160–49999 udp.
+Ports open in the firewall: 3478 udp/tcp, 5349 tcp and 49160–49999 udp.
 
-## Como funciona
+## How it works
 
-- Quem abre o canal registra o id `telinha-canal-v1-NNNN` no servidor de sinalização e mantém a lista de quem está na sala.
-- Os outros se conectam a essa pessoa por um canal de dados e recebem a lista.
-- Quem transmite liga direto para cada pessoa da sala. O vídeo vai de ponta a ponta, sem passar por quem abriu o canal. Quando a conexão direta falha (CGNAT, por exemplo), o coturn da VPS repassa os dados, que continuam criptografados.
-- Se a VPS não responder, o app usa o servidor público do PeerJS, só com STUN. Nesse modo não há repasse: os servidores TURN do PeerJS não existem mais.
-- Se quem abriu o canal sair, o canal sai do ar.
+- Whoever opens the channel registers the id `telinha-canal-v1-NNNN` on the signaling server and keeps the list of who is in the room.
+- The others connect to that person over a data channel and receive the list.
+- Whoever streams calls each person in the room directly. Video goes end to end, without passing through whoever opened the channel. When the direct connection fails (CGNAT, for example), the VPS's coturn relays the data, which stays encrypted.
+- If the VPS does not respond, the app uses the public PeerJS server, STUN only. In this mode there is no relay: PeerJS's TURN servers no longer exist.
+- If whoever opened the channel leaves, the channel goes down.
 
-## Latência
+## Latency
 
-Ideias tiradas do Sunshine/Moonlight:
+Ideas taken from Sunshine/Moonlight:
 
-- Quem transmite descobre se a placa de vídeo codifica H.264, VP9 ou AV1 (`mediaCapabilities`) e avisa quem assiste, que põe esse codec na frente da resposta.
-- O teto de bitrate acompanha a resolução e os quadros por segundo escolhidos (cerca de 0,08 bit por pixel), em vez de um valor fixo. No repasse isso reduziu o atraso mediano de 300 para cerca de 216 ms no teste.
-- Quem transmite escolhe resolução, quadros por segundo e prioridade (fluidez ou nitidez) no botão de qualidade.
-- O painel de conexão (tecla I) mostra atraso estimado, codec, buffer, decodificação e se o caminho é direto ou por repasse.
+- The streamer detects whether the GPU encodes H.264, VP9 or AV1 (`mediaCapabilities`) and tells viewers, who put that codec first in their answer.
+- The bitrate cap follows the chosen resolution and frame rate (about 0.08 bits per pixel) instead of a fixed value. Over the relay this cut the median delay from 300 to about 216 ms in testing.
+- The streamer picks resolution, frame rate and priority (smoothness or sharpness) in the quality button.
+- The connection panel (I key) shows estimated delay, codec, buffer, decoding and whether the path is direct or relayed.
 
-### Atraso mínimo (WebCodecs)
+### Minimum delay (WebCodecs)
 
-Opção "Atraso: Mínimo" no painel de qualidade (`turbo.js`). É o caminho do Sunshine no navegador:
+The "Atraso: Mínimo" option in the quality panel (`turbo.js`). It is Sunshine's approach in the browser:
 
-- Quem transmite lê os quadros crus da captura (`MediaStreamTrackProcessor`), codifica uma vez só com `VideoEncoder` (modo `realtime`, taxa constante, H.264 na placa de vídeo quando houver, keyframe só quando alguém pede) e manda os mesmos pacotes para todo mundo.
-- O vídeo vai por um canal de dados sem ordem e com reenvio de no máximo 150 ms, aberto sobre a conexão do PeerJS. Pedidos de keyframe e relatórios vão pelo canal confiável.
-- Quem assiste remonta, decodifica com `optimizeForLatency` e entrega o quadro na hora para uma trilha comum (`MediaStreamTrackGenerator`), sem buffer de espera. O áudio continua pelo WebRTC.
-- Quem assiste manda um relatório por segundo. Se a pessoa recebe bem menos do que foi enviado três vezes seguidas, ela volta para o WebRTC, que se adapta à banda. Quem usa navegador sem as APIs (fora Chrome e Edge) recebe pelo WebRTC desde o começo.
+- The streamer reads raw frames from the capture (`MediaStreamTrackProcessor`), encodes once with `VideoEncoder` (`realtime` mode, constant bitrate, hardware H.264 when available, keyframe only on request) and sends the same packets to everyone.
+- Video goes over an unordered data channel with at most 150 ms of retransmission, opened over the PeerJS connection. Keyframe requests and reports go over the reliable channel.
+- The viewer reassembles, decodes with `optimizeForLatency` and hands the frame immediately to a regular track (`MediaStreamTrackGenerator`), with no jitter buffer. Audio still goes over WebRTC.
+- The viewer sends one report per second. If they receive much less than was sent three times in a row, they fall back to WebRTC, which adapts to bandwidth. Viewers on browsers without these APIs (anything but Chrome and Edge) use WebRTC from the start.
 
-Medido em conexão direta, mesma qualidade (720p60): mediana de 45 a 48 ms no modo mínimo contra 66 a 80 ms no normal, e p95 de 74 a 78 ms contra 83 a 97 ms. Pelo repasse com os dois lados na mesma internet de casa, a banda não aguentou a taxa fixa e a pessoa voltou para o WebRTC em uns 3 segundos, como esperado.
+Measured on a direct connection, same quality (720p60): median of 45 to 48 ms in minimum mode versus 66 to 80 ms in normal mode, and p95 of 74 to 78 ms versus 83 to 97 ms. Over the relay with both sides on the same home connection, bandwidth could not sustain the fixed rate and the viewer fell back to WebRTC in about 3 seconds, as expected.
 
-`tools/latency` mede o atraso de ponta a ponta com dois Chromes automatizados: a tela falsa desenha o horário em blocos e quem assiste lê esses blocos do vídeo.
+`tools/latency` measures end-to-end delay with two automated Chromes: the fake screen draws the time as blocks and the viewer reads those blocks back from the video.
 
 ```sh
 cd tools/latency && npm install
-EXTRA="--warmup 15 --server SEU_DOMINIO" ./run-suite.sh ../.. novo.jsonl novo 3 1 20
-EXTRA="--warmup 15 --server SEU_DOMINIO --turbo" ./run-suite.sh ../.. turbo.jsonl turbo 3 0 20   # modo atraso mínimo
+EXTRA="--warmup 15 --server YOUR_DOMAIN" ./run-suite.sh ../.. novo.jsonl novo 3 1 20
+EXTRA="--warmup 15 --server YOUR_DOMAIN --turbo" ./run-suite.sh ../.. turbo.jsonl turbo 3 0 20   # minimum delay mode
 node summarize.mjs novo.jsonl
 ```
 
-Os números do Chrome sem interface usam codec por software e os dois lados na mesma máquina, então servem para comparar versões, não como valor absoluto.
+Headless Chrome numbers use a software codec with both sides on the same machine, so they are good for comparing versions, not as absolute values.
 
-## Som
+## Audio
 
-- **Windows:** ao escolher "Tela inteira", marque "Compartilhar áudio do sistema" no seletor do Chrome.
-- **Aba do navegador:** o som da aba vai junto em qualquer sistema.
-- **Linux:** o Chrome só manda som de abas. A saída de som vira uma entrada virtual "Som do computador" (`som-linux.conf`, um loopback do PipeWire que acompanha a saída padrão), e o Telinha pega essa entrada como microfone. Instalar uma vez:
+- **Windows:** when choosing "Entire screen", check "Share system audio" in Chrome's picker.
+- **Browser tab:** the tab's audio is included on any system.
+- **Linux:** Chrome only sends tab audio. The sound output becomes a virtual input "Som do computador" (`som-linux.conf`, a PipeWire loopback that follows the default output), and Telinha picks that input up as a microphone. Install once:
 
   ```sh
-  mkdir -p ~/.config/pipewire/pipewire.conf.d && curl -fsSL https://SEU_DOMINIO/som-linux.conf -o ~/.config/pipewire/pipewire.conf.d/telinha-som.conf && systemctl --user restart pipewire
+  mkdir -p ~/.config/pipewire/pipewire.conf.d && curl -fsSL https://YOUR_DOMAIN/som-linux.conf -o ~/.config/pipewire/pipewire.conf.d/telinha-som.conf && systemctl --user restart pipewire
   ```
 
-  O painel de qualidade mostra esse comando já com o endereço certo. Depois da primeira vez (que pede permissão de microfone), o som entra sozinho ao compartilhar. Dá para desligar no painel de qualidade. Vai tudo que sai no fone, inclusive vozes de uma chamada no Discord.
-- **Mac:** precisa de um dispositivo virtual como o BlackHole.
-- Quem assiste recebe Opus em estéreo a até 192 kb/s (o padrão do navegador é voz mono).
+  The quality panel shows this command with the right address already filled in. After the first time (which asks for microphone permission), audio is added automatically when sharing. It can be turned off in the quality panel. Everything that plays in your headphones goes along, including voices from a Discord call.
+- **Mac:** needs a virtual device such as BlackHole.
+- Viewers receive stereo Opus at up to 192 kb/s (the browser default is mono voice).
 
-## Limites
+## Limits
 
-- Cada pessoa que assiste recebe uma cópia do vídeo de quem transmite, então o upload de quem transmite limita o tamanho do grupo. Para 4 ou 5 pessoas funciona bem.
-- Celulares conseguem assistir, mas a maioria não consegue transmitir.
+- Each viewer receives their own copy of the streamer's video, so the streamer's upload limits the group size. It works well for 4 or 5 people.
+- Phones can watch, but most cannot stream.

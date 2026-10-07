@@ -6,9 +6,9 @@ description = "Transmissão de tela de baixa latência para o Telinha"
 license = "MIT"
 
 [dependencies]
-# Interface em Slint (ui/*.slint): janela pelo winit, desenho por software no
-# Linux (funciona pelo XWayland sem depender da GPU).
-slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "backend-winit-x11", "backend-winit-wayland", "renderer-software", "unstable-winit-030"] }
+# Slint UI (ui/*.slint): window via winit, software rendering on
+# Linux (works through XWayland without relying on the GPU).
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "backend-winit-x11", "backend-winit-wayland", "renderer-software", "renderer-femtovg", "unstable-winit-030"] }
 arboard = { version = "3", default-features = false }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
@@ -52,16 +52,16 @@ codegen-units = 4
 strip = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# O fontique é o que o Slint usa para achar fontes; com esta feature a
-# fontconfig é carregada em tempo de execução (o binário não fica preso à
-# versão da máquina de compilação).
+# fontique is what Slint uses to find fonts; with this feature
+# fontconfig is loaded at runtime (the binary is not tied to the
+# build machine's version).
 fontique = { version = "0.11", default-features = false, features = ["fontconfig-dlopen"] }
 ksni = "0.3"
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
 pipewire = "0.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# No Windows a janela transparente pede o desenho por OpenGL.
+# On Windows the transparent window needs OpenGL rendering.
 slint = { version = "1.18", default-features = false, features = ["renderer-femtovg"] }
 tray-icon = "0.26"
 wasapi = "0.25"

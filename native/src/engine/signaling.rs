@@ -1,7 +1,7 @@
-//! Cliente do servidor de sinalização do PeerJS (o mesmo que o site usa).
+//! Client for the PeerJS signaling server (the same one the site uses).
 //!
-//! Protocolo: WebSocket em `wss://SERVIDOR/peer/peerjs?key=peerjs&id=..&token=..`,
-//! mensagens JSON `{type, src|dst, payload}`. Batimento a cada 5 s.
+//! Protocol: WebSocket at `wss://SERVER/peer/peerjs?key=peerjs&id=..&token=..`,
+//! JSON messages `{type, src|dst, payload}`. Heartbeat every 5 s.
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -16,7 +16,7 @@ pub enum Signal {
     Offer { src: String, payload: Value },
     Answer { src: String, payload: Value },
     Candidate { src: String, payload: Value },
-    /// O destino não existe ou saiu (o PeerJS chama de EXPIRE/LEAVE).
+    /// The destination does not exist or left (PeerJS calls it EXPIRE/LEAVE).
     Gone { peer: String },
     Closed,
 }
@@ -27,7 +27,7 @@ pub struct Signaling {
 }
 
 impl Signaling {
-    /// Conecta e repassa cada mensagem para `events`.
+    /// Connects and forwards each message to `events`.
     pub async fn connect(server: &str, id: &str, events: mpsc::Sender<Signal>) -> Result<Self, String> {
         let token: String = (0..10).map(|_| char::from(b'a' + rand::random_range(0..26u8))).collect();
         let url = format!("wss://{server}/peer/peerjs?key=peerjs&id={id}&token={token}&version=1.5.5");
@@ -81,7 +81,7 @@ impl Signaling {
     }
 }
 
-/// Servidores ICE (STUN e TURN com credencial temporária) do próprio servidor.
+/// ICE servers (STUN and TURN with temporary credentials) from our own server.
 pub async fn ice_servers(server: &str) -> Result<Vec<webrtc::peer_connection::RTCIceServer>, String> {
     let url = format!("https://{server}/api/ice");
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8)).build().map_err(|e| e.to_string())?;

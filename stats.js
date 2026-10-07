@@ -1,8 +1,8 @@
-// Painel de estatísticas da conexão (latência, codec, caminho).
+// Connection stats panel (latency, codec, path).
 //
-// Lê pc.getStats() uma vez por segundo enquanto está aberto. Os valores "por
-// quadro" e as taxas vêm da diferença entre duas leituras seguidas; o atraso
-// estimado soma meia ida e volta, o buffer de jitter e a decodificação.
+// Reads pc.getStats() once per second while open. "Per frame" values and
+// rates come from the difference between two consecutive readings; the
+// estimated delay adds half the round trip, the jitter buffer and decoding.
 
 const TICK = 1000;
 const DASH = "—";
@@ -49,7 +49,7 @@ export function createStatsPanel({ container, getConnections }) {
     clearInterval(timer);
     timer = 0;
     if (open) { tick(); timer = setInterval(tick, TICK); }
-    // avisa quem tem o botão de abrir (o painel também fecha pelo próprio x)
+    // notify whoever owns the open button (the panel also closes via its own x)
     panel.dispatchEvent(new CustomEvent("statstoggle", { bubbles: true, detail: { open } }));
   }
 
@@ -99,7 +99,7 @@ export function createStatsPanel({ container, getConnections }) {
   return { toggle, isOpen: () => !panel.hidden, destroy };
 }
 
-/* ---------------- Leitura ---------------- */
+/* ---------------- Reading ---------------- */
 
 async function readStats(pc) {
   try {
@@ -118,7 +118,7 @@ function parse(report, dir) {
   const type = dir === "in" ? "inbound-rtp" : "outbound-rtp";
   for (const s of all.values()) {
     if (s.type !== type || (s.kind ?? s.mediaType) !== "video") continue;
-    // com simulcast pode haver mais de um; fica com o que mais trafegou
+    // with simulcast there may be more than one; keep the one with the most traffic
     const bytes = dir === "in" ? s.bytesReceived : s.bytesSent;
     const best = dir === "in" ? rtp?.bytesReceived : rtp?.bytesSent;
     if (!rtp || (bytes ?? 0) > (best ?? 0)) rtp = s;
@@ -142,7 +142,7 @@ function parse(report, dir) {
   };
 }
 
-/* ---------------- Desenho ---------------- */
+/* ---------------- Rendering ---------------- */
 
 function makeBlock(dir) {
   const el = document.createElement("section");
@@ -175,7 +175,7 @@ function render(b, report) {
   b.prev = cur;
   const dt = prev ? (cur.t - prev.t) / 1000 : 0;
   const d = (k) => (prev && isNum(cur[k]) && isNum(prev[k]) ? cur[k] - prev[k] : null);
-  // por quadro: usa o intervalo se houve quadros nele; na primeira leitura, a média acumulada
+  // per frame: use the interval if it had frames; on the first reading, the cumulative average
   const perFrame = (sumKey, countKey) => {
     const ds = d(sumKey), dc = d(countKey);
     if (prev) return dc > 0 ? (ds / dc) * 1000 : null;
@@ -193,7 +193,7 @@ function render(b, report) {
   if (typeof hw === "boolean") parts.push(hw ? "hardware" : "software");
   setText(f.codec, parts.join(" · ") || DASH);
 
-  // resolução e quadros
+  // resolution and frames
   const w = rtp?.frameWidth, h = rtp?.frameHeight, fps = rtp?.framesPerSecond;
   const res = isNum(w) && isNum(h) ? `${w}×${h}` : "";
   const rate = isNum(fps) ? `${n0.format(fps)} fps` : "";
@@ -239,8 +239,8 @@ function render(b, report) {
   renderPath(f.path, state, local, remote);
 }
 
-// Números que quem transmite manda (modo atraso mínimo): mostram se o gargalo é
-// a captura, o codificador ou o Chrome rebaixado com a aba escondida.
+// Numbers the streamer sends (minimum delay mode): they show whether the bottleneck
+// is capture, the encoder, or Chrome throttled with the tab hidden.
 function renderRemote(b, r) {
   if (!b.remoteRows) {
     const grid = b.el.querySelector(".stats-grid");
@@ -265,8 +265,8 @@ function renderRemote(b, r) {
   setText(f.rtab, typeof r.hidden === "boolean" ? (r.hidden ? "escondida (jogo na frente)" : "visível") : DASH);
 }
 
-// Modo atraso mínimo: o vídeo não é RTP, então os números vêm do próprio
-// codificador/decodificador (turbo.js).
+// Minimum delay mode: the video is not RTP, so the numbers come from the
+// encoder/decoder itself (turbo.js).
 const TURBO_LABELS = { in: { buffer: "Montagem", lost: "Quadros perdidos", freeze: "Keyframes pedidas" }, out: { limit: "Captura", retx: "Descartados" } };
 
 function renderTurbo(b, t, rtt) {
@@ -304,7 +304,7 @@ function renderTurbo(b, t, rtt) {
       : "";
   } else {
     setHTML(f.encode, msPerFrame(t.encodeMs));
-    // onde os quadros se perdem: captura → codificador → rede
+    // where frames get lost: capture → encoder → network
     const per = (k) => (dt > 0 && isNum(t[k]) && isNum(prev[k]) ? (t[k] - prev[k]) / dt : null);
     const cap = per("captured"), skip = per("skipped"), net = per("dropped");
     setText(f.limit, isNum(cap) ? `${n0.format(cap)} fps` : DASH);
@@ -352,7 +352,7 @@ function snapshot(s, dir) {
   return { ...base, bytes: s.bytesSent, encodeTime: s.totalEncodeTime, framesEncoded: s.framesEncoded };
 }
 
-/* ---------------- Formatação ---------------- */
+/* ---------------- Formatting ---------------- */
 
 function isNum(v) { return typeof v === "number" && Number.isFinite(v); }
 function safe(fn) { try { return fn(); } catch { return undefined; } }
@@ -375,5 +375,5 @@ function setText(el, text) {
   el.textContent = text;
   delete el.dataset.html;
 }
-// só para marcação gerada aqui (números e unidades), nunca para nomes
+// only for markup generated here (numbers and units), never for names
 function setHTML(el, html) { if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; } }

@@ -1,5 +1,5 @@
-// Item de menu: ícone + texto, largura toda. Responde no aperto (o fundo muda
-// na hora em que o botão desce, não quando sobe).
+// Menu item: icon + text, full width. Responds on press (the background changes
+// as soon as the button goes down, not when it comes up).
 
 import { Palette, Size, Radius, Space, Type, Motion } from "tokens.slint";
 
@@ -40,7 +40,7 @@ export component MenuItem inherits Rectangle {
     }
 }
 
-// Separador entre grupos de itens.
+// Separator between groups of items.
 export component Divider inherits Rectangle {
     height: Space.xs * 2 + 1px;
     Rectangle { height: 1px; background: Palette.line; }

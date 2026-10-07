@@ -1,7 +1,7 @@
-//! Tela de teste: imagem que se mexe o tempo todo (para o codificador ter
-//! trabalho de verdade) com o horário gravado em blocos, no mesmo formato da
-//! ferramenta de latência do site (tools/latency), para medir o atraso de
-//! ponta a ponta sem precisar de captura real.
+//! Test pattern: an image that moves all the time (so the encoder has real
+//! work to do) with the time stamped in blocks, in the same format as the
+//! site's latency tool (tools/latency), to measure end-to-end delay without
+//! real capture.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,9 +19,9 @@ impl TestPattern {
         Self::spawn(fps, move |n| draw(width, height, n))
     }
 
-    /// Imagem parada (uma área de trabalho de verdade, em qualquer tamanho)
-    /// com um quadradinho andando e o horário em blocos: mostra a nitidez que
-    /// chega do outro lado numa tela que quase não muda.
+    /// Still image (a real desktop, any size) with a small moving square and
+    /// the time in blocks: shows the sharpness that reaches the other side on
+    /// a screen that barely changes.
     pub fn over_image(path: &str, fps: u32) -> Result<Self, String> {
         let img = image::open(path).map_err(|e| format!("{path}: {e}"))?.to_rgba8();
         let (w, h) = img.dimensions();
@@ -32,7 +32,7 @@ impl TestPattern {
         Ok(Self::spawn(fps, move |n| {
             let mut data = base.clone();
             let stride = w * 4;
-            // "Cursor" andando devagar, como alguém mexendo o mouse.
+            // "Cursor" moving slowly, like someone moving the mouse.
             let (cx, cy) = (200 + (n * 4) % w.saturating_sub(400).max(1), h / 3);
             for y in cy..(cy + 24).min(h) {
                 for x in cx..(cx + 24).min(w) {
@@ -67,7 +67,7 @@ impl TestPattern {
                     }
                 }
             })
-            .expect("thread da tela de teste");
+            .expect("test pattern thread");
         Self { mailbox, stop }
     }
 }
@@ -84,10 +84,10 @@ impl CpuSource for TestPattern {
     }
 }
 
-/// Grade de blocos igual à de tools/latency/measure.mjs: 16×4 quadrados de
-/// 40 px a partir de (48, 48) sobre fundo preto com 16 px de borda, numa
-/// imagem de 1280 de largura. Bits: marcador 1011, 44 bits de Date.now(),
-/// 8 bits de contador, CRC-8 (polinômio 0x07) dos 52 bits do meio.
+/// Block grid matching tools/latency/measure.mjs: 16×4 squares of 40 px
+/// starting at (48, 48) on a black background with a 16 px border, in a
+/// 1280-wide image. Bits: marker 1011, 44 bits of Date.now(), 8 counter bits,
+/// CRC-8 (polynomial 0x07) of the middle 52 bits.
 pub const CELL: u32 = 40;
 const GX: u32 = 48;
 const GY: u32 = 48;
@@ -124,7 +124,7 @@ fn draw(w: u32, h: u32, n: u32) -> CpuFrame {
     for y in 0..h {
         let row = &mut data[(y * stride) as usize..((y + 1) * stride) as usize];
         for x in 0..w {
-            // Faixas diagonais andando + um tom que muda devagar.
+            // Moving diagonal stripes + a slowly changing tint.
             let band = ((x + y + n * 6) / 48) % 2;
             let i = (x * 4) as usize;
             row[i] = (90.0 + 60.0 * ((x as f32 / 97.0 + t / 23.0).sin())) as u8;
@@ -133,7 +133,7 @@ fn draw(w: u32, h: u32, n: u32) -> CpuFrame {
             row[i + 3] = 255;
         }
     }
-    // Bloco que atravessa a tela (dá pra ver o fluido de longe).
+    // Block crossing the screen (smoothness is visible from afar).
     let bx = (n * 9) % w.saturating_sub(160).max(1);
     for y in h / 2..(h / 2 + 120).min(h) {
         for x in bx..(bx + 160).min(w) {
@@ -145,8 +145,8 @@ fn draw(w: u32, h: u32, n: u32) -> CpuFrame {
     CpuFrame { data: Pixels::Cpu(data), width: w, height: h, stride, pixel: PixelFormat::Bgrx, captured: Instant::now() }
 }
 
-/// Horário em blocos (lido pela ferramenta de latência), na escala da largura
-/// da imagem: a grade foi pensada para 1280 de largura.
+/// Time in blocks (read by the latency tool), scaled to the image width:
+/// the grid was designed for a 1280-wide image.
 fn stamp(data: &mut [u8], w: u32, h: u32, n: u32) {
     let stride = w * 4;
     let k = w as f32 / 1280.0;

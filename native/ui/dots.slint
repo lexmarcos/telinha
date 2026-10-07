@@ -1,6 +1,6 @@
-// Pontinhos de quem assiste: círculos com as iniciais, na cor do avatar, numa
-// fileira embaixo da bolha. No máximo cinco e depois "+n". Quem está num
-// navegador que não recebe o modo nativo aparece apagado.
+// Viewer dots: circles with initials, in the avatar color, in a
+// row below the bubble. At most five and then "+n". Someone on a
+// browser that does not receive native mode appears dimmed.
 
 import { Palette, Size, Type, Motion } from "tokens.slint";
 
@@ -18,7 +18,7 @@ export component Dots {
         x: i * root.step;
         width: Size.dot + 2px;
         height: self.width;
-        // Contorno da cor da sala separa um ponto do outro.
+        // A room-colored outline separates one dot from the next.
         border-radius: self.width / 2;
         background: Palette.room;
         Rectangle {

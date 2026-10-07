@@ -1,5 +1,5 @@
-//! Fontes de imagem: PipeWire no Linux (na GPU por DMA-BUF ou na CPU) e a
-//! tela de teste.
+//! Image sources: PipeWire on Linux (on the GPU via DMA-BUF or on the CPU) and
+//! the test pattern.
 
 pub mod test;
 
@@ -21,11 +21,11 @@ impl PixelFormat {
     }
 }
 
-/// Onde a imagem está.
+/// Where the image lives.
 pub enum Pixels {
-    /// Na memória, 4 bytes por pixel.
+    /// In memory, 4 bytes per pixel.
     Cpu(Vec<u8>),
-    /// Na GPU (Linux): um buffer DMA-BUF do compositor, sem cópia nenhuma.
+    /// On the GPU (Linux): a DMA-BUF buffer from the compositor, with no copy at all.
     #[cfg(target_os = "linux")]
     DmaBuf { fd: std::os::fd::OwnedFd, offset: u32, size: u32, modifier: u64 },
 }
@@ -37,7 +37,7 @@ impl Pixels {
 }
 
 pub struct CpuFrame {
-    /// Imagem de 4 bytes por pixel, na ordem de `pixel`.
+    /// 4-bytes-per-pixel image, in `pixel` order.
     pub data: Pixels,
     pub width: u32,
     pub height: u32,
@@ -47,13 +47,13 @@ pub struct CpuFrame {
 }
 
 pub trait CpuSource: Send {
-    /// Próximo quadro, esperando no máximo `timeout`.
+    /// Next frame, waiting at most `timeout`.
     fn next(&mut self, timeout: Duration) -> Option<CpuFrame>;
 }
 
-/// Caixa de correio de um lugar só: guarda o quadro mais novo. Se o
-/// codificador atrasar, os quadros antigos são descartados em vez de formar
-/// fila (é o "descartar antes de codificar" do Sunshine).
+/// Single-slot mailbox: keeps the newest frame. If the encoder falls behind,
+/// old frames are dropped instead of queueing up (Sunshine's
+/// "drop before encode").
 #[derive(Default)]
 pub struct Mailbox {
     slot: Mutex<Option<CpuFrame>>,

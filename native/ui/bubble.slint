@@ -1,6 +1,6 @@
-// A bolha: um tubo de TV redondo com o número do canal em matriz de pontos e
-// a luz vermelha de "no ar". É a única coisa sempre visível, então é onde está
-// a personalidade. Aperto, anel de "no ar" e hover vêm das molas do app.
+// The bubble: a round TV tube with the channel number in a dot matrix and
+// the red "on air" light. It is the only thing always visible, so it is where the
+// personality lives. Press, "on air" ring and hover come from the app's springs.
 
 import { Palette, Size, Type, Motion } from "tokens.slint";
 import { Shadow } from "shadow.slint";
@@ -10,7 +10,7 @@ export enum Face { empty, connecting, channel }
 export component Bubble inherits Rectangle {
     in property <Face> face: Face.empty;
     in property <string> code;
-    // Molas do app: 0..1 (o anel de "no ar" passa um pouco de 1 no quique).
+    // App springs: 0..1 (the "on air" ring overshoots 1 a little on the bounce).
     in property <float> tally;
     in property <float> press;
     callback pointer-down();
@@ -28,7 +28,7 @@ export component Bubble inherits Rectangle {
         transform-scale: 1 - (1 - Motion.press-scale) * root.press;
 
         Shadow { width: parent.width; height: parent.height; radius: root.outer; spread: 10px; offset-y: 4px; strength: 0.5; }
-        // Moldura do aparelho.
+        // Device frame.
         Rectangle {
             border-radius: root.outer;
             background: Palette.room;
@@ -36,7 +36,7 @@ export component Bubble inherits Rectangle {
             border-color: Palette.phosphor.with-alpha(touch.has-hover ? 0.38 : 0.18);
             animate border-color { duration: Motion.hover; }
         }
-        // Vidro do tubo: linhas de varredura e um reflexo no alto.
+        // Tube glass: scan lines and a highlight at the top.
         Rectangle {
             width: Size.tube;
             height: Size.tube;
@@ -50,7 +50,7 @@ export component Bubble inherits Rectangle {
                 background: Palette.white.with-alpha(0.035);
             }
             if root.face != Face.channel: Rectangle {
-                // Sem canal: um "+" discreto convidando a clicar.
+                // No channel: a subtle "+" inviting a click.
                 Rectangle { width: 14px; height: 2px; border-radius: 1px; background: Palette.phosphor.with-alpha(0.8); }
                 Rectangle { width: 2px; height: 14px; border-radius: 1px; background: Palette.phosphor.with-alpha(0.8); }
             }
@@ -62,7 +62,7 @@ export component Bubble inherits Rectangle {
                 color: Palette.phosphor;
             }
         }
-        // Conectando: o único giro do app, um arco devagar em volta do tubo.
+        // Connecting: the app's only spinner, a slow arc around the tube.
         if root.face == Face.connecting: Path {
             width: root.width;
             height: root.height;
@@ -75,7 +75,7 @@ export component Bubble inherits Rectangle {
             MoveTo { x: 32; y: 2.5; }
             ArcTo { x: 61.5; y: 32; radius-x: 29.5; radius-y: 29.5; sweep: true; }
         }
-        // No ar: anel vermelho chegando com quique + ponto de gravação.
+        // On air: red ring arriving with a bounce + recording dot.
         if root.tally > 0.01: Rectangle {
             border-radius: root.outer;
             border-width: Size.tally-ring * root.t;
@@ -92,8 +92,8 @@ export component Bubble inherits Rectangle {
         }
     }
 
-    // Clique abre ou fecha o menu; arrastar (depois de 4 de movimento, para não
-    // confundir com clique) move a janela pelo gerenciador de janelas.
+    // Click opens or closes the menu; dragging (after 4 of movement, so it is not
+    // confused with a click) moves the window through the window manager.
     touch := TouchArea {
         mouse-cursor: pointer;
         pointer-event(e) => {

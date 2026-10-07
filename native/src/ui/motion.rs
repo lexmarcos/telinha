@@ -1,19 +1,19 @@
-//! Molas do design system (DESIGN.md, "Movimento"). As cores, tamanhos e
-//! tempos curtos ficam em ui/tokens.slint; as molas ficam aqui porque quem as
-//! anima é o app, quadro a quadro.
+//! Design system springs (DESIGN.md, "Movimento"). Colors, sizes and short
+//! durations live in ui/tokens.slint; springs live here because the app
+//! animates them, frame by frame.
 
-/// Molas no estilo Apple: amortecimento e resposta (segundos).
+/// Apple-style springs: damping and response (seconds).
 #[derive(Debug, Clone, Copy)]
 pub struct SpringParams {
     pub damping: f32,
     pub response: f32,
 }
 
-/// Painel abrindo e fechando, troca de painel, marcador do segmentado.
+/// Panel opening and closing, panel switch, segmented control marker.
 pub const UI: SpringParams = SpringParams { damping: 1.0, response: 0.32 };
-/// Encolher no aperto e voltar.
+/// Shrink on press and come back.
 pub const PRESS: SpringParams = SpringParams { damping: 1.0, response: 0.12 };
-/// O anel vermelho chegando quando a transmissão começa (o único quique).
+/// The red ring arriving when the stream starts (the only bounce).
 pub const TALLY: SpringParams = SpringParams { damping: 0.7, response: 0.45 };
-/// Conteúdo novo aparecendo quando o painel troca.
+/// New content appearing when the panel switches.
 pub const FADE: SpringParams = SpringParams { damping: 1.0, response: 0.22 };

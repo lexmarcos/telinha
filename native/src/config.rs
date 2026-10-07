@@ -1,5 +1,5 @@
-//! Preferências salvas entre aberturas do app (qualidade, nome, servidor,
-//! posição da bolha). Ficam num JSON na pasta de configuração do sistema.
+//! Preferences saved across app launches (quality, name, server, bubble
+//! position). Stored as JSON in the system config directory.
 
 use serde::{Deserialize, Serialize};
 
@@ -29,9 +29,9 @@ impl Resolution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
-    /// Mantém os quadros por segundo; se a rede apertar, baixa a taxa de bits.
+    /// Keeps the frame rate; if the network gets tight, lowers the bitrate.
     Fluidez,
-    /// Mantém a imagem nítida; se a rede apertar, manda menos quadros.
+    /// Keeps the image sharp; if the network gets tight, sends fewer frames.
     Nitidez,
 }
 
@@ -50,7 +50,7 @@ impl Default for Quality {
 }
 
 impl Quality {
-    /// Tamanho que sai, sem aumentar além da tela e mantendo a proporção.
+    /// Output size, never upscaling past the screen and keeping the aspect ratio.
     pub fn output_size(&self, native: (u32, u32)) -> (u32, u32) {
         let (w, h) = native;
         let target = self.resolution.height().map_or(h, |t| t.min(h));
@@ -58,9 +58,9 @@ impl Quality {
         (tw, target & !1)
     }
 
-    /// Mesma conta do site: ~0,08 bit por pixel, entre 2,5 e 20 Mb/s.
+    /// Same formula as the site: ~0.08 bits per pixel, between 2.5 and 20 Mb/s.
     pub fn bitrate(&self, native: (u32, u32)) -> u32 {
-        // Só para testes de rede: força uma taxa fixa.
+        // Network testing only: forces a fixed bitrate.
         if let Some(b) = std::env::var("TELINHA_TAXA").ok().and_then(|v| v.parse().ok()) {
             return b;
         }
@@ -80,23 +80,23 @@ pub struct Config {
     pub quality: Quality,
     #[serde(default)]
     pub name: String,
-    /// Último servidor usado (vem do link de convite).
+    /// Last server used (comes from the invite link).
     #[serde(default)]
     pub server: Option<String>,
     #[serde(default)]
     pub position: Option<(f32, f32)>,
-    /// Mostrar no perfil do Discord que está num canal (Rich Presence).
+    /// Show on the Discord profile that the user is in a channel (Rich Presence).
     #[serde(default = "yes")]
     pub discord: bool,
-    /// Login com o Discord (feito pelo bot do Telinha): sessão e nome.
+    /// Discord login (done through the Telinha bot): session and name.
     #[serde(default)]
     pub discord_session: Option<String>,
     #[serde(default)]
     pub discord_name: Option<String>,
-    /// Com login: só quem está na mesma call de voz assiste.
+    /// With login: only people in the same voice call can watch.
     #[serde(default = "yes")]
     pub call_only: bool,
-    /// Token do portal de captura (Linux) para não perguntar de novo.
+    /// Capture portal token (Linux) so it does not ask again.
     #[serde(default)]
     pub capture_token: Option<String>,
 }
@@ -127,8 +127,8 @@ impl Config {
     }
 
     pub fn save(&self) {
-        // Rodadas de teste (motor de mentira, roteiro de prints) não mexem nas
-        // preferências de verdade: o servidor falso ia parar no config.
+        // Test runs (mock engine, screenshot script) do not touch the real
+        // preferences: the fake server would end up in the config.
         if std::env::var_os("TELINHA_MOCK").is_some() {
             return;
         }

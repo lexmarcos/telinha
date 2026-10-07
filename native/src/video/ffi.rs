@@ -1,5 +1,5 @@
-//! Camada fina sobre o FFmpeg: dispositivo de hardware, grafo de filtros e
-//! codificador. Cada tipo libera o que é dele no `Drop`.
+//! Thin layer over FFmpeg: hardware device, filter graph and encoder.
+//! Each type frees what it owns in `Drop`.
 
 use std::ffi::{CStr, CString};
 use std::ptr;
@@ -30,7 +30,7 @@ fn check(ret: i32, what: &str) -> Result<i32> {
 }
 
 fn cstr(s: &str) -> CString {
-    CString::new(s).expect("texto sem zero no meio")
+    CString::new(s).expect("string without interior NUL")
 }
 
 #[cfg(target_os = "linux")]
@@ -39,7 +39,7 @@ unsafe extern "C" {
     fn libc_close(fd: i32) -> i32;
 }
 
-/// AVERROR(EAGAIN): EAGAIN é 11 no Linux e no CRT do Windows.
+/// AVERROR(EAGAIN): EAGAIN is 11 on Linux and in the Windows CRT.
 const EAGAIN: i32 = -11;
 
 /* ---------------- dispositivo de hardware ---------------- */
@@ -62,8 +62,8 @@ impl HwDevice {
     }
 }
 
-/// Contexto de quadros na GPU (hoje só o de DMA-BUF do Linux: quadros que o
-/// compositor já deixou na placa e o FFmpeg só referencia).
+/// GPU frames context (currently only Linux DMA-BUF: frames the compositor
+/// already left on the card and FFmpeg only references).
 pub struct HwFrames(*mut ff::AVBufferRef);
 
 unsafe impl Send for HwFrames {}
@@ -118,7 +118,7 @@ impl Frame {
         Self(unsafe { ff::av_frame_alloc() })
     }
 
-    /// Embrulha uma imagem da CPU (4 bytes por pixel) sem copiar: o FFmpeg fica dono do Vec.
+    /// Wraps a CPU image (4 bytes per pixel) without copying: FFmpeg takes ownership of the Vec.
     pub fn from_cpu(data: Vec<u8>, width: u32, height: u32, stride: u32, format: ff::AVPixelFormat, pts: i64) -> Self {
         unsafe extern "C" fn free_vec(opaque: *mut std::ffi::c_void, _: *mut u8) {
             drop(unsafe { Box::from_raw(opaque as *mut Vec<u8>) });
@@ -140,8 +140,8 @@ impl Frame {
         frame
     }
 
-    /// Embrulha um buffer DMA-BUF de uma camada só (BGRX/RGBX). O FFmpeg fica
-    /// dono do fd e fecha quando o último uso acabar.
+    /// Wraps a single-plane DMA-BUF buffer (BGRX/RGBX). FFmpeg takes
+    /// ownership of the fd and closes it when the last use ends.
     #[cfg(target_os = "linux")]
     pub fn from_dmabuf(
         fd: std::os::fd::OwnedFd,
@@ -162,7 +162,7 @@ impl Frame {
                 ff::av_free(d as *mut _);
             }
         }
-        // Códigos de formato do DRM (drm_fourcc.h): memória B,G,R,X = XR24; R,G,B,X = XB24.
+        // DRM format codes (drm_fourcc.h): memory B,G,R,X = XR24; R,G,B,X = XB24.
         let fourcc = |c: &[u8; 4]| u32::from_le_bytes(*c);
         let drm_format = if sw_format == ff::AVPixelFormat::AV_PIX_FMT_RGB0 { fourcc(b"XB24") } else { fourcc(b"XR24") };
         let frame = Self::new();
@@ -195,7 +195,7 @@ impl Frame {
         unsafe { ff::av_frame_unref(self.0) };
     }
 
-    /// Outra referência à mesma imagem (sem copiar os pixels).
+    /// Another reference to the same image (without copying the pixels).
     pub fn share(&self) -> Option<Self> {
         let f = unsafe { ff::av_frame_clone(self.0) };
         (!f.is_null()).then_some(Self(f))
@@ -233,7 +233,7 @@ pub struct InputSpec<'a> {
     pub height: u32,
     pub pix_fmt: ff::AVPixelFormat,
     pub fps: u32,
-    /// Quadros que já chegam na GPU (DMA-BUF).
+    /// Frames that already arrive on the GPU (DMA-BUF).
     pub hw_frames: Option<&'a HwFrames>,
 }
 
@@ -246,9 +246,9 @@ pub struct Graph {
 unsafe impl Send for Graph {}
 
 impl Graph {
-    /// `spec` é a cadeia de filtros (ex.: "scale=1280:720,format=nv12,hwupload").
-    /// Com `input`, a entrada vem de quadros empurrados; sem, a própria cadeia
-    /// gera os quadros (ex.: "ddagrab=...").
+    /// `spec` is the filter chain (e.g. "scale=1280:720,format=nv12,hwupload").
+    /// With `input`, input comes from pushed frames; without it, the chain itself
+    /// generates the frames (e.g. "ddagrab=...").
     pub fn new(spec: &str, input: Option<&InputSpec>, device: Option<&HwDevice>) -> Result<Self> {
         unsafe {
             let graph = ff::avfilter_graph_alloc();
@@ -262,7 +262,7 @@ impl Graph {
                     "video_size={}x{}:pix_fmt={}:time_base=1/1000000:pixel_aspect=1/1:frame_rate={}/1",
                     i.width, i.height, i.pix_fmt as i32, i.fps
                 ));
-                // Entrada na GPU: o contexto de quadros tem que estar lá antes de inicializar.
+                // GPU input: the frames context must be set before initializing.
                 me.src = ff::avfilter_graph_alloc_filter(graph, ff::avfilter_get_by_name(c"buffer".as_ptr()), c"in".as_ptr());
                 if me.src.is_null() {
                     return Err(Error("entrada do grafo: sem memória".into()));
@@ -282,8 +282,8 @@ impl Graph {
                 "saída do grafo",
             )?;
 
-            // Montagem por etapas: os filtros que sobem imagem pra GPU (hwupload)
-            // exigem o dispositivo antes de serem inicializados.
+            // Built in stages: filters that upload images to the GPU (hwupload)
+            // need the device before they are initialized.
             let body = if spec.is_empty() { "null" } else { spec };
             let spec = cstr(&if me.src.is_null() { format!("{body}[out]") } else { format!("[in]{body}[out]") });
             let mut seg = ptr::null_mut();
@@ -305,7 +305,7 @@ impl Graph {
             if ret >= 0 {
                 ret = ff::avfilter_graph_segment_init(seg, 0);
             }
-            // O link devolve as pontas soltas ([in] e [out]); ligamos à entrada e à saída.
+            // Parsing returns the open ends ([in] and [out]); we link them to the input and output.
             let mut free_in = ptr::null_mut();
             let mut free_out = ptr::null_mut();
             if ret >= 0 {
@@ -336,7 +336,7 @@ impl Graph {
         unsafe { check(ff::av_buffersrc_add_frame_flags(self.src, frame.0, 0), "entregar quadro").map(|_| ()) }
     }
 
-    /// Tira um quadro pronto. `Ok(false)` quando ainda não tem.
+    /// Pulls a ready frame. `Ok(false)` when none is available yet.
     pub fn pull(&mut self, out: &mut Frame) -> Result<bool> {
         let ret = unsafe { ff::av_buffersink_get_frame(self.sink, out.0) };
         if ret == EAGAIN || ret == ff::AVERROR_EOF {
@@ -407,17 +407,17 @@ impl Encoder {
             c.pix_fmt = p.pix_fmt;
             c.time_base = ff::AVRational { num: 1, den: p.fps as i32 };
             c.framerate = ff::AVRational { num: p.fps as i32, den: 1 };
-            // GOP "infinito": keyframe só quando alguém pede (como o Sunshine).
+            // "Infinite" GOP: keyframe only when someone asks (like Sunshine).
             c.gop_size = (p.fps * 600) as i32;
             c.keyint_min = c.gop_size;
             c.max_b_frames = 0;
             c.bit_rate = p.bitrate as i64;
             c.rc_max_rate = p.bitrate as i64;
-            // Buffer de taxa de 1/4 de segundo. O Sunshine usa um quadro só, bom
-            // para jogo, mas numa tela parada o codificador (o da Intel
-            // principalmente) nunca sobra bits para refinar a imagem: o texto fica
-            // borrado para sempre (~26 dB numa área de trabalho 4K, contra ~50 dB
-            // assim). O preço é uma rajada maior na keyframe.
+            // Rate buffer of 1/4 second. Sunshine uses a single frame, good
+            // for games, but on a static screen the encoder (Intel's
+            // especially) never has bits left to refine the image: text stays
+            // blurry forever (~26 dB on a 4K desktop, versus ~50 dB
+            // this way). The cost is a bigger burst on the keyframe.
             c.rc_buffer_size = (p.bitrate / 4) as i32;
             c.flags |= ff::AV_CODEC_FLAG_LOW_DELAY as i32;
             c.color_range = ff::AVColorRange::AVCOL_RANGE_MPEG;
@@ -431,7 +431,7 @@ impl Encoder {
                 let (k, v) = (cstr(k), cstr(v));
                 let ret = ff::av_opt_set(c.priv_data, k.as_ptr(), v.as_ptr(), 0);
                 if ret < 0 {
-                    tracing::debug!(encoder = p.name, opcao = ?k, "opção ignorada: {}", av_err(ret));
+                    tracing::debug!(encoder = p.name, opcao = ?k, "option ignored: {}", av_err(ret));
                 }
             }
             check(ff::avcodec_open2(ctx, codec, ptr::null_mut()), &format!("abrir {}", p.name))?;

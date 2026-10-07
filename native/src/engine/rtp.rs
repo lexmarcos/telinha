@@ -1,7 +1,7 @@
-//! Caminho RTP: o mesmo H.264 da placa de vídeo, mas como vídeo comum do
-//! WebRTC (reenvio com NACK, pedido de keyframe com PLI). É o caminho para
-//! quem está pelo repasse, recebe mal pelo canal de dados ou usa navegador
-//! sem WebCodecs (Firefox, Safari).
+//! RTP path: the same H.264 from the GPU, but as regular WebRTC video
+//! (retransmission with NACK, keyframe requests with PLI). This is the path for
+//! viewers on the relay, with poor reception over the data channel, or using a
+//! browser without WebCodecs (Firefox, Safari).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -48,8 +48,8 @@ pub fn opus_codec() -> RTCRtpCodec {
     }
 }
 
-/// Motor de mídia só com H.264 e Opus: a negociação não tem como escolher
-/// outro codec de vídeo que o app não produz.
+/// Media engine with only H.264 and Opus: negotiation cannot pick another
+/// video codec the app does not produce.
 pub fn media_engine() -> Result<MediaEngine, String> {
     let mut m = MediaEngine::default();
     m.register_codec(RTCRtpCodecParameters { rtp_codec: h264_codec(), payload_type: H264_PT, ..Default::default() }, RtpCodecKind::Video)
@@ -59,10 +59,10 @@ pub fn media_engine() -> Result<MediaEngine, String> {
     Ok(m)
 }
 
-/* ---------------- interceptador: PLI/FIR e relatórios para o app ---------------- */
+/* ---------------- interceptor: PLI/FIR and reports for the app ---------------- */
 
-/// O RTCP de entrada para nos interceptadores; este deixa passar para o app
-/// só o que interessa: pedidos de keyframe e relatórios de recepção (perda).
+/// Incoming RTCP stops at the interceptors; this one passes to the app only
+/// what matters: keyframe requests and receiver reports (loss).
 pub struct Feedback {
     read: VecDeque<TaggedPacket>,
     write: VecDeque<TaggedPacket>,
@@ -119,7 +119,7 @@ impl Interceptor for Feedback {
     fn unbind_remote_stream(&mut self, _: &StreamInfo) {}
 }
 
-/* ---------------- trilha e remetente ---------------- */
+/* ---------------- track and sender ---------------- */
 
 pub async fn add_video_track(pc: &Arc<dyn PeerConnection>) -> Result<Arc<TrackLocalStaticSample>, String> {
     let ssrc = rand::random::<u32>();
@@ -179,7 +179,7 @@ impl Drop for AudioSender {
     }
 }
 
-/// Manda os pacotes Opus (já codificados, os mesmos para todos) numa trilha.
+/// Sends the Opus packets (already encoded, shared by everyone) on a track.
 pub fn spawn_audio(track: Arc<TrackLocalStaticSample>, mut packets: broadcast::Receiver<Arc<crate::audio::OpusPacket>>) -> AudioSender {
     let stop = Arc::new(AtomicBool::new(false));
     let s = stop.clone();
@@ -206,7 +206,7 @@ pub fn spawn_audio(track: Arc<TrackLocalStaticSample>, mut packets: broadcast::R
 pub struct Counters {
     pub frames: AtomicU64,
     pub bytes: AtomicU64,
-    /// Fração perdida no último relatório de recepção (0–255, como no RTCP).
+    /// Fraction lost in the last receiver report (0–255, as in RTCP).
     pub fraction_lost: AtomicU32,
 }
 
@@ -231,7 +231,7 @@ pub fn spawn(
     let counters = Arc::new(Counters::default());
     let stop = Arc::new(AtomicBool::new(false));
 
-    // Pedidos de keyframe e perda vindos de quem assiste.
+    // Keyframe requests and loss reports from the viewer.
     let (t, c, s, ctl, k) = (track.clone(), counters.clone(), stop.clone(), control.clone(), keys.clone());
     tokio::spawn(async move {
         while !s.load(Ordering::Relaxed) {

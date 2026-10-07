@@ -1,13 +1,14 @@
-//! Som do computador no Linux pelo PipeWire, sem o Discord.
+//! Computer audio on Linux through PipeWire, without Discord.
 //!
-//! Em vez de gravar a saída de som inteira (que leva junto a voz de quem está
-//! na call, e aí cada um se ouve de volta com atraso), o Telinha cria uma
-//! entrada própria e liga nela a saída de cada aplicativo que toca som, menos
-//! o Discord e seus clientes (Vesktop e companhia). Quem abre ou fecha som
-//! depois entra e sai sozinho: o registro do PipeWire avisa. É o que o Windows
-//! faz com o "process loopback" e o que o Vesktop faz no compartilhamento dele.
+//! Instead of recording the whole sound output (which includes the voices of
+//! people in the call, so everyone hears themselves back with delay), Telinha
+//! creates its own input and links to it the output of every app that plays
+//! audio, except Discord and its clients (Vesktop and friends). Apps that start
+//! or stop audio later join and leave on their own: the PipeWire registry tells
+//! us. This is what Windows does with "process loopback" and what Vesktop does
+//! in its own screen share.
 //!
-//! TELINHA_SOM_TUDO=1 volta ao jeito antigo: a saída padrão inteira.
+//! TELINHA_SOM_TUDO=1 goes back to the old way: the whole default output.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -23,12 +24,12 @@ use pw::types::ObjectType;
 
 use super::{CHANNELS, RATE};
 
-/// Nome do nosso nó de captura, com o PID para não confundir com outro Telinha aberto.
+/// Name of our capture node, with the PID so it is not confused with another open Telinha.
 fn node_name() -> String {
     format!("telinha-som-{}", std::process::id())
 }
 
-/// Pedaços de nome que identificam o Discord e os clientes alternativos.
+/// Name fragments that identify Discord and its alternative clients.
 const DISCORD: [&str; 7] = ["discord", "vesktop", "vencord", "webcord", "armcord", "legcord", "equibop"];
 
 pub fn start(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<String, String> {
@@ -37,7 +38,7 @@ pub fn start(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<String, 
         .name("telinha-pw-som".into())
         .spawn(move || {
             if let Err(e) = run(tx, stop, everything) {
-                tracing::error!("som pelo PipeWire: {e}");
+                tracing::error!("PipeWire audio: {e}");
             }
         })
         .map_err(|e| e.to_string())?;
@@ -57,10 +58,10 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, everything: bool) -> Res
         *pw::keys::NODE_DESCRIPTION => "Telinha (som da transmissão)",
     };
     if everything {
-        // Captura o que sai na saída padrão (o monitor dela).
+        // Captures what plays on the default output (its monitor).
         props.insert(*pw::keys::STREAM_CAPTURE_SINK, "true");
     } else {
-        // Ninguém liga a gente em lugar nenhum: as ligações são nossas.
+        // Nobody links us anywhere: we make the links ourselves.
         props.insert("node.autoconnect", "false");
     }
     let stream = pw::stream::StreamBox::new(&core, "telinha-som", props).map_err(|e| e.to_string())?;
@@ -78,7 +79,7 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, everything: bool) -> Res
         .register()
         .map_err(|e| e.to_string())?;
 
-    // F32 estéreo a 48 kHz: o PipeWire converte do que cada app estiver usando.
+    // F32 stereo at 48 kHz: PipeWire converts from whatever each app uses.
     let mut info = spa::param::audio::AudioInfoRaw::new();
     info.set_format(spa::param::audio::AudioFormat::F32LE);
     info.set_rate(RATE);
@@ -103,7 +104,7 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, everything: bool) -> Res
     }
     stream.connect(spa::utils::Direction::Input, None, flags, &mut params).map_err(|e| e.to_string())?;
 
-    // Acompanha os apps que tocam som e liga cada um na nossa entrada.
+    // Tracks the apps that play audio and links each one to our input.
     let registry = core.get_registry_rc().map_err(|e| e.to_string())?;
     let graph = Rc::new(RefCell::new(Graph::default()));
     let _registry_listener = (!everything).then(|| {
@@ -139,17 +140,17 @@ struct Port {
 
 #[derive(Default)]
 struct Graph {
-    /// O nosso nó de captura.
+    /// Our capture node.
     me: Option<u32>,
-    /// Saídas de som de apps: id → entra na transmissão?
+    /// App audio outputs: id → included in the stream?
     apps: HashMap<u32, bool>,
     ports: HashMap<u32, Port>,
-    /// Ligações que a gente criou (saída do app, nossa entrada). Vivem enquanto o proxy viver.
+    /// Links we created (app output, our input). They live as long as the proxy lives.
     links: HashMap<(u32, u32), pw::link::Link>,
 }
 
 impl Graph {
-    /// Anota um objeto novo do PipeWire. `true` se pode haver ligação nova a fazer.
+    /// Records a new PipeWire object. `true` if there may be a new link to make.
     fn learn(&mut self, obj: &pw::registry::GlobalObject<&spa::utils::dict::DictRef>) -> bool {
         let Some(props) = obj.props else { return false };
         match obj.type_ {
@@ -163,7 +164,7 @@ impl Graph {
                     let names = ["application.process.binary", "application.name", "application.id", "node.name"].map(|k| props.get(k).unwrap_or("").to_lowercase());
                     let discord = names.iter().any(|n| DISCORD.iter().any(|d| n.contains(d)));
                     let who = props.get("application.name").or(props.get("node.name")).unwrap_or("?");
-                    tracing::info!(app = who, "{}", if discord { "som fica de fora (Discord)" } else { "som entra na transmissão" });
+                    tracing::info!(app = who, "{}", if discord { "audio left out (Discord)" } else { "audio included in the stream" });
                     self.apps.insert(obj.id, !discord);
                     return !discord;
                 }
@@ -191,8 +192,8 @@ impl Graph {
         self.links.retain(|(out, inp), _| *out != id && *inp != id);
     }
 
-    /// Liga toda saída de app permitida na nossa entrada, canal com canal
-    /// (mono e centro vão para os dois lados).
+    /// Links every allowed app output to our input, channel by channel
+    /// (mono and center go to both sides).
     fn reconcile(&mut self, core: &pw::core::CoreRc) {
         let Some(me) = self.me else { return };
         let ours: HashMap<&str, u32> = self.ports.iter().filter(|(_, p)| p.node == me && !p.output).map(|(id, p)| (p.channel.as_str(), *id)).collect();
@@ -231,7 +232,7 @@ impl Graph {
                 Ok(link) => {
                     self.links.insert((out, input), link);
                 }
-                Err(e) => tracing::warn!("ligar o som de um app: {e}"),
+                Err(e) => tracing::warn!("linking an app's audio: {e}"),
             }
         }
     }

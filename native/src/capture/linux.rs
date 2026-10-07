@@ -1,13 +1,14 @@
-//! Captura de tela no Linux pelo portal do sistema (o mesmo seletor de tela do
-//! GNOME/KDE, funciona no Wayland e no X11) e PipeWire.
+//! Linux screen capture through the system portal (the same GNOME/KDE screen
+//! picker, works on Wayland and X11) and PipeWire.
 //!
-//! Na primeira vez o sistema pergunta qual tela; o portal devolve um token e
-//! das próximas vezes a captura começa direto.
+//! The first time, the system asks which screen; the portal returns a token
+//! and later captures start directly.
 //!
-//! A imagem vem de preferência como DMA-BUF: o compositor entrega um buffer
-//! que já está na GPU e o codificador importa ele sem cópia. Uma tela 4K pela
-//! memória são 33 MB por quadro subindo de volta pra placa; no Iris Xe isso
-//! sozinho segura tudo em ~25 fps. Se o compositor não topar, cai na memória.
+//! The image preferably comes as DMA-BUF: the compositor hands over a buffer
+//! that is already on the GPU and the encoder imports it without copying. A 4K
+//! screen through memory is 33 MB per frame uploaded back to the card; on Iris
+//! Xe that alone caps everything at ~25 fps. If the compositor refuses, it
+//! falls back to memory.
 
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
@@ -41,11 +42,11 @@ fn save_token(t: &str) {
 pub struct PortalCapture {
     mailbox: Arc<Mailbox>,
     stop: Arc<AtomicBool>,
-    // A sessão do portal precisa viver enquanto a captura roda, e ser fechada
-    // no fim: sem o Close, o aviso de "compartilhando a tela" do sistema fica
-    // aceso até o app fechar.
+    // The portal session must live while capture runs, and be closed at the
+    // end: without Close, the system's "sharing screen" indicator stays on
+    // until the app exits.
     portal: Option<(Screencast, ashpd::desktop::Session<Screencast>)>,
-    /// O fim da captura acontece na thread de vídeo, fora do tokio.
+    /// Capture teardown happens on the video thread, outside tokio.
     rt: tokio::runtime::Handle,
 }
 
@@ -61,7 +62,7 @@ impl Drop for PortalCapture {
         if let Some((proxy, session)) = self.portal.take() {
             self.rt.spawn(async move {
                 if let Err(e) = session.close().await {
-                    tracing::warn!("fechar a sessão de captura: {e}");
+                    tracing::warn!("close capture session: {e}");
                 }
                 drop(proxy);
             });
@@ -114,12 +115,12 @@ struct Format {
     pixel: Option<PixelFormat>,
     width: u32,
     height: u32,
-    /// Modificador DRM quando a imagem vem como DMA-BUF.
+    /// DRM modifier when the image comes as DMA-BUF.
     modifier: Option<u64>,
 }
 
-/// DRM_FORMAT_MOD_LINEAR: pixels em linhas, sem ladrilhos. É o que todo
-/// VAAPI importa e o que dá pra ler na CPU se precisar.
+/// DRM_FORMAT_MOD_LINEAR: pixels in rows, no tiling. Every VAAPI driver
+/// imports it and it can be read on the CPU if needed.
 const MOD_LINEAR: i64 = 0;
 
 fn run_pipewire(fd: OwnedFd, node: u32, fps: u32, mailbox: Arc<Mailbox>, stop: Arc<AtomicBool>) -> Result<(), String> {
@@ -158,9 +159,9 @@ fn run_pipewire(fd: OwnedFd, node: u32, fps: u32, mailbox: Arc<Mailbox>, stop: A
             };
             let dmabuf = info.flags().bits() & spa::sys::SPA_VIDEO_FLAG_MODIFIER != 0;
             fmt.modifier = dmabuf.then(|| info.modifier());
-            tracing::info!(w = fmt.width, h = fmt.height, formato = ?info.format(), dmabuf, "captura negociada");
-            // Diz que tipo de buffer aceitamos: DMA-BUF se o formato veio com
-            // modificador, memória se não.
+            tracing::info!(w = fmt.width, h = fmt.height, format = ?info.format(), dmabuf, "capture negotiated");
+            // Says which buffer type we accept: DMA-BUF if the format came with
+            // a modifier, memory otherwise.
             let types = if dmabuf { 1 << spa::buffer::DataType::DmaBuf.as_raw() } else { (1 << spa::buffer::DataType::MemPtr.as_raw()) | (1 << spa::buffer::DataType::MemFd.as_raw()) };
             let buffers = spa::pod::Value::Object(spa::pod::Object {
                 type_: spa::utils::SpaTypes::ObjectParamBuffers.as_raw(),
@@ -187,10 +188,10 @@ fn run_pipewire(fd: OwnedFd, node: u32, fps: u32, mailbox: Arc<Mailbox>, stop: A
             let chunk = d.chunk();
             let (offset, size, stride) = (chunk.offset() as usize, chunk.size() as usize, chunk.stride());
             if size == 0 || stride <= 0 {
-                return; // quadro só de cursor ou sem mudança
+                return; // cursor-only or unchanged frame
             }
             let data = if d.type_() == spa::buffer::DataType::DmaBuf {
-                // O fd é do PipeWire; uma cópia dele vive enquanto o codificador usa.
+                // The fd belongs to PipeWire; a dup of it lives while the encoder uses it.
                 let Some(modifier) = fmt.modifier else { return };
                 let Ok(fd) = unsafe { std::os::fd::BorrowedFd::borrow_raw(d.fd() as i32) }.try_clone_to_owned() else { return };
                 Pixels::DmaBuf { fd, offset: offset as u32, size: d.as_raw().maxsize, modifier }
@@ -204,8 +205,8 @@ fn run_pipewire(fd: OwnedFd, node: u32, fps: u32, mailbox: Arc<Mailbox>, stop: A
         .register()
         .map_err(|e| e.to_string())?;
 
-    // Primeiro o formato com modificador (DMA-BUF); depois o mesmo sem (memória).
-    // TELINHA_SEM_DMABUF=1 força a memória.
+    // First the format with a modifier (DMA-BUF); then the same without (memory).
+    // TELINHA_SEM_DMABUF=1 forces memory.
     let with_gpu = std::env::var_os("TELINHA_SEM_DMABUF").is_none();
     let mut pods: Vec<Vec<u8>> = Vec::new();
     if with_gpu {
@@ -221,12 +222,12 @@ fn run_pipewire(fd: OwnedFd, node: u32, fps: u32, mailbox: Arc<Mailbox>, stop: A
         pods.push(serialize(&spa::pod::Value::Object(obj))?);
     }
     pods.push(serialize(&spa::pod::Value::Object(video_format(fps)))?);
-    let mut params: Vec<&spa::pod::Pod> = pods.iter().map(|b| spa::pod::Pod::from_bytes(b).ok_or("formato inválido")).collect::<Result<_, _>>()?;
+    let mut params: Vec<&spa::pod::Pod> = pods.iter().map(|b| spa::pod::Pod::from_bytes(b).ok_or("invalid format")).collect::<Result<_, _>>()?;
     stream
         .connect(spa::utils::Direction::Input, Some(node), pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS, &mut params)
         .map_err(|e| e.to_string())?;
 
-    // Para quando a captura for descartada (fim da transmissão).
+    // Stops when the capture is dropped (end of the stream).
     let ml = mainloop.clone();
     let timer = mainloop.loop_().add_timer(move |_| {
         if stop.load(Ordering::Relaxed) {
@@ -242,7 +243,7 @@ fn serialize(v: &spa::pod::Value) -> Result<Vec<u8>, String> {
     Ok(spa::pod::serialize::PodSerializer::serialize(std::io::Cursor::new(Vec::new()), v).map_err(|e| format!("{e:?}"))?.0.into_inner())
 }
 
-/// Vídeo cru BGRX/RGBX, de qualquer tamanho, até `fps` quadros por segundo.
+/// Raw BGRX/RGBX video, any size, up to `fps` frames per second.
 fn video_format(fps: u32) -> spa::pod::Object {
     spa::pod::object!(
         spa::utils::SpaTypes::ObjectParamFormat,
