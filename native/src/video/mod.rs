@@ -1,5 +1,5 @@
-//! Pipeline de vídeo: captura → filtros (escala/upload na GPU) → codificador.
-//! Roda numa thread própria e publica quadros H.264 prontos para enviar.
+//! Video pipeline: capture → filters (scale/GPU upload) → encoder.
+//! Runs on its own thread and publishes H.264 frames ready to send.
 
 pub mod encoders;
 pub mod ffi;
@@ -25,13 +25,20 @@ use source::{CpuFrame, CpuSource};
 pub struct EncodedFrame {
     pub data: Bytes,
     pub key: bool,
-    /// Codec string do WebCodecs ("avc1.64002a").
+    /// WebCodecs codec string ("avc1.64002a").
     pub codec: String,
     pub width: u32,
     pub height: u32,
-    /// Quando a imagem foi capturada (para medir o tempo de codificação).
+    /// When the image was captured (to measure encoding time).
     pub captured: Instant,
 }
+
+/// NVENC refused because the NVIDIA driver is older than the bundled FFmpeg
+/// requires (it asks for the API version it was built against). The engine
+/// shows a notice in the bubble telling the user to update the driver.
+pub static NVENC_DRIVER_TOO_OLD: AtomicBool = AtomicBool::new(false);
+/// Minimum NVIDIA driver for the bundled FFmpeg's NVENC.
+pub const NVENC_MIN_DRIVER: &str = "531";
 
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
@@ -44,7 +51,7 @@ pub struct Stats {
     pub error: Option<String>,
 }
 
-/// Comandos para a thread de vídeo, lidos a cada quadro.
+/// Commands for the video thread, read on every frame.
 #[derive(Default)]
 pub struct Control {
     pub force_key: AtomicBool,
@@ -56,7 +63,7 @@ pub struct Control {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
     pub quality: Quality,
-    /// Taxa de bits em vigor (a adaptação à rede pode baixar da ideal).
+    /// Current bitrate (network adaptation may lower it below the ideal).
     pub bitrate: u32,
 }
 
@@ -80,8 +87,8 @@ pub enum Source {
     Desktop,
 }
 
-/// Começa a transmitir. Os quadros saem em `out`; `Control` muda qualidade,
-/// pede keyframe e para.
+/// Starts streaming. Frames come out on `out`; `Control` changes quality,
+/// requests keyframes and stops.
 pub fn start(source: Source, settings: Settings, out: broadcast::Sender<Arc<EncodedFrame>>) -> Arc<Control> {
     ffi::silence_logs();
     let control = Arc::new(Control::default());
@@ -90,11 +97,11 @@ pub fn start(source: Source, settings: Settings, out: broadcast::Sender<Arc<Enco
         .name("telinha-video".into())
         .spawn(move || {
             if let Err(e) = run(source, settings, &c, &out) {
-                tracing::error!("vídeo parou: {e}");
+                tracing::error!("video stopped: {e}");
                 c.stats.lock().unwrap().error = Some(e.0);
             }
         })
-        .expect("thread de vídeo");
+        .expect("video thread");
     control
 }
 
@@ -103,7 +110,7 @@ struct Pipeline {
     encoder: Encoder,
     candidate: usize,
     out: (u32, u32),
-    /// Quadros DMA-BUF de entrada (só com `SourceKind::Prime`).
+    /// Incoming DMA-BUF frames (only with `SourceKind::Prime`).
     frames: Option<HwFrames>,
     _device: Option<HwDevice>,
 }
@@ -123,9 +130,9 @@ fn open_encoder(cand: &Candidate, graph: &Graph, ctx: &Ctx, bitrate: u32) -> ffi
     })
 }
 
-/// Tenta os candidatos em ordem; o primeiro que monta grafo e abre o
-/// codificador vence. `start_at` pula os que já falharam.
-/// `pixel` é o formato dos pixels (BGRX/RGBX), mesmo quando estão na GPU.
+/// Tries candidates in order; the first that builds the graph and opens the
+/// encoder wins. `start_at` skips the ones that already failed.
+/// `pixel` is the pixel format (BGRX/RGBX), even when the pixels are on the GPU.
 fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Settings, start_at: usize) -> ffi::Result<Pipeline> {
     let out = s.quality.output_size(native);
     let ctx = Ctx { native, out, fps: s.quality.fps };
@@ -155,7 +162,7 @@ fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Set
                 fps: s.quality.fps,
                 hw_frames: frames.as_ref(),
             });
-            // Com DMA-BUF o dispositivo vem dos próprios quadros (hwmap).
+            // With DMA-BUF the device comes from the frames themselves (hwmap).
             let graph_device = if frames.is_some() { None } else { device.as_ref() };
             let graph = Graph::new(&(cand.chain)(&ctx), input.as_ref(), graph_device)?;
             let encoder = open_encoder(cand, &graph, &ctx, s.bitrate)?;
@@ -164,11 +171,15 @@ fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Set
         };
         match attempt() {
             Ok(p) => {
-                tracing::info!(encoder = cand.encoder, label = cand.label, w = p.out.0, h = p.out.1, gpu = (kind == SourceKind::Prime), "codificador escolhido");
+                tracing::info!(encoder = cand.encoder, label = cand.label, w = p.out.0, h = p.out.1, gpu = (kind == SourceKind::Prime), "encoder chosen");
                 return Ok(p);
             }
             Err(e) => {
-                tracing::info!(encoder = cand.encoder, "candidato recusado: {e}");
+                tracing::info!(encoder = cand.encoder, "candidate rejected: {e}");
+                // ENOSYS when opening NVENC = driver too old for its API.
+                if cand.encoder == "h264_nvenc" && e.0.contains("Function not implemented") {
+                    NVENC_DRIVER_TOO_OLD.store(true, Ordering::Relaxed);
+                }
                 last = e;
             }
         }
@@ -176,7 +187,7 @@ fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Set
     Err(last)
 }
 
-/// Primeiro nó de render da GPU (o mesmo que o VAAPI abre por padrão).
+/// First GPU render node (the same one VAAPI opens by default).
 #[cfg(target_os = "linux")]
 fn render_node() -> String {
     (128..136).map(|n| format!("/dev/dri/renderD{n}")).find(|p| std::path::Path::new(p).exists()).unwrap_or_else(|| "/dev/dri/renderD128".into())
@@ -193,7 +204,7 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
         Source::Desktop => (SourceKind::Desktop, None),
     };
 
-    // Tamanho nativo: do primeiro quadro (CPU) ou do próprio grafo (Desktop).
+    // Native size: from the first frame (CPU) or from the graph itself (Desktop).
     let mut first: Option<CpuFrame> = None;
     let (mut kind, mut native, mut pixel) = match cpu.as_mut() {
         Some(src) => loop {
@@ -216,7 +227,7 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
     let mut pts: i64 = 0;
     let mut filtered = Frame::new();
     publish_encoder(control, &pipe, native);
-    // Última imagem que chegou, para codificar de novo com a tela parada.
+    // Last image received, to re-encode while the screen is static.
     let mut last_input: Option<Frame> = None;
     let mut last_change = Instant::now();
     let mut last_push = Instant::now();
@@ -225,7 +236,7 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
         if control.stop.load(Ordering::Relaxed) {
             return Ok(());
         }
-        // Mudança de qualidade: só o codificador se mudou só a taxa; tudo se mudou o tamanho.
+        // Quality change: only the encoder if just the bitrate changed; everything if the size changed.
         if let Some(next) = control.pending.lock().unwrap().take() {
             if next != settings {
                 let rebuild_all = next.quality.output_size(native) != settings.quality.output_size(native) || next.quality.fps != settings.quality.fps;
@@ -243,7 +254,7 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
             }
         }
 
-        // Entrada: quadro da CPU empurrado no grafo, ou o grafo captura sozinho.
+        // Input: CPU frame pushed into the graph, or the graph captures on its own.
         let mut got_input = true;
         if let Some(src) = cpu.as_mut() {
             let period = Duration::from_secs_f64(1.0 / settings.quality.fps.max(1) as f64);
@@ -253,11 +264,11 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
             };
             match frame {
                 Some(f) => {
-                    // A tela mudou de tamanho (troca de monitor, janela) ou o
-                    // PipeWire trocou de DMA-BUF para memória: remonta tudo.
+                    // The screen changed size (monitor or window switch) or
+                    // PipeWire switched from DMA-BUF to memory: rebuild everything.
                     let shape = (frame_kind(&f), (f.width, f.height), f.pixel.av());
                     if shape != (kind, native, pixel) {
-                        tracing::info!(w = f.width, h = f.height, gpu = f.data.on_gpu(), "a captura mudou; remontando o vídeo");
+                        tracing::info!(w = f.width, h = f.height, gpu = f.data.on_gpu(), "capture changed; rebuilding video");
                         (kind, native, pixel) = shape;
                         control.stats.lock().unwrap().native = Some(native);
                         pipe = build(kind, native, pixel, &settings, 0)?;
@@ -281,10 +292,10 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
                     last_push = last_change;
                     pipe.graph.push(&mut av)?;
                 }
-                // O compositor só manda quadro quando a tela muda. Parada, a
-                // gente codifica a última imagem de novo (como o Sunshine): na
-                // taxa cheia logo depois da mudança, para o codificador refinar o
-                // que ficou borrado, e devagar depois. Keyframe pedida sai na hora.
+                // The compositor only sends a frame when the screen changes. When static,
+                // we re-encode the last image (like Sunshine): at full rate
+                // right after the change, so the encoder can refine what
+                // was blurry, and slowly afterwards. A requested keyframe goes out immediately.
                 None => {
                     let due = last_change.elapsed() < REFINE
                         || last_push.elapsed() >= KEEPALIVE
@@ -340,13 +351,20 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
             if captured_at.len() > 240 {
                 captured_at.clear();
             }
+            // Windows capture (ddagrab) always has a new frame: without leaving
+            // here on every frame, the loop never saw the stop request or the quality
+            // change, and the old capture stayed attached to the screen (the next
+            // stream could not open its own).
+            if kind == SourceKind::Desktop {
+                break;
+            }
         }
     }
 }
 
-/// Quanto tempo depois de uma mudança a tela parada ainda é recodificada na taxa cheia.
+/// How long after a change a static screen is still re-encoded at full rate.
 const REFINE: Duration = Duration::from_secs(3);
-/// Depois disso, de quanto em quanto tempo.
+/// After that, how often.
 const KEEPALIVE: Duration = Duration::from_millis(100);
 
 fn frame_kind(f: &CpuFrame) -> SourceKind {

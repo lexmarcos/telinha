@@ -1,17 +1,17 @@
-//! Candidatos de codificação, do melhor para o pior, com as opções de baixa
-//! latência que o Sunshine usa em cada um (src/video.cpp e src/nvenc/):
-//! sem B-frames, GOP "infinito" com IDR só sob demanda, taxa constante e os
-//! modos "ultra low latency" de cada fabricante.
+//! Encoder candidates, best to worst, with the low-latency options Sunshine
+//! uses for each one (src/video.cpp and src/nvenc/): no B-frames, "infinite"
+//! GOP with IDR only on demand, constant bitrate and each vendor's
+//! "ultra low latency" modes.
 
 use ffmpeg_sys_next::AVHWDeviceType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
-    /// Quadros BGRX vindos da CPU (PipeWire, tela de teste).
+    /// BGRX frames coming from the CPU (PipeWire, test pattern).
     Cpu,
-    /// Quadros BGRX que já estão na GPU (DMA-BUF do PipeWire, Linux).
+    /// BGRX frames already on the GPU (PipeWire DMA-BUF, Linux).
     Prime,
-    /// Captura da área de trabalho do Windows dentro do próprio FFmpeg (ddagrab).
+    /// Windows desktop capture inside FFmpeg itself (ddagrab).
     Desktop,
 }
 
@@ -28,7 +28,7 @@ impl Ctx {
 }
 
 pub struct Candidate {
-    /// Nome para gente ("NVENC").
+    /// Human-readable name ("NVENC").
     pub label: &'static str,
     pub encoder: &'static str,
     pub hardware: bool,
@@ -118,7 +118,7 @@ pub fn candidates() -> Vec<Candidate> {
 
     #[cfg(target_os = "windows")]
     {
-        // A imagem nasce na GPU (Desktop Duplication) e vai direto pro codificador.
+        // The image starts on the GPU (Desktop Duplication) and goes straight to the encoder.
         v.push(Candidate {
             label: "NVENC",
             encoder: "h264_nvenc",
@@ -155,6 +155,24 @@ pub fn candidates() -> Vec<Candidate> {
             chain: |c| join(&[desktop(c), d3d11_scale(c, true)]),
             options: mf_opts,
         });
+        // If the GPU conversion (scale_d3d11) fails, as on some cards and
+        // drivers: the image is downloaded to memory, converted to NV12 there and
+        // fed to the card's encoder. Costs one copy per frame, but still encodes on the GPU.
+        for (label, encoder, options) in [
+            ("AMF", "h264_amf", amf_opts as fn(&Ctx) -> Vec<_>),
+            ("Quick Sync", "h264_qsv", qsv_opts),
+            ("Media Foundation", "h264_mf", mf_opts),
+        ] {
+            v.push(Candidate {
+                label,
+                encoder,
+                hardware: true,
+                device: None,
+                source: SourceKind::Desktop,
+                chain: |c| join(&[desktop(c), "hwdownload".into(), "format=bgra".into(), cpu_scale(c), "format=nv12".into()]),
+                options,
+            });
+        }
         v.push(Candidate {
             label: "OpenH264",
             encoder: "libopenh264",
@@ -168,7 +186,7 @@ pub fn candidates() -> Vec<Candidate> {
 
     #[cfg(target_os = "linux")]
     {
-        // Sobe a imagem pra GPU e converte/escala lá (VPP), como o Sunshine.
+        // Uploads the image to the GPU and converts/scales there (VPP), like Sunshine.
         v.push(Candidate {
             label: "VAAPI",
             encoder: "h264_vaapi",
@@ -191,8 +209,8 @@ pub fn candidates() -> Vec<Candidate> {
 
     #[cfg(target_os = "linux")]
     {
-        // Imagem que já está na GPU: o VAAPI importa o buffer do compositor e
-        // converte/escala lá mesmo. Nada passa pela CPU (como o Sunshine com KMS).
+        // Image already on the GPU: VAAPI imports the compositor's buffer and
+        // converts/scales right there. Nothing goes through the CPU (like Sunshine with KMS).
         for (opts, label) in [(vaapi_opts as fn(&Ctx) -> Vec<_>, "VAAPI"), (vaapi_opts_full_power, "VAAPI")] {
             v.push(Candidate {
                 label,
@@ -204,7 +222,7 @@ pub fn candidates() -> Vec<Candidate> {
                 options: opts,
             });
         }
-        // Sem VAAPI (NVIDIA): traz o buffer pra memória e segue como antes.
+        // No VAAPI (NVIDIA): download the buffer to memory and continue as before.
         v.push(Candidate {
             label: "NVENC",
             encoder: "h264_nvenc",
@@ -225,7 +243,7 @@ pub fn candidates() -> Vec<Candidate> {
         });
     }
 
-    // Placas NVIDIA aceitam BGRX direto da CPU e convertem na GPU.
+    // NVIDIA cards accept BGRX straight from the CPU and convert on the GPU.
     v.push(Candidate {
         label: "NVENC",
         encoder: "h264_nvenc",
