@@ -1,0 +1,73 @@
+# Builds the desktop app for Linux and Windows and publishes it on the Releases page.
+#
+# To release: set the version in native/Cargo.toml, commit, then
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# These packages are public: no server is baked in, so on first run the app asks
+# for an invite link. Running it by hand (Actions tab) only keeps the packages as
+# a download on that run.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Windows FFmpeg build uses a ~10 GB Docker image.
+      - name: Free disk space
+        working-directory: /
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang libclang-dev libdrm-dev libpipewire-0.3-0t64 python3-venv zip
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-zigbuild,cargo-xwin
+
+      - uses: actions/cache@v4
+        with:
+          path: native/.deps
+          key: deps-${{ hashFiles('native/scripts/fetch-deps.sh', 'native/scripts/ffmpeg-windows.sh') }}
+
+      - name: Dependencies (FFmpeg, libva, Zig, packaging tools)
+        run: sh scripts/fetch-deps.sh && rm -rf .deps/FFmpeg-Builds .deps/debs
+
+      - name: Packages
+        run: sh scripts/package.sh tudo
+        env:
+          TELINHA_SERVER: ""
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.AppImage dist/*.deb dist/*-instalador.exe dist/*-portatil.zip --generate-notes
+
+      - name: Keep the packages (manual run)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: telinha
+          path: |
+            native/dist/*.AppImage
+            native/dist/*.deb
+            native/dist/*.exe
+            native/dist/*.zip
