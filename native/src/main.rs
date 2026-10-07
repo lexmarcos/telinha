@@ -15,7 +15,7 @@ mod video;
 fn main() {
     init_logs();
     if std::env::args().any(|a| a == "--servidor-padrao") {
-        println!("{}", option_env!("TELINHA_SERVER").unwrap_or("(none)"));
+        println!("{}", config::default_server().unwrap_or("(none)"));
         return;
     }
 
@@ -194,7 +194,7 @@ async fn headless(link: Option<String>, server: Option<String>, secs: u64) {
 fn init_logs() {
     use tracing_subscriber::prelude::*;
     let filter = || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "telinha=info".into());
-    let file = directories::ProjectDirs::from("online", "Telinha", "telinha").and_then(|d| {
+    let file = config::dirs().and_then(|d| {
         std::fs::create_dir_all(d.data_dir()).ok()?;
         std::fs::File::create(d.data_dir().join("telinha.log")).ok()
     });

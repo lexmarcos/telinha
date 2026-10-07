@@ -23,7 +23,7 @@ use pw::spa;
 use crate::video::source::{CpuFrame, CpuSource, Mailbox, PixelFormat, Pixels};
 
 fn token_path() -> Option<std::path::PathBuf> {
-    directories::ProjectDirs::from("online", "Telinha", "telinha").map(|d| d.config_dir().join("captura.token"))
+    crate::config::dirs().map(|d| d.config_dir().join("captura.token"))
 }
 
 fn load_token() -> Option<String> {

@@ -8,22 +8,31 @@
 #
 # The default server (site domain) comes from .env.build (not in git):
 #   TELINHA_SERVER=your.domain
+# Setting TELINHA_SERVER in the environment wins over .env.build. For a public
+# release that is not tied to any server (the app asks for an invite link on
+# first run):
+#   TELINHA_SERVER= scripts/package.sh tudo
 set -eu
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 D="$ROOT/.deps"
 WHAT="${1:-tudo}"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-[ -f .env.build ] && . ./.env.build
+if [ -z "${TELINHA_SERVER+set}" ] && [ -f .env.build ]; then . ./.env.build; fi
 export TELINHA_SERVER="${TELINHA_SERVER:-}"
+# Build paths (this machine's folders and user name) stay out of the binaries.
+REMAP="--remap-path-prefix=$HOME=~ --remap-path-prefix=$ROOT=."
 [ -n "$TELINHA_SERVER" ] || echo "warning: no TELINHA_SERVER; the app will ask for the invite link on first run"
 mkdir -p dist
 
 linux() {
   echo "== Linux (glibc 2.35+)"
+  # pkg-config only sees the extracted PipeWire files: crates that record the
+  # system's library folders (x11-dl) would otherwise bake in a path of this machine.
   PATH="$D/venv/bin:$PATH" \
   BINDGEN_EXTRA_CLANG_ARGS="-I$(ls -d /usr/lib/llvm-*/lib/clang/*/include | tail -1) -I/usr/include/x86_64-linux-gnu -I/usr/include" \
-  RUSTFLAGS="-C link-arg=-Wl,--allow-shlib-undefined" \
+  RUSTFLAGS="-C link-arg=-Wl,--allow-shlib-undefined $REMAP" \
+  PKG_CONFIG_LIBDIR="$D/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig" \
     cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.35
   BIN="target/x86_64-unknown-linux-gnu/release/telinha"
 
@@ -62,7 +71,9 @@ windows() {
   mkdir -p "$XB"
   ln -sf "$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld" "$XB/lld-link"
   ln -sf "$(command -v clang)" "$XB/clang-cl"
+  # RUSTFLAGS replaces .cargo/config.toml's target flags, so crt-static is repeated here.
   PATH="$XB:$PATH" FFMPEG_DIR="$D/ffmpeg-win" XWIN_ACCEPT_LICENSE=1 \
+  RUSTFLAGS="-C target-feature=+crt-static $REMAP" \
     cargo xwin build --release --target x86_64-pc-windows-msvc
   S="dist/stage-windows"
   rm -rf "$S" && mkdir -p "$S"

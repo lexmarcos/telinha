@@ -104,8 +104,21 @@ impl Default for Config {
     }
 }
 
+/// Server baked in at build time (TELINHA_SERVER). Public builds leave it empty:
+/// the app then asks for an invite link on first run.
+pub fn default_server() -> Option<&'static str> {
+    option_env!("TELINHA_SERVER").filter(|s| !s.is_empty())
+}
+
+/// The app's folders: Linux ~/.config/telinha and ~/.local/share/telinha,
+/// Windows %APPDATA%\Telinha\telinha (no reverse-domain qualifier: it only
+/// matters on macOS, and the app is not tied to any server's domain).
+pub fn dirs() -> Option<directories::ProjectDirs> {
+    directories::ProjectDirs::from("", "Telinha", "telinha")
+}
+
 fn path() -> Option<std::path::PathBuf> {
-    directories::ProjectDirs::from("online", "Telinha", "telinha").map(|d| d.config_dir().join("config.json"))
+    dirs().map(|d| d.config_dir().join("config.json"))
 }
 
 impl Config {
@@ -118,7 +131,7 @@ impl Config {
             cfg.name = whoami();
         }
         if cfg.server.is_none() {
-            cfg.server = option_env!("TELINHA_SERVER").map(str::to_owned);
+            cfg.server = default_server().map(str::to_owned);
         }
         cfg
     }

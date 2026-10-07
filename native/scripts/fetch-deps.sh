@@ -45,8 +45,9 @@ if [ ! -f "$D/libva/lib/libva.so.2" ]; then
   curl -fsSL https://github.com/intel/libva/archive/refs/tags/2.22.0.tar.gz | tar -xz -C "$D"
   mkdir -p "$D/drm-include"
   cp /usr/include/xf86drm*.h "$D/drm-include/" && cp -r /usr/include/libdrm "$D/drm-include/"
-  (cd "$D/libva-2.22.0" && CC="$D/zigcc-2.35" CFLAGS="-O2 -I$D/drm-include -I$D/drm-include/libdrm" \
-    "$D/venv/bin/meson" setup build --prefix="$D/libva" --libdir=lib -Dwith_x11=no -Dwith_glx=no -Dwith_wayland=no \
+  # sysconfdir, stripping and the prefix map keep this machine's paths out of the bundled library.
+  (cd "$D/libva-2.22.0" && CC="$D/zigcc-2.35" CFLAGS="-O2 -I$D/drm-include -I$D/drm-include/libdrm -ffile-prefix-map=$D=." \
+    "$D/venv/bin/meson" setup build --prefix="$D/libva" --libdir=lib --sysconfdir=/etc --strip -Dwith_x11=no -Dwith_glx=no -Dwith_wayland=no \
       -Denable_docs=false -Ddriverdir=/usr/lib/x86_64-linux-gnu/dri:/usr/lib64/dri:/usr/lib/dri \
     && ninja -C build install)
 fi
