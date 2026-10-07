@@ -13,7 +13,17 @@ if (!SECRET || !TURN_HOST) throw new Error("set TURN_SECRET and TURN_HOST in .en
 
 const app = express();
 app.disable("x-powered-by");
-app.use((req, res, next) => { res.set("Access-Control-Allow-Origin", "*"); next(); });
+// Only the site itself (and a local copy for development) may call this server
+// from a browser: other sites cannot hand out this server's TURN credentials.
+// The desktop app is not a browser, so this does not affect it.
+const SITE = `https://${TURN_HOST}`;
+const LOCAL = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+app.use((req, res, next) => {
+  const origin = req.get("Origin");
+  if (origin === SITE || LOCAL.test(origin ?? "")) res.set("Access-Control-Allow-Origin", origin);
+  res.set("Vary", "Origin");
+  next();
+});
 
 // Credential in coturn's `use-auth-secret` format: username = expiry in
 // seconds, password = HMAC-SHA1 of the username with the shared secret.
