@@ -55,7 +55,7 @@ fi
 
 # The site
 mkdir -p public
-cp ../index.html ../style.css ../app.js ../stats.js ../stats.css ../turbo.js ../som-linux.conf public/
+cp ../index.html ../baixar.html ../style.css ../app.js ../stats.js ../stats.css ../turbo.js ../som-linux.conf public/
 
 # Relay settings. Cloud servers often sit behind NAT: coturn then needs both addresses.
 LOCAL=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')

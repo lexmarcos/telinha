@@ -156,6 +156,18 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   background: var(--tally-soft); color: #ffcfcb; font-size: 0.9375rem;
 }
 .footnote { margin: 0; max-width: 26rem; text-align: center; color: var(--muted); font-size: 0.8125rem; opacity: 0.8; }
+/* Only shows when this server publishes the desktop app (app.js checks). */
+.get-app {
+  position: fixed; top: max(1rem, env(safe-area-inset-top)); right: 1rem;
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  min-height: 2.25rem; padding: 0 0.9rem; border-radius: 999px;
+  color: var(--muted); font-size: 0.875rem; font-weight: 600; text-decoration: none;
+  animation: fade 400ms ease both;
+  transition: color 160ms ease, background-color 160ms ease, transform 120ms ease-out;
+}
+.get-app svg { width: 1.05rem; height: 1.05rem; }
+.get-app:hover { color: var(--text); background: rgba(200, 212, 255, 0.08); }
+.get-app:active { transform: scale(0.96); transition-duration: 60ms; }
 
 /* ---------- Room ---------- */
 .room {

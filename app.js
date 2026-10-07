@@ -60,6 +60,12 @@ const state = {
 /* ---------------- Entry ---------------- */
 
 ui.name.value = safeGet("telinha:name") || "";
+// The desktop app link only shows when this server publishes it (and not on phones).
+if (!/android|iphone|ipad/i.test(navigator.userAgent)) {
+  fetch("download/versions.json", { method: "HEAD", cache: "no-cache" })
+    .then((r) => { if (r.ok) $("getApp").hidden = false; })
+    .catch(() => {});
+}
 // Invite: #1234. The Discord bot's Watch button also brings a pass
 // (#1234/passe), which is removed from the address bar so it is not copy-pasted along.
 const [hashRaw = "", hashPass = ""] = location.hash.slice(1).split("/");

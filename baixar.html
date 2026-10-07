@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1430">
+  <title>Baixar o Telinha</title>
+  <meta name="description" content="O Telinha para o computador: transmite com menos atraso e se atualiza sozinho.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='6' width='26' height='18' rx='5' fill='%23cfe0ff'/%3E%3Ccircle cx='24' cy='11' r='2.4' fill='%23ff4438'/%3E%3Crect x='11' y='26' width='10' height='2.4' rx='1.2' fill='%23cfe0ff'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Doto:wght@700;900&display=swap">
+  <link rel="stylesheet" href="style.css">
+  <style>
+    body { overflow: auto; }
+    .download {
+      min-height: 100dvh; display: grid; justify-items: center; align-content: center; gap: 2rem;
+      padding: max(4.5rem, env(safe-area-inset-top)) 1rem max(2.5rem, env(safe-area-inset-bottom));
+    }
+    .back {
+      position: fixed; top: max(1rem, env(safe-area-inset-top)); left: 1rem;
+      display: inline-flex; align-items: center; gap: 0.25rem;
+      min-height: 2.5rem; padding: 0 0.9rem 0 0.6rem; border-radius: 999px;
+      color: var(--muted); text-decoration: none; font-weight: 600; font-size: 0.9375rem;
+      transition: color 160ms ease, background-color 160ms ease, transform 120ms ease-out;
+    }
+    .back:hover { color: var(--text); background: rgba(200, 212, 255, 0.1); }
+    .back:active { transform: scale(0.96); transition-duration: 60ms; }
+
+    /* The desktop app's bubble: a round tube that shows the version like a channel. */
+    .bubble {
+      position: relative; width: 10.5rem; aspect-ratio: 1; border-radius: 50%;
+      display: grid; place-items: center;
+      background: radial-gradient(70% 70% at 40% 35%, #1a2558 0%, #121a3d 100%);
+      box-shadow:
+        0 0 0 1.5px rgba(207, 224, 255, 0.45),
+        0 0 32px rgba(157, 184, 255, 0.22),
+        0 30px 60px -24px rgba(0, 0, 0, 0.8);
+      animation: power-on 900ms var(--ease-out) 120ms both;
+    }
+    .bubble::before {
+      /* tally light: this is the version on air */
+      content: ""; position: absolute; top: 9%; right: 9%;
+      width: 1.1rem; aspect-ratio: 1; border-radius: 50%;
+      background: var(--tally); box-shadow: 0 0 0 4px #121a3d, 0 0 14px rgba(255, 68, 56, 0.6);
+    }
+    .tube {
+      width: 81%; aspect-ratio: 1; border-radius: 50%; overflow: hidden;
+      display: grid; place-items: center;
+      background:
+        repeating-linear-gradient(to bottom, rgba(207, 224, 255, 0.035) 0 1px, transparent 1px 3px),
+        radial-gradient(60% 60% at 35% 25%, rgba(255, 255, 255, 0.06), transparent 70%),
+        var(--screen);
+    }
+    .tube span {
+      display: flex; align-items: baseline;
+      font: 900 2.1rem/1 var(--osd); letter-spacing: 0.02em; color: var(--phosphor);
+      text-shadow: 0 0 14px rgba(150, 190, 255, 0.55), 0 0 2px #fff;
+    }
+    /* Doto's period reads as a plus sign: the version's dots are drawn instead. */
+    .tube i {
+      width: 0.16em; height: 0.16em; margin: 0 0.1em; border-radius: 50%;
+      background: currentColor; box-shadow: 0 0 8px rgba(150, 190, 255, 0.7);
+    }
+
+    .intro { text-align: center; max-width: 30rem; }
+    .intro h1 { margin: 0; font-size: clamp(1.75rem, 5vw, 2.25rem); line-height: 1.1; font-weight: 700; letter-spacing: -0.03em; }
+    .intro p { margin: 0.6rem 0 0; color: var(--muted); font-size: 1.0625rem; letter-spacing: -0.01em; text-wrap: balance; }
+
+    .get { width: min(24rem, 100%); display: grid; gap: 0.75rem; justify-items: center; }
+    .get .btn-primary { width: 100%; text-decoration: none; }
+    .get .alt { color: var(--muted); font-size: 0.9375rem; text-decoration: none; padding: 0.25rem 0.5rem; border-radius: 8px; }
+    .get .alt:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+    .get .size { font-weight: 400; opacity: 0.6; }
+    .note { margin: 0; color: var(--muted); text-align: center; font-size: 0.9375rem; max-width: 24rem; text-wrap: balance; }
+
+    .more { width: min(30rem, 100%); display: grid; gap: 0.5rem; }
+    .more details {
+      border-radius: var(--r-md); background: rgba(200, 212, 255, 0.05);
+      box-shadow: 0 0 0 1px var(--line);
+    }
+    .more summary {
+      list-style: none; cursor: pointer; padding: 0.85rem 1.1rem; border-radius: var(--r-md);
+      display: flex; justify-content: space-between; align-items: center;
+      font-weight: 600; color: var(--text);
+    }
+    .more summary::-webkit-details-marker { display: none; }
+    .more summary::after {
+      content: ""; width: 0.5rem; height: 0.5rem; margin-right: 0.2rem;
+      border: solid var(--muted); border-width: 0 2px 2px 0; transform: rotate(45deg) translateY(-2px);
+      transition: transform 220ms var(--ease-out);
+    }
+    .more details[open] summary::after { transform: rotate(-135deg) translateY(-1px); }
+    .more summary:hover { background: rgba(200, 212, 255, 0.05); }
+    .rows { margin: 0; padding: 0 0.6rem 0.6rem; list-style: none; display: grid; gap: 0.15rem; }
+    .row {
+      display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 0.75rem;
+      padding: 0.55rem 0.5rem; border-top: 1px solid var(--line);
+    }
+    .row:first-child { border-top: 0; }
+    .row-name { display: grid; }
+    .row-name b { font-weight: 600; }
+    .row-name small { color: var(--muted); font-size: 0.8125rem; }
+    .row-links { display: flex; flex-wrap: wrap; gap: 0.35rem; justify-content: end; }
+    .chip {
+      display: inline-flex; align-items: center; min-height: 2.25rem; padding: 0 0.85rem;
+      border-radius: 999px; background: rgba(200, 212, 255, 0.1); color: var(--text);
+      text-decoration: none; font-size: 0.875rem; font-weight: 600;
+      transition: background-color 160ms ease, transform 120ms ease-out;
+    }
+    .chip:hover { background: rgba(200, 212, 255, 0.18); }
+    .chip:active { transform: scale(0.95); transition-duration: 60ms; }
+
+    .empty-state { text-align: center; color: var(--muted); max-width: 24rem; margin: 0; }
+    @media (prefers-reduced-motion: reduce) { .bubble { animation: fade 300ms ease both !important; } }
+  </style>
+</head>
+<body>
+  <a class="back" href="./"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6 8.5 12l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Voltar</a>
+
+  <main class="download">
+    <div class="bubble" aria-hidden="true"><div class="tube"><span id="digits">----</span></div></div>
+
+    <header class="intro">
+      <h1>Telinha no computador</h1>
+      <p>A bolha flutuante que transmite a sua tela com menos atraso, usando a placa de vídeo.</p>
+    </header>
+
+    <div class="get" id="get" aria-live="polite"></div>
+
+    <section class="more" id="more" hidden aria-label="Mais opções"></section>
+  </main>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const OS = (() => {
+  const p = (navigator.userAgentData?.platform || navigator.platform || "").toLowerCase();
+  if (/android|iphone|ipad/i.test(navigator.userAgent)) return "phone";
+  if (p.includes("win")) return "windows";
+  if (p.includes("mac")) return "mac";
+  if (p.includes("linux")) return "linux";
+  return "other";
+})();
+
+// What each package is, in plain words. The first one of a system is its main download.
+const PACKAGES = [
+  { kind: "installer", os: "windows", label: "Baixar para Windows", short: "Windows" },
+  { kind: "windows", os: "windows", label: "Versão portátil para Windows, sem instalar", short: "Windows portátil" },
+  { kind: "appimage", os: "linux", label: "Baixar para Linux", short: "Linux (AppImage)" },
+  { kind: "deb", os: "linux", label: "Pacote .deb para Ubuntu, Debian e Zorin", short: "Linux (.deb)" },
+];
+
+const mb = (bytes) => `${Math.round(bytes / 1e6)} MB`;
+const day = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString("pt-BR", { day: "numeric", month: "long", year: "numeric" });
+const href = (f) => `download/${f.file}`;
+
+function link(cls, text, file, size) {
+  const a = document.createElement("a");
+  a.className = cls; a.href = href(file); a.download = "";
+  a.append(text);
+  if (size) { const s = document.createElement("span"); s.className = "size"; s.textContent = ` ${mb(file.size)}`; a.append(s); }
+  return a;
+}
+
+function render(versions) {
+  const latest = versions[0];
+  $("digits").replaceChildren(...latest.version.split(".").flatMap((n, i) => (i ? [document.createElement("i"), n] : [n])));
+  document.title = `Baixar o Telinha ${latest.version}`;
+  const get = $("get");
+  const mine = PACKAGES.filter((p) => p.os === OS && latest.files[p.kind]);
+
+  if (mine.length) {
+    get.append(link("btn btn-primary", mine[0].label, latest.files[mine[0].kind], true));
+    for (const p of mine.slice(1)) get.append(link("alt", p.label, latest.files[p.kind]));
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent = "Você baixa uma vez. Depois o app se atualiza sozinho.";
+    get.append(note);
+  } else {
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent = OS === "phone"
+      ? "No celular não precisa de app: é só abrir o site e entrar no canal."
+      : OS === "mac"
+        ? "Ainda não tem versão para Mac. Pelo navegador funciona do mesmo jeito."
+        : "Escolha o seu sistema abaixo.";
+    get.append(note);
+  }
+
+  const more = $("more");
+  const others = PACKAGES.filter((p) => p.os !== OS && latest.files[p.kind]);
+  if (others.length) more.append(group("Outros sistemas", [{ name: `Versão ${latest.version}`, sub: day(latest.date), links: others.map((p) => [p.short, latest.files[p.kind]]) }], !mine.length));
+  if (versions.length > 1) {
+    more.append(group("Versões anteriores", versions.slice(1).map((v) => ({
+      name: `Versão ${v.version}`, sub: day(v.date),
+      links: PACKAGES.filter((p) => v.files[p.kind] && (p.os === OS || !mine.length)).map((p) => [p.short, v.files[p.kind]]),
+    }))));
+  }
+  more.hidden = !more.children.length;
+}
+
+function group(title, rows, open = false) {
+  const d = document.createElement("details");
+  d.open = open;
+  const s = document.createElement("summary");
+  s.textContent = title;
+  const ul = document.createElement("ul");
+  ul.className = "rows";
+  for (const r of rows) {
+    const li = document.createElement("li");
+    li.className = "row";
+    const name = document.createElement("div");
+    name.className = "row-name";
+    const b = document.createElement("b"); b.textContent = r.name;
+    const small = document.createElement("small"); small.textContent = r.sub;
+    name.append(b, small);
+    const links = document.createElement("div");
+    links.className = "row-links";
+    for (const [text, file] of r.links) links.append(link("chip", text, file));
+    li.append(name, links);
+    ul.append(li);
+  }
+  d.append(s, ul);
+  return d;
+}
+
+try {
+  const r = await fetch("download/versions.json", { cache: "no-cache" });
+  if (!r.ok) throw new Error(r.status);
+  const { versions } = await r.json();
+  if (!versions?.length) throw new Error("empty");
+  render(versions);
+} catch {
+  $("digits").textContent = "----";
+  const p = document.createElement("p");
+  p.className = "empty-state";
+  p.textContent = "Este servidor ainda não tem o app para baixar. Pelo navegador funciona do mesmo jeito.";
+  $("get").append(p);
+}
+</script>
+</body>
+</html>
