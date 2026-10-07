@@ -29,6 +29,11 @@ fn node_name() -> String {
     format!("telinha-som-{}", std::process::id())
 }
 
+/// Name of the node that plays our chimes (left out of the capture).
+fn chime_node_name() -> String {
+    format!("telinha-aviso-{}", std::process::id())
+}
+
 /// Name fragments that identify Discord and its alternative clients.
 const DISCORD: [&str; 7] = ["discord", "vesktop", "vencord", "webcord", "armcord", "legcord", "equibop"];
 
@@ -73,30 +78,18 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, everything: bool) -> Res
             let Some(d) = buffer.datas_mut().first_mut() else { return };
             let n = d.chunk().size() as usize / 4;
             let Some(bytes) = d.data() else { return };
-            let samples: Vec<f32> = bytes[..n * 4].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+            let mut samples: Vec<f32> = bytes[..n * 4].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+            // Recording the whole output also records our chime: silence it.
+            if everything && super::chime::muting() {
+                samples.fill(0.0);
+            }
             let _ = tx.try_send(samples);
         })
         .register()
         .map_err(|e| e.to_string())?;
 
     // F32 stereo at 48 kHz: PipeWire converts from whatever each app uses.
-    let mut info = spa::param::audio::AudioInfoRaw::new();
-    info.set_format(spa::param::audio::AudioFormat::F32LE);
-    info.set_rate(RATE);
-    info.set_channels(CHANNELS as u32);
-    let mut pos = [0u32; spa::param::audio::MAX_CHANNELS];
-    pos[0] = spa::sys::SPA_AUDIO_CHANNEL_FL;
-    pos[1] = spa::sys::SPA_AUDIO_CHANNEL_FR;
-    info.set_position(pos);
-    let obj = spa::pod::Object {
-        type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
-        id: spa::param::ParamType::EnumFormat.as_raw(),
-        properties: info.into(),
-    };
-    let values: Vec<u8> = spa::pod::serialize::PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &spa::pod::Value::Object(obj))
-        .map_err(|e| format!("{e:?}"))?
-        .0
-        .into_inner();
+    let values = format_pod()?;
     let mut params = [spa::pod::Pod::from_bytes(&values).ok_or("formato de som inválido")?];
     let mut flags = pw::stream::StreamFlags::MAP_BUFFERS | pw::stream::StreamFlags::RT_PROCESS;
     if everything {
@@ -132,6 +125,85 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, everything: bool) -> Res
     Ok(())
 }
 
+/// Our audio format (F32 stereo at `RATE`) as a PipeWire parameter.
+fn format_pod() -> Result<Vec<u8>, String> {
+    let mut info = spa::param::audio::AudioInfoRaw::new();
+    info.set_format(spa::param::audio::AudioFormat::F32LE);
+    info.set_rate(RATE);
+    info.set_channels(CHANNELS as u32);
+    let mut pos = [0u32; spa::param::audio::MAX_CHANNELS];
+    pos[0] = spa::sys::SPA_AUDIO_CHANNEL_FL;
+    pos[1] = spa::sys::SPA_AUDIO_CHANNEL_FR;
+    info.set_position(pos);
+    let obj = spa::pod::Object {
+        type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+        id: spa::param::ParamType::EnumFormat.as_raw(),
+        properties: info.into(),
+    };
+    Ok(spa::pod::serialize::PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &spa::pod::Value::Object(obj))
+        .map_err(|e| format!("{e:?}"))?
+        .0
+        .into_inner())
+}
+
+/// Plays a short sound (interleaved stereo at `RATE`) on the default output, in the background.
+pub fn play(samples: Vec<f32>) {
+    let spawned = std::thread::Builder::new().name("telinha-aviso".into()).spawn(move || {
+        if let Err(e) = play_now(samples) {
+            tracing::warn!("chime: {e}");
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("chime: {e}");
+    }
+}
+
+fn play_now(samples: Vec<f32>) -> Result<(), String> {
+    pw::init();
+    let len = Duration::from_millis((samples.len() / CHANNELS) as u64 * 1000 / RATE as u64);
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| e.to_string())?;
+    let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| e.to_string())?;
+    let core = context.connect_rc(None).map_err(|e| e.to_string())?;
+    let props = pw::properties::properties! {
+        *pw::keys::MEDIA_TYPE => "Audio",
+        *pw::keys::MEDIA_CATEGORY => "Playback",
+        *pw::keys::MEDIA_ROLE => "Notification",
+        *pw::keys::NODE_NAME => chime_node_name(),
+        *pw::keys::NODE_DESCRIPTION => "Telinha (avisos)",
+    };
+    let stream = pw::stream::StreamBox::new(&core, "telinha-aviso", props).map_err(|e| e.to_string())?;
+    let _listener = stream
+        .add_local_listener_with_user_data(0usize)
+        .process(move |stream, pos| {
+            let Some(mut buffer) = stream.dequeue_buffer() else { return };
+            let Some(d) = buffer.datas_mut().first_mut() else { return };
+            let Some(bytes) = d.data() else { return };
+            // After the sound, silence until the loop ends.
+            let n = bytes.len() / 4 / CHANNELS * CHANNELS;
+            for (i, out) in bytes[..n * 4].chunks_exact_mut(4).enumerate() {
+                out.copy_from_slice(&samples.get(*pos + i).copied().unwrap_or(0.0).to_le_bytes());
+            }
+            *pos += n;
+            let chunk = d.chunk_mut();
+            *chunk.offset_mut() = 0;
+            *chunk.stride_mut() = (4 * CHANNELS) as _;
+            *chunk.size_mut() = (n * 4) as _;
+        })
+        .register()
+        .map_err(|e| e.to_string())?;
+    let values = format_pod()?;
+    let mut params = [spa::pod::Pod::from_bytes(&values).ok_or("formato de som inválido")?];
+    let flags = pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS;
+    stream.connect(spa::utils::Direction::Output, None, flags, &mut params).map_err(|e| e.to_string())?;
+
+    // Room for the output buffer to drain before closing.
+    let ml = mainloop.clone();
+    let timer = mainloop.loop_().add_timer(move |_| ml.quit());
+    timer.update_timer(Some(len + Duration::from_millis(300)), None).into_result().map_err(|e| e.to_string())?;
+    mainloop.run();
+    Ok(())
+}
+
 struct Port {
     node: u32,
     output: bool,
@@ -161,6 +233,12 @@ impl Graph {
                     return true;
                 }
                 if class == "Stream/Output/Audio" {
+                    // Our own chimes stay out (viewers already play theirs).
+                    if props.get("node.name") == Some(chime_node_name().as_str()) {
+                        tracing::info!("audio left out (Telinha's own chimes)");
+                        self.apps.insert(obj.id, false);
+                        return false;
+                    }
                     let names = ["application.process.binary", "application.name", "application.id", "node.name"].map(|k| props.get(k).unwrap_or("").to_lowercase());
                     let discord = names.iter().any(|n| DISCORD.iter().any(|d| n.contains(d)));
                     let who = props.get("application.name").or(props.get("node.name")).unwrap_or("?");

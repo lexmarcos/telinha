@@ -6,6 +6,7 @@
 //! Windows: WASAPI loopback, without Discord when it is open (so people
 //! in the call do not hear their own voice back).
 
+pub mod chime;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "windows")]

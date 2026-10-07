@@ -428,13 +428,16 @@ function applyRoster(list) {
   }
   // The first roster received is the initial state, not news.
   if (state.members.size) {
+    let joined = false, left = false;
     for (const [id, m] of next) {
       const prev = state.members.get(id);
       if (id === me) continue;
-      if (!prev) toast(`${m.name} entrou`);
+      if (!prev) { toast(`${m.name} entrou`); joined = true; }
       else if (m.sharing && !prev.sharing) toast(`${m.name} começou a transmitir`);
     }
-    for (const [id, m] of state.members) if (!next.has(id)) toast(`${m.name} saiu`);
+    for (const [id, m] of state.members) if (id !== me && !next.has(id)) { toast(`${m.name} saiu`); left = true; }
+    if (joined) playChime("join");
+    else if (left) playChime("leave");
   }
   state.members = next;
   for (const [id, m] of next) if (id !== me && m.sharing && m.discord) deliverPass(id);
@@ -459,7 +462,8 @@ async function startShare() {
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: state.quality.fps, max: 60 } }, // no size limit: quality settings decide
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      // restrictOwnAudio: our join/leave chimes stay out of the stream
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, restrictOwnAudio: true },
       systemAudio: "include",
       selfBrowserSurface: "exclude",
       surfaceSwitching: "include",
@@ -1186,6 +1190,52 @@ for (const btn of document.querySelectorAll('[data-action="invite"]')) {
       prompt("Copie o convite:", url);
     }
   });
+}
+
+/* ---------------- Join and leave sounds ---------------- */
+
+// Two short glassy notes, rising when someone joins and falling when someone
+// leaves. The desktop app (native/src/audio/chime.rs) uses the same formula.
+const CHIME = { join: [659.25, 880], leave: [880, 659.25] };
+const chimeBuffers = {};
+let chimeCtx = null;
+let chimeNext = 0; // several joins at once make one sound
+
+// Browsers only let a page make sound after a click or key press.
+function unlockChime() {
+  if (!chimeCtx) { try { chimeCtx = new AudioContext(); } catch { return; } }
+  if (chimeCtx.state === "suspended") chimeCtx.resume().catch(() => {});
+}
+for (const ev of ["pointerdown", "keydown"]) addEventListener(ev, unlockChime, { capture: true, passive: true });
+
+function playChime(kind) {
+  const now = performance.now();
+  if (chimeCtx?.state !== "running" || now < chimeNext) return;
+  chimeNext = now + 250;
+  const src = chimeCtx.createBufferSource();
+  src.buffer = chimeBuffers[kind] ??= renderChime(CHIME[kind]);
+  src.connect(chimeCtx.destination);
+  src.start();
+}
+
+function renderChime(notes) {
+  const rate = chimeCtx.sampleRate, step = 0.09, len = 0.5;
+  const buf = chimeCtx.createBuffer(1, Math.floor((step + len) * rate), rate);
+  const out = buf.getChannelData(0);
+  for (let i = 0; i < out.length; i++) {
+    const t = i / rate;
+    out[i] = 0.14 * notes.reduce((v, f, n) => v + chimeNote(f, t - n * step, len), 0);
+  }
+  return buf;
+}
+
+// One note: quick attack, exponential decay and a brighter overtone that fades first.
+function chimeNote(freq, t, len) {
+  if (t < 0 || t >= len) return 0;
+  const env = t < 0.006 ? t / 0.006 : Math.exp(-(t - 0.006) / 0.11);
+  const tail = Math.min(1, (len - t) / 0.02); // no click at the end
+  const w = 2 * Math.PI * freq * t;
+  return env * tail * (Math.sin(w) + 0.2 * Math.sin(2 * w) * Math.exp(-t / 0.04));
 }
 
 /* ---------------- Notices ---------------- */

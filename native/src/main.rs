@@ -33,6 +33,22 @@ fn main() {
         return;
     }
 
+    // Chime test: plays join and leave while recording the stream audio, which
+    // must stay silent (the chime is only for whoever is at this computer).
+    if std::env::args().any(|a| a == "--teste-aviso") {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            audio::chime::play(audio::chime::Chime::Join);
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            audio::chime::play(audio::chime::Chime::Leave);
+        });
+        match audio::record(5) {
+            Ok(s) => println!("stream audio peak while chiming: {:.4}", s.iter().fold(0f32, |m, v| m.max(v.abs()))),
+            Err(e) => println!("audio failed: {e}"),
+        }
+        return;
+    }
+
     // Headless video test: test pattern → encoder → file.
     if let Some(i) = std::env::args().position(|a| a == "--teste-video") {
         let secs: u64 = std::env::args().nth(i + 1).and_then(|s| s.parse().ok()).unwrap_or(5);

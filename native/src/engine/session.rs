@@ -119,6 +119,9 @@ struct Session {
     discord: Option<String>,
     /// Gatekeeper of the current stream (only people in the call can watch).
     gate: Option<super::gate::Gate>,
+    /// Who was in the channel at the last roster (for the join and leave
+    /// chimes). None until the first roster: that one is not news.
+    heard: Option<std::collections::HashSet<String>>,
 }
 
 pub async fn run(mut cmds: mpsc::Receiver<Command>, ui: mpsc::Sender<Event>) {
@@ -212,10 +215,12 @@ async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, c
         demoted: Default::default(),
         discord: None,
         gate: None,
+        heard: None,
     };
     s.spawn_signal_forwarder(sig_rx, peer_rx);
 
     if is_host {
+        s.heard = Some([me.clone()].into());
         s.members = vec![Member { id: me, name, sharing: false, wc: false, discord: false, avatar: String::new() }];
         s.joined = true;
         s.announce_joined().await;
@@ -702,6 +707,7 @@ impl Session {
                     })
                     .unwrap_or_default();
                 self.members = members;
+                self.chime();
                 self.publish_viewers().await;
                 self.sync_viewers().await;
             }
@@ -747,8 +753,20 @@ impl Session {
                 peer::send_json(ch, &msg).await;
             }
         }
+        self.chime();
         self.publish_viewers().await;
         self.sync_viewers().await;
+    }
+
+    /// Plays the join or leave chime when someone else entered or left the channel.
+    fn chime(&mut self) {
+        let now: std::collections::HashSet<String> = self.members.iter().map(|m| m.id.clone()).collect();
+        let Some(before) = self.heard.replace(now.clone()) else { return };
+        if now.difference(&before).any(|id| *id != self.me) {
+            crate::audio::chime::play(crate::audio::chime::Chime::Join);
+        } else if before.difference(&now).any(|id| *id != self.me) {
+            crate::audio::chime::play(crate::audio::chime::Chime::Leave);
+        }
     }
 
     /* ---------------- transmissão ---------------- */
