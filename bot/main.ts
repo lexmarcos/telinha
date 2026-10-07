@@ -257,7 +257,7 @@ async function interaction(req: Request) {
 }
 
 /** Checks the call and returns the watch link with a pass, or why not. */
-async function admit(live: Live, who: { id: string; name: string }): Promise<{ link: string } | { refused: string }> {
+async function admit(live: Live, who: { id: string; name: string; avatar?: string | null }): Promise<{ link: string } | { refused: string }> {
   const said = (why: string) => console.log(`Watch: ${who.name} → ${live.user.name} (room ${live.code}): ${why}`);
   if (who.id === live.user.id) return { refused: "Essa é a sua própria transmissão." };
   const [theirs, mine] = await Promise.all([voiceChannel(live.guild, live.user.id), voiceChannel(live.guild, who.id)]);
@@ -270,7 +270,9 @@ async function admit(live: Live, who: { id: string; name: string }): Promise<{ l
     return { refused: `Entre na call em que ${live.user.name} está para assistir.` };
   }
   said("pass issued");
-  const pass = await signPass({ v: 1, s: live.code, p: live.peer, u: who.id, n: who.name, e: Math.floor(Date.now() / 1000) + PASS_HOURS * 3600 });
+  // Name and avatar go along so the website can show the person as on Discord.
+  const a = who.avatar ? `https://cdn.discordapp.com/avatars/${who.id}/${who.avatar}.png?size=64` : undefined;
+  const pass = await signPass({ v: 1, s: live.code, p: live.peer, u: who.id, n: who.name, a, e: Math.floor(Date.now() / 1000) + PASS_HOURS * 3600 });
   return { link: `https://${HOST}/#${live.code}/${pass}` };
 }
 
@@ -284,8 +286,8 @@ async function watchStart(url: URL) {
   return Response.redirect(`https://discord.com/oauth2/authorize?${q}`, 302);
 }
 
-async function watch(live: Live, who: { id: string; username: string; global_name?: string }, _guild: string) {
-  const r = await admit(live, { id: who.id, name: who.global_name ?? who.username });
+async function watch(live: Live, who: { id: string; username: string; global_name?: string; avatar?: string | null }, _guild: string) {
+  const r = await admit(live, { id: who.id, name: who.global_name ?? who.username, avatar: who.avatar });
   if ("refused" in r) return reply(r.refused);
   return json({
     type: 4,

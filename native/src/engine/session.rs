@@ -32,6 +32,8 @@ struct Member {
     wc: bool,
     /// Streams only to people in the Discord call (requires a pass).
     discord: bool,
+    /// Discord avatar URL (only from Discord's CDN), passed along in the roster.
+    avatar: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,7 +216,7 @@ async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, c
     s.spawn_signal_forwarder(sig_rx, peer_rx);
 
     if is_host {
-        s.members = vec![Member { id: me, name, sharing: false, wc: false, discord: false }];
+        s.members = vec![Member { id: me, name, sharing: false, wc: false, discord: false, avatar: String::new() }];
         s.joined = true;
         s.announce_joined().await;
     } else {
@@ -633,7 +635,8 @@ impl Session {
                 let wc = c.meta["wc"].as_bool().unwrap_or(false);
                 let id = c.peer.clone();
                 self.members.retain(|m| m.id != id);
-                self.members.push(Member { id, name, sharing: false, wc, discord: false });
+                let avatar = c.meta["avatar"].as_str().filter(|a| a.starts_with("https://cdn.discordapp.com/avatars/")).unwrap_or_default().to_owned();
+                self.members.push(Member { id, name, sharing: false, wc, discord: false, avatar });
                 self.broadcast_roster().await;
             }
             (Kind::Turbo, Which::Video) => {
@@ -693,6 +696,7 @@ impl Session {
                                 sharing: m["sharing"].as_bool().unwrap_or(false),
                                 wc: m["wc"].as_bool().unwrap_or(false),
                                 discord: m["discord"].as_bool().unwrap_or(false),
+                                avatar: m["avatar"].as_str().unwrap_or_default().to_owned(),
                             })
                             .collect()
                     })
@@ -736,7 +740,7 @@ impl Session {
             me.discord = self.gate.is_some();
         }
         let members: Vec<Value> =
-            self.members.iter().map(|m| json!({ "id": m.id, "name": m.name, "sharing": m.sharing, "wc": m.wc, "discord": m.discord })).collect();
+            self.members.iter().map(|m| json!({ "id": m.id, "name": m.name, "avatar": m.avatar, "sharing": m.sharing, "wc": m.wc, "discord": m.discord })).collect();
         let msg = json!({ "t": "roster", "members": members });
         for c in self.conns.values().filter(|c| c.kind == Kind::Guest && c.open) {
             if let Some(ch) = &c.control {

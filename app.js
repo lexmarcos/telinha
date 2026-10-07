@@ -77,11 +77,26 @@ window.addEventListener("hashchange", () => {
   if (state.peer) for (const [id, m] of state.members) if (id !== state.peer.id && m.sharing && m.discord) deliverPass(id);
   renderStreams();
 });
+// Discord identity carried by the pass (name and avatar), used when the
+// person has no name saved yet; the avatar is remembered for next visits.
+const passIdentity = (() => {
+  try { return JSON.parse(atob(discordPass.split(".")[0].replace(/-/g, "+").replace(/_/g, "/"))); } catch { return {}; }
+})();
+if (!ui.name.value && passIdentity.n) ui.name.value = String(passIdentity.n).slice(0, 24);
+if (isDiscordAvatar(passIdentity.a)) safeSet("telinha:avatar", passIdentity.a);
+const myAvatar = isDiscordAvatar(safeGet("telinha:avatar")) ? safeGet("telinha:avatar") : "";
 if (hashCode.length === 4) {
   ui.code.value = hashCode;
-  setTimeout(() => (ui.name.value ? ui.tune : ui.name).focus(), 950);
+  // Channel in the link and a name already known: straight into the channel.
+  if (ui.name.value.trim()) setTimeout(() => join(hashCode), 0);
+  else setTimeout(() => ui.name.focus(), 950);
 }
 syncLobby();
+
+/** Only Discord's avatar CDN: nobody can make others load an arbitrary URL. */
+function isDiscordAvatar(url) {
+  return typeof url === "string" && url.startsWith("https://cdn.discordapp.com/avatars/");
+}
 
 ui.tv.addEventListener("pointerdown", (e) => {
   if (e.target !== ui.code) { e.preventDefault(); ui.code.focus(); }
@@ -135,7 +150,7 @@ async function host(attempt = 0) {
     state.peer = peer;
     state.isHost = true;
     state.code = code;
-    state.roster.set(peer.id, { name: state.name, sharing: false, wc: TURBO.receive });
+    state.roster.set(peer.id, { name: state.name, avatar: myAvatar, sharing: false, wc: TURBO.receive });
     peer.on("connection", acceptGuest);
     wirePeer(peer);
     broadcastRoster();
@@ -153,7 +168,8 @@ function acceptGuest(conn) {
   conn.on("open", () => {
     const name = String(conn.metadata?.name || "Alguém").slice(0, 24);
     state.guests.set(conn.peer, conn);
-    state.roster.set(conn.peer, { name, sharing: false, wc: !!conn.metadata?.wc });
+    const avatar = isDiscordAvatar(conn.metadata?.avatar) ? conn.metadata.avatar : "";
+    state.roster.set(conn.peer, { name, avatar, sharing: false, wc: !!conn.metadata?.wc });
     broadcastRoster();
   });
   conn.on("data", (msg) => {
@@ -188,7 +204,7 @@ async function join(code) {
   let peer;
   try {
     peer = await openPeer();
-    const conn = await connectTo(peer, PREFIX + code, { name: state.name, wc: TURBO.receive });
+    const conn = await connectTo(peer, PREFIX + code, { name: state.name, avatar: myAvatar, wc: TURBO.receive });
     state.peer = peer;
     state.code = code;
     state.hostConn = conn;
@@ -398,7 +414,7 @@ function deliverPass(id) {
 
 function applyRoster(list) {
   const me = state.peer.id;
-  const next = new Map(list.map((m) => [m.id, { name: m.name, sharing: !!m.sharing, wc: !!m.wc, discord: !!m.discord }]));
+  const next = new Map(list.map((m) => [m.id, { name: m.name, avatar: isDiscordAvatar(m.avatar) ? m.avatar : "", sharing: !!m.sharing, wc: !!m.wc, discord: !!m.discord }]));
 
   for (const [id, prev] of state.members) {
     if (id === me) continue;
@@ -1086,6 +1102,11 @@ function renderPeople() {
     const li = document.createElement("li");
     li.textContent = initials(m.name);
     li.style.background = AVATAR_COLORS[hash(m.name + id) % AVATAR_COLORS.length];
+    if (m.avatar) {
+      // Discord photo instead of the initials.
+      li.textContent = "";
+      li.style.background = `center / cover no-repeat url("${m.avatar}")`;
+    }
     li.title = (id === me ? `${m.name} (você)` : m.name) + (m.sharing ? ", transmitindo" : "");
     li.classList.toggle("sharing", m.sharing);
     return li;
