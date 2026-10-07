@@ -85,9 +85,6 @@ pub struct Config {
     pub server: Option<String>,
     #[serde(default)]
     pub position: Option<(f32, f32)>,
-    /// Show on the Discord profile that the user is in a channel (Rich Presence).
-    #[serde(default = "yes")]
-    pub discord: bool,
     /// Discord login (done through the Telinha bot): session and name.
     #[serde(default)]
     pub discord_session: Option<String>,
@@ -103,7 +100,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { quality: Quality::default(), name: String::new(), server: None, position: None, discord: true, discord_session: None, discord_name: None, call_only: true, capture_token: None }
+        Self { quality: Quality::default(), name: String::new(), server: None, position: None, discord_session: None, discord_name: None, call_only: true, capture_token: None }
     }
 }
 

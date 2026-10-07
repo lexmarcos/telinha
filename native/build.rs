@@ -22,5 +22,4 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TELINHA_DEV_RPATH");
     // Embedded default server (option_env!): changing the variable triggers a rebuild.
     println!("cargo:rerun-if-env-changed=TELINHA_SERVER");
-    println!("cargo:rerun-if-env-changed=TELINHA_DISCORD_ID");
 }

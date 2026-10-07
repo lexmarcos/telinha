@@ -7,7 +7,6 @@ mod app;
 mod audio;
 mod capture;
 mod config;
-mod discord;
 mod engine;
 mod tray;
 mod ui;
@@ -150,31 +149,16 @@ async fn headless(link: Option<String>, server: Option<String>, secs: u64) {
         Some(input) => cmd_tx.send(Command::Join { input, name, server: None }).await,
         None => cmd_tx.send(Command::Create { name, server }).await,
     };
-    // Rich Presence here too (to test without the UI).
-    let (presence, rx) = tokio::sync::watch::channel(None::<discord::Presence>);
-    tokio::spawn(discord::run(rx));
-    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
         match tokio::time::timeout_at(deadline, ev_rx.recv()).await {
             Ok(Some(e)) => {
                 println!("event: {e:?}");
                 match e {
-                    Event::Joined { invite, .. } => {
-                        presence.send_replace(Some(discord::Presence { invite, live: false, viewers: 0, since }));
+                    Event::Joined { .. } => {
                         let discord = std::env::var("TELINHA_DISCORD_SESSAO").ok();
                         let _ = cmd_tx.send(Command::StartLive { quality: config::Quality::default(), discord }).await;
                     }
-                    Event::Live(live) => presence.send_modify(|p| {
-                        if let Some(p) = p {
-                            p.live = live;
-                        }
-                    }),
-                    Event::Viewers(v) => presence.send_modify(|p| {
-                        if let Some(p) = p {
-                            p.viewers = v.len();
-                        }
-                    }),
                     Event::Failed(_) | Event::Left => return,
                     _ => {}
                 }

@@ -81,9 +81,9 @@ struct Controller {
     open: Spring,
     press: Spring,
     tally: Spring,
-    /// Segmented-control indicators: resolution, fps, priority, audio, Discord
-    /// profile and who can watch.
-    thumbs: [Spring; 6],
+    /// Segmented-control indicators: resolution, fps, priority, audio and who
+    /// can watch.
+    thumbs: [Spring; 5],
     panel_h: Spring,
     fade: Spring,
     /// Height the window reserves for the panel: during a switch, the larger of
@@ -94,8 +94,6 @@ struct Controller {
 
     engine: tokio::sync::mpsc::Sender<Command>,
     tray: Option<crate::tray::Guard>,
-    presence: tokio::sync::watch::Sender<Option<crate::discord::Presence>>,
-    presence_since: (Option<(String, bool)>, i64),
     /// The X11 clipboard needs an owner while the copied text
     /// is still there.
     clipboard: Option<arboard::Clipboard>,
@@ -126,8 +124,6 @@ pub fn run() {
 
     let engine = engine::spawn(|e| post(move |c| c.on_engine(e)));
     let tray = crate::tray::init(Arc::new(|e| post(move |c| c.on_tray(e))));
-    let (presence, presence_rx) = tokio::sync::watch::channel(None);
-    tokio::spawn(crate::discord::run(presence_rx));
 
     let config = Config::load();
     let mut c = Controller {
@@ -147,7 +143,7 @@ pub fn run() {
         open: Spring::new(0.0, motion::UI),
         press: Spring::new(0.0, motion::PRESS),
         tally: Spring::new(0.0, motion::TALLY),
-        thumbs: [Spring::new(0.0, motion::UI); 6],
+        thumbs: [Spring::new(0.0, motion::UI); 5],
         panel_h: Spring::new(0.0, motion::UI),
         fade: Spring::new(1.0, motion::FADE),
         hold_h: 0.0,
@@ -155,8 +151,6 @@ pub fn run() {
         timer: slint::Timer::default(),
         engine,
         tray,
-        presence,
-        presence_since: (None, 0),
         clipboard: None,
         config,
     };
@@ -244,14 +238,6 @@ impl Controller {
             with(|c| {
                 c.config.quality.system_audio = i == 1;
                 c.quality_changed();
-            })
-        });
-        st.on_set_profile(|i| {
-            with(|c| {
-                c.config.discord = i == 1;
-                c.config.save();
-                c.sync_thumbs(false);
-                c.render();
             })
         });
         st.on_set_call(|i| {
@@ -522,10 +508,8 @@ impl Controller {
         st.set_joining(self.joining);
 
         // Discord
-        st.set_discord_available(crate::discord::client_id().is_some());
         st.set_discord_logged(self.config.discord_session.is_some());
         st.set_discord_name(self.config.discord_name.clone().unwrap_or_default().into());
-        st.set_profile_sel(i32::from(self.config.discord));
         st.set_call_sel(i32::from(self.config.call_only));
 
         ui.set_panel_kind(self.panel.map_or(0, |p| p as i32));
@@ -533,7 +517,6 @@ impl Controller {
         ui.set_side_left(self.side_left);
         self.measure_panel();
         self.push_motion();
-        self.sync_presence();
     }
 
     fn subtitle(&self) -> String {
@@ -744,32 +727,6 @@ impl Controller {
         self.render();
     }
 
-    /// Updates what the Discord profile shows (only sends if it changed).
-    fn sync_presence(&mut self) {
-        let channel = match &self.session {
-            Session::Channel { code, invite, live } => Some((code.clone(), invite.clone(), *live)),
-            _ => None,
-        };
-        let key = channel.as_ref().map(|(code, _, live)| (code.clone(), *live));
-        if key != self.presence_since.0 {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-            self.presence_since = (key, now);
-        }
-        let next = channel.filter(|_| self.config.discord && crate::discord::client_id().is_some()).map(|(_, invite, live)| crate::discord::Presence {
-            invite,
-            live,
-            viewers: self.viewers.len(),
-            since: self.presence_since.1,
-        });
-        self.presence.send_if_modified(|cur| {
-            let changed = *cur != next;
-            if changed {
-                *cur = next;
-            }
-            changed
-        });
-    }
-
     /* ---------------- qualidade ---------------- */
 
     fn native(&self) -> (u32, u32) {
@@ -789,7 +746,7 @@ impl Controller {
         let opts = self.resolution_options();
         let res = opts.iter().position(|r| *r == q.resolution).unwrap_or(opts.len() - 1);
         let fps = FPS_OPTIONS.iter().position(|f| *f == q.fps).unwrap_or(1);
-        let values = [res, fps, usize::from(q.priority == Priority::Nitidez), usize::from(q.system_audio), usize::from(self.config.discord), usize::from(self.config.call_only)];
+        let values = [res, fps, usize::from(q.priority == Priority::Nitidez), usize::from(q.system_audio), usize::from(self.config.call_only)];
         for (s, v) in self.thumbs.iter_mut().zip(values) {
             if snap { s.snap(v as f32) } else { s.set_target(v as f32) }
         }

@@ -8,7 +8,6 @@
 #
 # The default server (site domain) comes from .env.build (not in git):
 #   TELINHA_SERVER=your.domain
-#   TELINHA_DISCORD_ID=application id in the Discord Developer Portal (Rich Presence)
 set -eu
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
@@ -17,7 +16,6 @@ WHAT="${1:-tudo}"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 [ -f .env.build ] && . ./.env.build
 export TELINHA_SERVER="${TELINHA_SERVER:-}"
-export TELINHA_DISCORD_ID="${TELINHA_DISCORD_ID:-}"
 [ -n "$TELINHA_SERVER" ] || echo "warning: no TELINHA_SERVER; the app will ask for the invite link on first run"
 mkdir -p dist
 

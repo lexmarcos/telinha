@@ -49,7 +49,7 @@ export component MenuPanel inherits VerticalLayout {
         clicked => { AppState.copy-invite(); }
     }
     Divider { }
-    if AppState.discord-available: MenuItem {
+    MenuItem {
         icon: @image-url("icons/profile.svg"); label: "Discord";
         clicked => { AppState.open(4); }
     }
@@ -150,12 +150,6 @@ export component DiscordPanel inherits VerticalLayout {
         go-back => { AppState.open(1); }
     }
     Gap { size: Space.m; }
-    Label { text: "No seu perfil"; }
-    Gap { size: Space.s; }
-    Segmented { options: ["Esconder", "Mostrar"]; selected: AppState.profile-sel; thumb: AppState.thumbs[4]; pick(i) => { AppState.set-profile(i); } }
-    Gap { size: Space.xs + 2px; }
-    Note { text: "Quem abre seu perfil vê que você está transmitindo, com um botão para assistir."; }
-    Gap { size: Space.m; }
     Label { text: "Quem pode assistir"; }
     Gap { size: Space.s; }
     if !AppState.discord-logged: Note { text: "Entre com o Discord para deixar só quem está na sua call assistir."; }
@@ -164,7 +158,7 @@ export component DiscordPanel inherits VerticalLayout {
     if AppState.discord-logged: Segmented {
         options: ["Quem tiver o link", "Só a call"];
         selected: AppState.call-sel;
-        thumb: AppState.thumbs[5];
+        thumb: AppState.thumbs[4];
         pick(i) => { AppState.set-call(i); }
     }
     if AppState.discord-logged: Gap { size: Space.xs + 2px; }
