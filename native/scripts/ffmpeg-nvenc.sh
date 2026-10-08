@@ -36,7 +36,7 @@ docker build -q -t "$IMAGE" "$D/nvenc-antigo" >/dev/null
 # In GitHub Actions, build.sh would name the image after the running repository
 # (GITHUB_REPOSITORY) instead of using the one prepared above.
 (cd "$D/FFmpeg-Builds" && rm -rf artifacts && env -u GITHUB_REPOSITORY ./build.sh $T lgpl-shared 9.0)
-PKG=$(ls "$D"/FFmpeg-Builds/artifacts/*$T-lgpl-shared-9.0.*)
+PKG=$(ls "$D"/FFmpeg-Builds/artifacts/*$T-lgpl-shared-9.0.zip "$D"/FFmpeg-Builds/artifacts/*$T-lgpl-shared-9.0.tar.xz 2>/dev/null | head -1)
 rm -rf "$OUT" "$OUT.tmp"
 mkdir -p "$OUT.tmp"
 case "$PKG" in
