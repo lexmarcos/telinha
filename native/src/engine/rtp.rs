@@ -252,7 +252,12 @@ pub fn spawn(
     let (c, s) = (counters.clone(), stop.clone());
     tokio::spawn(async move {
         let ssrc = track.ssrcs().await.first().copied().unwrap_or(0);
-        let duration = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
+        // The RTP clock advances by each sample's duration. It must follow the
+        // real time between captures: a fixed 1/fps while frames come slower
+        // (a heavy 4K screen, or a still one sending a frame every 100 ms) made
+        // the timestamps fall behind, and the viewer's jitter buffer grew to
+        // nearly a second trying to make up for "late" frames.
+        let mut last: Option<Instant> = None;
         let mut need_key = true;
         keys.request(&control, Duration::ZERO);
         while !s.load(Ordering::Relaxed) {
@@ -270,6 +275,11 @@ pub fn spawn(
                 continue;
             }
             need_key = false;
+            let duration = last
+                .map(|t| frame.captured.saturating_duration_since(t))
+                .unwrap_or(Duration::from_secs_f64(1.0 / fps.max(1) as f64))
+                .clamp(Duration::from_millis(1), Duration::from_secs(1));
+            last = Some(frame.captured);
             let sample = Sample { data: frame.data.clone(), duration, ..Sample::new(frame.captured) };
             if track.sample_writer(ssrc, H264_PT).write_sample(&sample).await.is_err() {
                 break;
