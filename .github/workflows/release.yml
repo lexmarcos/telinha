@@ -46,7 +46,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: native/.deps
-          key: deps-${{ hashFiles('native/scripts/fetch-deps.sh', 'native/scripts/ffmpeg-windows.sh') }}
+          key: deps-${{ hashFiles('native/scripts/fetch-deps.sh', 'native/scripts/ffmpeg-nvenc.sh') }}
 
       - name: Dependencies (FFmpeg, libva, Zig, packaging tools)
         run: sh scripts/fetch-deps.sh && rm -rf .deps/FFmpeg-Builds .deps/debs

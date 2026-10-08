@@ -997,8 +997,9 @@ impl Session {
         if video::NVENC_DRIVER_TOO_OLD.swap(false, Ordering::Relaxed) {
             let using = st.encoder.as_ref().map_or("outro codificador".to_owned(), |e| e.name.clone());
             let msg = format!(
-                "O driver da sua placa NVIDIA é antigo demais para o NVENC (precisa da versão {} ou mais nova). Atualize pelo app da NVIDIA; até lá, a transmissão usa {using}.",
-                video::NVENC_MIN_DRIVER
+                "O driver da sua placa NVIDIA é antigo demais para o NVENC (precisa da versão {} ou mais nova). {}; até lá, a transmissão usa {using}.",
+                video::NVENC_MIN_DRIVER,
+                if cfg!(windows) { "Atualize pelo app da NVIDIA" } else { "Atualize pelo gerenciador de drivers do sistema" }
             );
             tracing::warn!("{msg}");
             let _ = self.ui.send(Event::Notice(msg)).await;

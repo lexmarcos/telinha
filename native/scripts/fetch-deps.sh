@@ -1,8 +1,8 @@
 #!/bin/sh
 # Downloads and prepares what the app needs to build and package, in .deps/
 # (nothing is installed system-wide, no sudo needed):
-#   - FFmpeg 9 (BtbN, LGPL): prebuilt for Linux; for Windows, built with the NVENC
-#     of older drivers (scripts/ffmpeg-windows.sh, needs Docker)
+#   - FFmpeg 9 (BtbN, LGPL) for Linux and Windows, built with the NVENC
+#     of older drivers (scripts/ffmpeg-nvenc.sh, needs Docker)
 #   - libva 2.22 (the new FFmpeg's VAAPI requires >= 2.21; LTS distros ship 2.20)
 #   - PipeWire headers (extracted from Ubuntu .debs)
 #   - Zig (builds targeting glibc 2.35), appimagetool and NSIS
@@ -13,23 +13,23 @@ D="$PWD/.deps"
 mkdir -p "$D" "$D/debs"
 B=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
 
-if [ ! -d "$D/ffmpeg-linux" ]; then
-  echo "FFmpeg (Linux)"
-  curl -fsSL "$B/ffmpeg-n9.0-latest-linux64-lgpl-shared-9.0.tar.xz" | tar -xJ -C "$D"
-  mv "$D"/ffmpeg-n9.0-latest-linux64-lgpl-shared-9.0 "$D/ffmpeg-linux"
-fi
-if [ ! -d "$D/ffmpeg-win" ]; then
-  echo "FFmpeg (Windows)"
+# Built with the NVENC that runs on NVIDIA drivers from 2023 onward (BtbN's
+# prebuilt ones need drivers from 2026). Without Docker, the prebuilt ones.
+for T in linux64 win64; do
+  OUT="$D/ffmpeg-$([ $T = win64 ] && echo win || echo linux)"
+  [ -d "$OUT" ] && continue
+  echo "FFmpeg ($T)"
   if command -v docker >/dev/null 2>&1; then
-    # Built with the NVENC that runs on NVIDIA drivers from 2023 onward.
-    sh scripts/ffmpeg-windows.sh
+    sh scripts/ffmpeg-nvenc.sh $T
   else
-    echo "warning: no Docker, using the prebuilt BtbN FFmpeg: its NVENC requires driver 610+"
-    curl -fsSL -o "$D/win.zip" "$B/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip"
-    unzip -q "$D/win.zip" -d "$D" && rm "$D/win.zip"
-    mv "$D"/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0 "$D/ffmpeg-win"
+    echo "warning: no Docker, using the prebuilt BtbN FFmpeg: its NVENC requires a 2026 driver"
+    case $T in
+      win64) curl -fsSL -o "$D/win.zip" "$B/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip" && unzip -q "$D/win.zip" -d "$D" && rm "$D/win.zip" ;;
+      *) curl -fsSL "$B/ffmpeg-n9.0-latest-linux64-lgpl-shared-9.0.tar.xz" | tar -xJ -C "$D" ;;
+    esac
+    mv "$D"/ffmpeg-n9.0-latest-$T-lgpl-shared-9.0 "$OUT"
   fi
-fi
+done
 
 [ -d "$D/venv" ] || python3 -m venv "$D/venv"
 "$D/venv/bin/pip" install -q meson ziglang patchelf

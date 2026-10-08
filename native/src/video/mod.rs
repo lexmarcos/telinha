@@ -38,7 +38,10 @@ pub struct EncodedFrame {
 /// shows a notice in the bubble telling the user to update the driver.
 pub static NVENC_DRIVER_TOO_OLD: AtomicBool = AtomicBool::new(false);
 /// Minimum NVIDIA driver for the bundled FFmpeg's NVENC.
+#[cfg(target_os = "windows")]
 pub const NVENC_MIN_DRIVER: &str = "531";
+#[cfg(not(target_os = "windows"))]
+pub const NVENC_MIN_DRIVER: &str = "530";
 
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
