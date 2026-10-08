@@ -89,6 +89,8 @@ struct Live {
     epoch: Instant,
     last_captured: u64,
     last_tick: Instant,
+    /// Rates for the log every 10 s: when, and how many captured/encoded frames then.
+    log_at: (Instant, u64, u64),
     capture_fps: f32,
 }
 
@@ -831,6 +833,7 @@ impl Session {
             keys: Arc::new(KeyLimiter::new()),
             epoch: Instant::now(),
             last_captured: 0,
+            log_at: (Instant::now(), 0, 0),
             last_tick: Instant::now(),
             capture_fps: 0.0,
         });
@@ -1023,6 +1026,19 @@ impl Session {
         live.capture_fps = (st.captured - live.last_captured) as f32 / dt;
         live.last_captured = st.captured;
         live.last_tick = Instant::now();
+        // Where frames are lost, in the log: the compositor (capture) or the encoder.
+        let (at, captured, encoded) = live.log_at;
+        let secs = at.elapsed().as_secs_f32();
+        if secs >= 10.0 {
+            tracing::info!(
+                capture_fps = format!("{:.1}", (st.captured - captured) as f32 / secs),
+                encode_fps = format!("{:.1}", (st.encoded - encoded) as f32 / secs),
+                encode_ms = format!("{:.1}", st.encode_ms.unwrap_or(0.0)),
+                target_fps = live.quality.fps,
+                "video rates"
+            );
+            live.log_at = (Instant::now(), st.captured, st.encoded);
+        }
         if let Some(info) = st.encoder.clone() {
             let _ = self.ui.send(Event::Encoder(info)).await;
         }
