@@ -2,7 +2,8 @@
 //! (Windows 10 2004+): all audio except Discord's when it is open (so people
 //! in the call do not hear their own voice), otherwise all audio except
 //! Telinha's own chimes. Only one process tree can be left out, so with
-//! Discord open the capture goes silent while a chime plays.
+//! Discord open the capture goes silent while a chime plays. Discord is looked
+//! up again every few seconds, so opening or restarting it mid-stream works.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,48 +13,87 @@ use wasapi::{AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode, W
 
 use super::{CHANNELS, RATE};
 
-/// Discord's root process (the parent of the other instances), if it is open.
+/// Discord's main executables. Helpers (overlay, updater) also start with
+/// "discord" but are not where the call's audio plays.
+const DISCORD_MAIN: [&str; 4] = ["discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"];
+
+/// Discord's root process: the main executable that is the ancestor of the
+/// most Discord processes (the call's audio plays in one of its children).
 fn discord_pid() -> Option<u32> {
     use sysinfo::{ProcessRefreshKind, RefreshKind, System};
     let sys = System::new_with_specifics(RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()));
-    let mut ids = Vec::new();
-    for (pid, p) in sys.processes() {
-        let name = p.name().to_string_lossy().to_lowercase();
-        if name.starts_with("discord") && name.ends_with(".exe") {
-            ids.push((pid.as_u32(), p.parent().map(|x| x.as_u32())));
-        }
-    }
-    ids.iter().find(|(_, parent)| parent.is_none_or(|pp| !ids.iter().any(|(id, _)| *id == pp))).map(|(id, _)| *id)
+    let parent = |pid: sysinfo::Pid| sys.process(pid).and_then(|p| p.parent());
+    let discord: Vec<(sysinfo::Pid, String)> = sys
+        .processes()
+        .iter()
+        .map(|(pid, p)| (*pid, p.name().to_string_lossy().to_lowercase()))
+        .filter(|(_, name)| name.starts_with("discord") && name.ends_with(".exe"))
+        .collect();
+    let descendants = |root: sysinfo::Pid| {
+        discord
+            .iter()
+            .filter(|(pid, _)| {
+                // Walks up the parents (bounded, in case of a loop).
+                let mut cur = parent(*pid);
+                for _ in 0..16 {
+                    match cur {
+                        Some(p) if p == root => return true,
+                        Some(p) => cur = parent(p),
+                        None => return false,
+                    }
+                }
+                false
+            })
+            .count()
+    };
+    discord
+        .iter()
+        .filter(|(_, name)| DISCORD_MAIN.contains(&name.as_str()))
+        .max_by_key(|(pid, _)| descendants(*pid))
+        .map(|(pid, _)| pid.as_u32())
 }
 
 pub fn start(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<String, String> {
-    let discord = discord_pid();
-    let source = match discord {
-        Some(_) => "todo o som do computador menos o Discord".to_owned(),
-        None => "todo o som do computador".to_owned(),
-    };
     std::thread::Builder::new()
         .name("telinha-wasapi".into())
         .spawn(move || {
-            if let Err(e) = run(tx, stop, discord) {
+            if let Err(e) = run(tx, stop) {
                 tracing::error!("WASAPI audio: {e}");
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok(source)
+    Ok("todo o som do computador menos o Discord".to_owned())
 }
 
-fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, exclude: Option<u32>) -> Result<(), String> {
-    initialize_mta().ok().map_err(|e| format!("COM: {e:?}"))?;
-    let format = WaveFormat::new(32, 32, &SampleType::Float, RATE as usize, CHANNELS, None);
+/// How often Discord is looked up again: opened, restarted or updated after
+/// the stream started, it must still be left out.
+const RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
 
+fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<(), String> {
+    initialize_mta().ok().map_err(|e| format!("COM: {e:?}"))?;
+    while !stop.load(Ordering::Relaxed) {
+        let discord = discord_pid();
+        capture(&tx, &stop, discord)?;
+    }
+    Ok(())
+}
+
+/// Captures until the stream stops or Discord's process changes.
+fn capture(tx: &SyncSender<Vec<f32>>, stop: &AtomicBool, discord: Option<u32>) -> Result<(), String> {
+    let format = WaveFormat::new(32, 32, &SampleType::Float, RATE as usize, CHANNELS, None);
     // Whether our own chimes reach the capture (then they are silenced).
-    let mut hears_us = exclude.is_some();
-    let pid = exclude.unwrap_or_else(std::process::id);
+    let mut hears_us = discord.is_some();
+    let pid = discord.unwrap_or_else(std::process::id);
     let mut client = match AudioClient::new_application_loopback_client(pid, false) {
-        Ok(c) => c,
+        Ok(c) => {
+            match discord {
+                Some(d) => tracing::info!(discord_pid = d, "audio: everything except Discord's process tree"),
+                None => tracing::info!("audio: everything (Discord is not open)"),
+            }
+            c
+        }
         Err(e) => {
-            tracing::warn!("no process exclusion (old Windows?): {e}");
+            tracing::warn!("no process exclusion (old Windows?), Discord will be heard: {e}");
             hears_us = true;
             default_loopback()?
         }
@@ -65,6 +105,7 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, exclude: Option<u32>) ->
     client.start_stream().map_err(|e| e.to_string())?;
 
     let mut queue = std::collections::VecDeque::new();
+    let mut checked = std::time::Instant::now();
     while !stop.load(Ordering::Relaxed) {
         capture.read_from_device_to_deque(&mut queue).map_err(|e| e.to_string())?;
         if !queue.is_empty() {
@@ -74,6 +115,14 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, exclude: Option<u32>) ->
                 samples.fill(0.0);
             }
             let _ = tx.try_send(samples);
+        }
+        if checked.elapsed() >= RECHECK {
+            checked = std::time::Instant::now();
+            let now = discord_pid();
+            if now != discord {
+                tracing::info!(before = ?discord, now = ?now, "Discord changed; restarting the audio capture");
+                break;
+            }
         }
         if event.wait_for_event(200).is_err() {
             // With no audio playing the event does not fire; keep waiting.
