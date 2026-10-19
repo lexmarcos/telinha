@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "android-properties"
-version = "0.2.3"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
@@ -6038,7 +6038,7 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "telinha"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "arboard",
  "ashpd",
