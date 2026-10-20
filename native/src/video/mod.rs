@@ -284,7 +284,7 @@ fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Set
 
 /// First GPU render node (the same one VAAPI opens by default).
 #[cfg(target_os = "linux")]
-fn render_node() -> String {
+pub(crate) fn render_node() -> String {
     (128..136).map(|n| format!("/dev/dri/renderD{n}")).find(|p| std::path::Path::new(p).exists()).unwrap_or_else(|| "/dev/dri/renderD128".into())
 }
 

@@ -51,6 +51,35 @@ pub trait CpuSource: Send {
     fn next(&mut self, timeout: Duration) -> Option<CpuFrame>;
 }
 
+/// Frame buffers in memory, reused: a 4K frame is 33 MB, and a fresh one
+/// every frame meant the kernel mapping and zeroing ~8000 pages each time
+/// (and unmapping them when FFmpeg let go).
+static POOL: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+const POOL_SIZE: usize = 4;
+
+/// An empty buffer with room for `len` bytes, from the pool when it has one.
+pub fn buffer(len: usize) -> Vec<u8> {
+    let reused = POOL.lock().unwrap().pop();
+    match reused {
+        Some(mut v) if v.capacity() >= len && v.capacity() <= len * 2 => {
+            v.clear();
+            v
+        }
+        _ => Vec::with_capacity(len),
+    }
+}
+
+/// Gives a buffer back for [`buffer`] to hand out again.
+pub fn recycle(v: Vec<u8>) {
+    if v.capacity() == 0 {
+        return;
+    }
+    let mut pool = POOL.lock().unwrap();
+    if pool.len() < POOL_SIZE {
+        pool.push(v);
+    }
+}
+
 /// Single-slot mailbox: keeps the newest frame. If the encoder falls behind,
 /// old frames are dropped instead of queueing up (Sunshine's
 /// "drop before encode").
@@ -63,11 +92,16 @@ pub struct Mailbox {
 
 impl Mailbox {
     pub fn put(&self, f: CpuFrame) {
-        let mut slot = self.slot.lock().unwrap();
-        if slot.replace(f).is_some() {
+        let old = self.slot.lock().unwrap().replace(f);
+        self.ready.notify_one();
+        // The frame it replaced is freed (or its buffer recycled) outside the
+        // lock, so the video thread never waits on that.
+        if old.is_some() {
             self.dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        self.ready.notify_one();
+        if let Some(CpuFrame { data: Pixels::Cpu(buf), .. }) = old {
+            recycle(buf);
+        }
     }
 
     pub fn take(&self, timeout: Duration) -> Option<CpuFrame> {

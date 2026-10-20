@@ -199,7 +199,9 @@ fn run_pipewire(fd: OwnedFd, node: u32, fps: u32, mailbox: Arc<Mailbox>, stop: A
             } else {
                 let Some(bytes) = d.data() else { return };
                 let Some(src) = bytes.get(offset..offset + size) else { return };
-                Pixels::Cpu(src.to_vec())
+                let mut buf = crate::video::source::buffer(size);
+                buf.extend_from_slice(src);
+                Pixels::Cpu(buf)
             };
             mailbox.put(CpuFrame { data, width: fmt.width, height: fmt.height, stride: stride as u32, pixel, captured: Instant::now() });
         })
@@ -208,7 +210,7 @@ fn run_pipewire(fd: OwnedFd, node: u32, fps: u32, mailbox: Arc<Mailbox>, stop: A
 
     // First the format with a modifier (DMA-BUF); then the same without (memory).
     // TELINHA_SEM_DMABUF=1 forces memory.
-    let with_gpu = std::env::var_os("TELINHA_SEM_DMABUF").is_none();
+    let with_gpu = std::env::var_os("TELINHA_SEM_DMABUF").is_none() && !nvidia();
     let mut pods: Vec<Vec<u8>> = Vec::new();
     if with_gpu {
         let mut obj = video_format(fps);
@@ -238,6 +240,24 @@ fn run_pipewire(fd: OwnedFd, node: u32, fps: u32, mailbox: Arc<Mailbox>, stop: A
     timer.update_timer(Some(Duration::from_millis(100)), Some(Duration::from_millis(100))).into_result().map_err(|e| e.to_string())?;
     mainloop.run();
     Ok(())
+}
+
+/// Whether the GPU that VAAPI would use is NVIDIA's. Its proprietary driver
+/// has no VAAPI encoder, so a DMA-BUF frame only went back to memory
+/// (hwdownload: reading GPU memory through a mapping, slow, and failing on
+/// some driver versions) for NVENC to upload it again. Asking for memory from
+/// the start skips that round trip: NVENC takes BGRx straight from it.
+/// (Importing the DMA-BUF into CUDA through EGL would skip the copy as well;
+/// not done yet.)
+fn nvidia() -> bool {
+    let node = crate::video::render_node();
+    let name = std::path::Path::new(&node).file_name().and_then(|n| n.to_str()).unwrap_or("renderD128").to_owned();
+    let vendor = std::fs::read_to_string(format!("/sys/class/drm/{name}/device/vendor")).unwrap_or_default();
+    let nvidia = vendor.trim().eq_ignore_ascii_case("0x10de");
+    if nvidia {
+        tracing::info!(node, "NVIDIA GPU: capturing to memory for NVENC");
+    }
+    nvidia
 }
 
 fn serialize(v: &spa::pod::Value) -> Result<Vec<u8>, String> {

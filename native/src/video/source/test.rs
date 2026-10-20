@@ -30,7 +30,8 @@ impl TestPattern {
             px.swap(0, 2); // RGBA → BGRA
         }
         Ok(Self::spawn(fps, move |n| {
-            let mut data = base.clone();
+            let mut data = super::buffer(base.len());
+            data.extend_from_slice(&base);
             let stride = w * 4;
             // "Cursor" moving slowly, like someone moving the mouse.
             let (cx, cy) = (200 + (n * 4) % w.saturating_sub(400).max(1), h / 3);
@@ -119,7 +120,8 @@ pub fn stamp_bits(ms: u64, counter: u8) -> [bool; 64] {
 
 fn draw(w: u32, h: u32, n: u32) -> CpuFrame {
     let stride = w * 4;
-    let mut data = vec![0u8; (stride * h) as usize];
+    let mut data = super::buffer((stride * h) as usize);
+    data.resize((stride * h) as usize, 0);
     let t = n as f32;
     for y in 0..h {
         let row = &mut data[(y * stride) as usize..((y + 1) * stride) as usize];

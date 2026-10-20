@@ -120,8 +120,9 @@ impl Frame {
 
     /// Wraps a CPU image (4 bytes per pixel) without copying: FFmpeg takes ownership of the Vec.
     pub fn from_cpu(data: Vec<u8>, width: u32, height: u32, stride: u32, format: ff::AVPixelFormat, pts: i64) -> Self {
+        // FFmpeg is done with the pixels: the buffer goes back to the pool.
         unsafe extern "C" fn free_vec(opaque: *mut std::ffi::c_void, _: *mut u8) {
-            drop(unsafe { Box::from_raw(opaque as *mut Vec<u8>) });
+            super::source::recycle(*unsafe { Box::from_raw(opaque as *mut Vec<u8>) });
         }
         let frame = Self::new();
         let boxed = Box::new(data);
