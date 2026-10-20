@@ -91,15 +91,16 @@ pub enum Source {
 }
 
 /// Starts streaming. Frames come out on `out`; `Control` changes quality,
-/// requests keyframes and stops.
-pub fn start(source: Source, settings: Settings, out: broadcast::Sender<Arc<EncodedFrame>>) -> Arc<Control> {
+/// requests keyframes and stops. The bitrate starts at the ideal for the
+/// real screen size (`Quality::bitrate`), known once capture starts.
+pub fn start(source: Source, quality: Quality, out: broadcast::Sender<Arc<EncodedFrame>>) -> Arc<Control> {
     ffi::silence_logs();
     let control = Arc::new(Control::default());
     let c = control.clone();
     std::thread::Builder::new()
         .name("telinha-video".into())
         .spawn(move || {
-            if let Err(e) = run(source, settings, &c, &out) {
+            if let Err(e) = run(source, quality, &c, &out) {
                 tracing::error!("video stopped: {e}");
                 c.stats.lock().unwrap().error = Some(e.0);
             }
@@ -196,11 +197,50 @@ fn render_node() -> String {
     (128..136).map(|n| format!("/dev/dri/renderD{n}")).find(|p| std::path::Path::new(p).exists()).unwrap_or_else(|| "/dev/dri/renderD128".into())
 }
 
+/// Rebuilds everything for `next`. The old pipeline goes first (NVENC
+/// allows only a few sessions per GPU, and with the old one open the build
+/// could settle for a worse encoder); if `next` fails, back to `current`.
+fn rebuild(pipe: Pipeline, kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, current: Settings, next: Settings) -> ffi::Result<(Pipeline, Settings)> {
+    drop(pipe);
+    match build(kind, native, pixel, &next, 0) {
+        Ok(p) => Ok((p, next)),
+        Err(e) => {
+            tracing::warn!("new quality failed ({e}); keeping the previous one");
+            Ok((build(kind, native, pixel, &current, 0)?, current))
+        }
+    }
+}
+
+/// Changes the encoder's bitrate and returns the one in effect. NVENC takes
+/// it on the open session (FFmpeg's nvenc reconfigures at the next frame, with
+/// an IDR); the others are closed and opened again, the old one first. If
+/// the new one does not open, the old bitrate comes back.
+fn set_bitrate(pipe: &mut Pipeline, native: (u32, u32), s: &Settings, bitrate: u32) -> ffi::Result<u32> {
+    let cand = &encoders::candidates()[pipe.candidate];
+    if cand.encoder == "h264_nvenc" {
+        pipe.encoder.set_bitrate(bitrate);
+        return Ok(bitrate);
+    }
+    let ctx = Ctx { native, out: pipe.out, fps: s.quality.fps };
+    pipe.encoder.close();
+    match open_encoder(cand, &pipe.graph, &ctx, bitrate) {
+        Ok(e) => {
+            pipe.encoder = e;
+            Ok(bitrate)
+        }
+        Err(e) => {
+            tracing::warn!(bitrate, "could not change the bitrate ({e}); keeping {}", s.bitrate);
+            pipe.encoder = open_encoder(cand, &pipe.graph, &ctx, s.bitrate)?;
+            Ok(s.bitrate)
+        }
+    }
+}
+
 fn graph_out(g: &Graph) -> (u32, u32) {
     g.out_size()
 }
 
-fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcast::Sender<Arc<EncodedFrame>>) -> ffi::Result<()> {
+fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sender<Arc<EncodedFrame>>) -> ffi::Result<()> {
     let (kind, mut cpu) = match source {
         Source::Cpu(s) => (SourceKind::Cpu, Some(s)),
         #[cfg(target_os = "windows")]
@@ -220,10 +260,12 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
                 break n;
             }
         },
-        None => (kind, desktop_size(settings.quality.fps)?, ff::AVPixelFormat::AV_PIX_FMT_BGRA),
+        None => (kind, desktop_size(quality.fps)?, ff::AVPixelFormat::AV_PIX_FMT_BGRA),
     };
     control.stats.lock().unwrap().native = Some(native);
 
+    // Sized for the real screen from the start: no encoder reopen a second in.
+    let mut settings = Settings { quality, bitrate: quality.bitrate(native) };
     let mut pipe = build(kind, native, pixel, &settings, 0)?;
     let mut headers = h264::Headers::default();
     let mut captured_at: HashMap<i64, Instant> = HashMap::new();
@@ -241,20 +283,19 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
         if control.stop.load(Ordering::Relaxed) {
             return Ok(());
         }
-        // Quality change: only the encoder if just the bitrate changed; everything if the size changed.
+        // Quality change: only the bitrate if that is all; everything if the size changed.
+        // A failure keeps the stream going with what it had.
         if let Some(next) = control.pending.lock().unwrap().take() {
             if next != settings {
                 let rebuild_all = next.quality.output_size(native) != settings.quality.output_size(native) || next.quality.fps != settings.quality.fps;
-                settings = next;
-                pacer = Pacer::new(settings.quality.fps);
                 if rebuild_all {
-                    pipe = build(kind, native, pixel, &settings, 0)?;
+                    (pipe, settings) = rebuild(pipe, kind, native, pixel, settings, next)?;
                     last_input = None;
                 } else {
-                    let cand = &encoders::candidates()[pipe.candidate];
-                    let ctx = Ctx { native, out: pipe.out, fps: settings.quality.fps };
-                    pipe.encoder = open_encoder(cand, &pipe.graph, &ctx, settings.bitrate)?;
+                    settings.bitrate = set_bitrate(&mut pipe, native, &settings, next.bitrate)?;
+                    settings.quality = next.quality;
                 }
+                pacer = Pacer::new(settings.quality.fps);
                 control.request_key();
                 publish_encoder(control, &pipe, native);
             }
@@ -299,7 +340,11 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
                         tracing::info!(w = f.width, h = f.height, gpu = f.data.on_gpu(), "capture changed; rebuilding video");
                         (kind, native, pixel) = shape;
                         control.stats.lock().unwrap().native = Some(native);
-                        pipe = build(kind, native, pixel, &settings, 0)?;
+                        // The ideal bitrate for the new size (the session follows).
+                        let next = Settings { quality: settings.quality, bitrate: settings.quality.bitrate(native) };
+                        drop(pipe);
+                        pipe = build(kind, native, pixel, &next, 0)?;
+                        settings = next;
                         last_input = None;
                         control.request_key();
                         publish_encoder(control, &pipe, native);

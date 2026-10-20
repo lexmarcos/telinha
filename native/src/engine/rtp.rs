@@ -256,8 +256,20 @@ pub fn spawn_audio(track: Arc<TrackLocalStaticSample>, mut packets: broadcast::R
 pub struct Counters {
     pub frames: AtomicU64,
     pub bytes: AtomicU64,
-    /// Fraction lost in the last receiver report (0–255, as in RTCP).
-    pub fraction_lost: AtomicU32,
+    /// Worst fraction lost (0–255, as in RTCP) among the receiver reports
+    /// since the last read, plus one; 0 = no report since then.
+    fraction_lost: AtomicU32,
+}
+
+impl Counters {
+    fn report(&self, fraction_lost: u8) {
+        self.fraction_lost.fetch_max(u32::from(fraction_lost) + 1, Ordering::Relaxed);
+    }
+
+    /// The worst loss reported since the last call, if any report came.
+    pub fn take_fraction_lost(&self) -> Option<u32> {
+        self.fraction_lost.swap(0, Ordering::Relaxed).checked_sub(1)
+    }
 }
 
 pub struct Sender {
@@ -293,7 +305,7 @@ pub fn spawn(
                     k.request(&ctl, Duration::from_millis(300));
                 } else if let Some(rr) = a.downcast_ref::<ReceiverReport>() {
                     if let Some(r) = rr.reports.first() {
-                        c.fraction_lost.store(r.fraction_lost as u32, Ordering::Relaxed);
+                        c.report(r.fraction_lost);
                     }
                 }
             }

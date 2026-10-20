@@ -74,8 +74,8 @@ struct Conn {
 #[derive(Default)]
 struct Health {
     last: Option<(u64, u64, u64)>,
+    /// Consecutive bad reports.
     bad: u32,
-    good: u32,
 }
 
 struct Live {
@@ -92,6 +92,55 @@ struct Live {
     /// Rates for the log every 10 s: when, and how many captured/encoded frames then.
     log_at: (Instant, u64, u64),
     capture_fps: f32,
+    /// Screen size the ideal bitrate was last computed for.
+    screen: Option<(u32, u32)>,
+    ladder: Ladder,
+}
+
+/// Network adaptation of the shared bitrate: few, large, well spaced steps.
+/// Every change costs a keyframe (and, on most encoders, reopening it), so
+/// small frequent nudges did more harm than good.
+struct Ladder {
+    /// Last change (or when the stream started, minus the gap: the first
+    /// step down need not wait).
+    changed: Instant,
+    /// Last bad report from anyone.
+    trouble: Instant,
+}
+
+/// Each step down takes 25% off; each step up gives it back.
+const STEP: f64 = 0.75;
+/// Minimum time between two changes.
+const MIN_GAP: Duration = Duration::from_secs(5);
+/// Up only after this long without a bad report from anyone.
+const CALM: Duration = Duration::from_secs(15);
+
+impl Ladder {
+    fn new(now: Instant) -> Self {
+        Self { changed: now.checked_sub(MIN_GAP).unwrap_or(now), trouble: now }
+    }
+
+    /// The next bitrate given one connection's verdict (`bad_streak`
+    /// consecutive bad reports from it).
+    fn next(&mut self, now: Instant, current: u32, ideal: u32, floor: u32, bad_streak: u32) -> u32 {
+        if bad_streak > 0 {
+            self.trouble = now;
+        }
+        if now < self.changed + MIN_GAP {
+            return current;
+        }
+        let next = if bad_streak >= 2 && current > floor {
+            ((current as f64 * STEP) as u32).max(floor)
+        } else if bad_streak == 0 && current < ideal && now >= self.trouble + CALM {
+            ((current as f64 / STEP) as u32).min(ideal)
+        } else {
+            current
+        };
+        if next != current {
+            self.changed = now;
+        }
+        next
+    }
 }
 
 enum Role {
@@ -820,10 +869,11 @@ impl Session {
             None
         };
         let (frames, _) = broadcast::channel(8);
-        // The real bitrate depends on the screen size, which capture reports on the
-        // first frame; start with the 1080p one and correct it within the first second.
+        // The video thread starts at the ideal for the real screen size, which
+        // capture reports on the first frame; until then (for the data channel
+        // budget), the 1080p one.
         let bitrate = self.quality.bitrate((1920, 1080));
-        let control = video::start(source, Settings { quality: self.quality, bitrate }, frames.clone());
+        let control = video::start(source, self.quality, frames.clone());
         self.live = Some(Live {
             audio,
             control,
@@ -836,6 +886,8 @@ impl Session {
             log_at: (Instant::now(), 0, 0),
             last_tick: Instant::now(),
             capture_fps: 0.0,
+            screen: None,
+            ladder: Ladder::new(Instant::now()),
         });
         self.set_sharing(true).await;
         self.sync_viewers().await;
@@ -942,15 +994,9 @@ impl Session {
     /// Adjusts the bitrate (shared by everyone) based on one connection's health.
     /// Returns `true` if the connection is still bad even at the floor.
     fn adapt(&mut self, conn: &str, bad: bool) -> bool {
-        let Some(live) = &self.live else { return false };
+        let Some(live) = &mut self.live else { return false };
         let Some(c) = self.conns.get_mut(conn) else { return false };
-        if bad {
-            c.health.bad += 1;
-            c.health.good = 0;
-        } else {
-            c.health.good += 1;
-            c.health.bad = 0;
-        }
+        c.health.bad = if bad { c.health.bad + 1 } else { 0 };
         let ideal = live.quality.bitrate(live.control.stats().native.unwrap_or((1920, 1080)));
         let current = live.bitrate.load(Ordering::Relaxed);
         // Sharpness mode lowers the bitrate less (prefers dropping frames).
@@ -958,20 +1004,11 @@ impl Session {
             Priority::Fluidez => 1_500_000,
             Priority::Nitidez => (ideal / 2).max(1_500_000),
         };
-        let mut give_up = false;
-        let next = if c.health.bad >= 2 {
-            give_up = current <= floor && c.health.bad >= 4;
-            if current > floor {
-                c.health.bad = 0;
-            }
-            (current * 4 / 5).max(floor)
-        } else if c.health.good >= 10 && current < ideal {
-            c.health.good = 0;
-            (current * 11 / 10).min(ideal)
-        } else {
-            current
-        };
+        let give_up = current <= floor && c.health.bad >= 4;
+        let next = live.ladder.next(Instant::now(), current, ideal, floor, c.health.bad);
         if next != current {
+            // A fresh streak is needed for the next step down.
+            c.health.bad = 0;
             tracing::info!(from = current, to = next, "adjusting bitrate");
             live.bitrate.store(next, Ordering::Relaxed);
             live.control.reconfigure(Settings { quality: live.quality, bitrate: next });
@@ -1013,14 +1050,12 @@ impl Session {
             let _ = self.ui.send(Event::Failed(msg)).await;
             return;
         }
-        // Correct the ideal bitrate once the real screen size is known.
-        if let Some(native) = st.native {
-            let ideal = live.quality.bitrate(native);
-            if live.last_captured == 0 && live.bitrate.load(Ordering::Relaxed) != ideal {
-                live.bitrate.store(ideal, Ordering::Relaxed);
-                live.control.reconfigure(Settings { quality: live.quality, bitrate: ideal });
-                let _ = self.ui.send(Event::Screen { width: native.0, height: native.1 }).await;
-            }
+        // The video thread starts (and restarts, when the screen changes size)
+        // at the ideal bitrate for the real size: follow it.
+        if let Some(native) = st.native.filter(|n| live.screen != Some(*n)) {
+            live.screen = Some(native);
+            live.bitrate.store(live.quality.bitrate(native), Ordering::Relaxed);
+            let _ = self.ui.send(Event::Screen { width: native.0, height: native.1 }).await;
         }
         let dt = live.last_tick.elapsed().as_secs_f32().max(0.001);
         live.capture_fps = (st.captured - live.last_captured) as f32 / dt;
@@ -1042,11 +1077,15 @@ impl Session {
         if let Some(info) = st.encoder.clone() {
             let _ = self.ui.send(Event::Encoder(info)).await;
         }
-        // RTP: loss from receiver reports (more than ~5% is bad).
+        // RTP: loss from receiver reports (more than ~5% is bad), each report
+        // counted once (none since the last tick: nothing to judge).
         let media: Vec<(String, bool)> = self
             .conns
             .iter()
-            .filter_map(|(k, c)| c.rtp_sender.as_ref().map(|s| (k.clone(), s.counters.fraction_lost.load(Ordering::Relaxed) > 13)))
+            .filter_map(|(k, c)| {
+                let lost = c.rtp_sender.as_ref()?.counters.take_fraction_lost()?;
+                Some((k.clone(), lost > 13))
+            })
             .collect();
         for (conn, bad) in media {
             self.adapt(&conn, bad);
@@ -1070,5 +1109,34 @@ impl Session {
                 peer::send_json(ch, &msg).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escada_de_taxa() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        let (ideal, floor) = (40_000_000, 1_500_000);
+        let mut l = Ladder::new(t0);
+        // One bad report is not enough; two in a row step down 25% right away.
+        assert_eq!(l.next(s(0), ideal, ideal, floor, 1), ideal);
+        assert_eq!(l.next(s(1), ideal, ideal, floor, 2), 30_000_000);
+        // Still bad, but the next step waits 5 s.
+        assert_eq!(l.next(s(3), 30_000_000, ideal, floor, 2), 30_000_000);
+        assert_eq!(l.next(s(6), 30_000_000, ideal, floor, 3), 22_500_000);
+        // Good reports: up only after 15 s without trouble from anyone.
+        assert_eq!(l.next(s(12), 22_500_000, ideal, floor, 0), 22_500_000);
+        assert_eq!(l.next(s(20), 22_500_000, ideal, floor, 0), 22_500_000);
+        assert_eq!(l.next(s(21), 22_500_000, ideal, floor, 0), 30_000_000);
+        assert_eq!(l.next(s(24), 30_000_000, ideal, floor, 0), 30_000_000);
+        assert_eq!(l.next(s(26), 30_000_000, ideal, floor, 0), ideal);
+        // Never past the ideal nor below the floor.
+        assert_eq!(l.next(s(60), ideal, ideal, floor, 0), ideal);
+        assert_eq!(l.next(s(70), 1_800_000, ideal, floor, 2), floor);
+        assert_eq!(l.next(s(80), floor, ideal, floor, 5), floor);
     }
 }

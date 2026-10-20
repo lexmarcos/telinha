@@ -147,8 +147,7 @@ fn video_test(secs: u64) {
             }
         }
     };
-    let bitrate = quality.bitrate((1920, 1080));
-    let control = video::start(source, video::Settings { quality, bitrate }, tx);
+    let control = video::start(source, quality, tx);
     let mut file = std::fs::File::create("teste.h264").expect("file");
     let start = std::time::Instant::now();
     let (mut frames, mut keys, mut bytes) = (0u64, 0u64, 0u64);

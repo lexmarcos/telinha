@@ -442,6 +442,23 @@ impl Encoder {
         }
     }
 
+    /// New target on the open encoder: only for encoders that read it on
+    /// every frame (FFmpeg's nvenc does, when the GPU supports it).
+    pub fn set_bitrate(&mut self, bitrate: u32) {
+        unsafe {
+            let c = &mut *self.ctx;
+            c.bit_rate = bitrate as i64;
+            c.rc_max_rate = bitrate as i64;
+            c.rc_buffer_size = (bitrate / 4) as i32;
+        }
+    }
+
+    /// Frees the encoder now (before opening its replacement); the value
+    /// must be replaced before encoding again.
+    pub fn close(&mut self) {
+        unsafe { ff::avcodec_free_context(&mut self.ctx) };
+    }
+
     pub fn send(&mut self, frame: &mut Frame) -> Result<()> {
         unsafe { check(ff::avcodec_send_frame(self.ctx, frame.0), "codificar").map(|_| ()) }
     }
