@@ -11,6 +11,9 @@
 // Safari/Firefox path of the minimum delay mode) instead of feeding a video
 // track; the probe then reads each frame as it is painted. Use with --turbo.
 //
+// --chrome-remetente <exe> opens the sender page in a second Chrome (--porta <n> fixes the
+// static server's port; with --server host:port the sender needs to reach both).
+//
 // --sinal-local runs sinal.mjs (a PeerJS-compatible signaling server) on a free port
 // and uses it as --server, so --nativo works without the real server. --query adds
 // parameters to the viewer's URL (render=rtp keeps it off the data channel video).
@@ -80,6 +83,11 @@ for (let i = 0; i < argv.length; i++) {
   // flag and the fake mic, to test that path; the decoder name then does not show in the
   // stats, which only matters for the plain WebRTC path.
   else if (a === "--mdns") opt.mdns = true;
+  // The sender page in a second Chrome started from this executable (a wrapper that enters
+  // another network namespace, to put the two on an emulated LAN), and a fixed port for the
+  // static server so that namespace can forward it.
+  else if (a === "--chrome-remetente") opt.senderChrome = argv[++i];
+  else if (a === "--porta") opt.port = Number(argv[++i]);
   else if (a === "--retries") opt.retries = Number(argv[++i]);
   else if (a === "--foto") opt.photo = argv[++i]; // saves the last received frame (PNG, full size)
   else { console.error(`unknown arg ${a}`); process.exit(2); }
@@ -101,7 +109,7 @@ const MIME = {
   ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".ico": "image/x-icon", ".woff2": "font/woff2",
   ".webmanifest": "application/manifest+json", ".txt": "text/plain; charset=utf-8",
 };
-function serve(root) {
+function serve(root, port = 0) {
   const server = http.createServer((req, res) => {
     let p = decodeURIComponent(new URL(req.url, "http://x").pathname);
     if (p.endsWith("/")) p += "index.html";
@@ -113,7 +121,7 @@ function serve(root) {
       res.end(buf);
     });
   });
-  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
+  return new Promise((resolve) => server.listen(port, "127.0.0.1", () => resolve(server)));
 }
 
 /* ---------------- injected: RTCPeerConnection wrapper (both pages) ---------------- */
@@ -469,12 +477,13 @@ if (opt.localSignal) {
   signaling = await startSignaling();
   opt.server = `localhost:${signaling.port}`;
 }
-const server = await serve(opt.app);
+const server = await serve(opt.app, opt.port);
 const URL_ = `http://localhost:${server.address().port}/${opt.server ? `?servidor=${encodeURIComponent(opt.server)}` : ""}`;
 log(`serving ${opt.app} at ${URL_} relay=${opt.relay}`);
 
-const browser = await puppeteer.launch({
+const launch = (executablePath) => puppeteer.launch({
   headless: !opt.headed,
+  ...(executablePath ? { executablePath, pipe: true } : {}),
   args: [
     "--autoplay-policy=no-user-gesture-required",
     ...(opt.mdns ? [] : ["--use-fake-ui-for-media-stream"]),
@@ -484,6 +493,8 @@ const browser = await puppeteer.launch({
     "--disable-backgrounding-occluded-windows",
   ],
 });
+const browser = await launch();
+const senderBrowser = opt.senderChrome ? await launch(opt.senderChrome) : browser;
 
 let exitCode = 0;
 const hardTimeout = setTimeout(() => { log("hard timeout"); exitCode = 1; cleanup().then(() => process.exit(1)); }, (opt.seconds + opt.warmup + 90 * opt.retries + 60) * 1000);
@@ -491,6 +502,7 @@ const hardTimeout = setTimeout(() => { log("hard timeout"); exitCode = 1; cleanu
 async function cleanup() {
   try { nativeProc?.kill("SIGINT"); } catch {}
   try { await browser.close(); } catch {}
+  try { if (senderBrowser !== browser) await senderBrowser.close(); } catch {}
   try { server.close(); } catch {}
   try { signaling?.close(); } catch {}
 }
@@ -502,7 +514,7 @@ let attemptState = null;
 const FALLBACK_RE = /servidor próprio indispon|PeerJS público|fallback/i;
 
 async function mkPage(name, { sender, url = URL_ }) {
-  const ctx = await browser.createBrowserContext();
+  const ctx = await (sender ? senderBrowser : browser).createBrowserContext();
   attemptState.contexts.push(ctx);
   const st = attemptState;
   const p = await ctx.newPage();
