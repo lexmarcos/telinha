@@ -137,8 +137,16 @@ ui.tv.addEventListener("pointerdown", (e) => {
 ui.code.addEventListener("input", () => {
   ui.code.value = ui.code.value.replace(/\D/g, "").slice(0, 4);
   syncLobby();
+  // The number pad has no "go" key: once the number is complete, carry on to the name.
+  if (ui.code.value.length === 4 && !ui.name.value.trim() && ui.code === document.activeElement) ui.name.focus();
 });
 ui.name.addEventListener("input", syncLobby);
+// A phone keyboard slides up over the form: bring the field being typed in back into view.
+for (const el of [ui.code, ui.name]) {
+  el.addEventListener("focus", () => setTimeout(() => {
+    if (document.activeElement === el) el.scrollIntoView({ block: "center", behavior: reducedMotion.matches ? "auto" : "smooth" });
+  }, 350));
+}
 
 function syncLobby() {
   const full = ui.code.value.length === 4;

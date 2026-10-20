@@ -21,7 +21,14 @@
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
+html {
+  -webkit-text-size-adjust: 100%; text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
 body {
+  overscroll-behavior: none;
+  touch-action: manipulation; /* no double-tap zoom delay */
   margin: 0;
   font: 400 1rem/1.5 var(--font);
   color: var(--text);
@@ -66,10 +73,18 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 
 /* ---------- Entry ---------- */
 .lobby {
-  min-height: 100dvh; overflow-y: auto;
-  display: grid; justify-items: center; align-content: center; gap: 2rem;
-  padding: max(2rem, env(safe-area-inset-top)) 1rem max(2rem, env(safe-area-inset-bottom));
+  --gap: 2rem;
+  height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; align-items: center; gap: var(--gap);
+  padding:
+    max(1.5rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
+    max(1.5rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
 }
+/* The spacers centre the content when it fits and let it scroll from the top when it does not
+   (the negative margins cancel the flex gap next to them). */
+.lobby::before, .lobby::after { content: ""; flex: 1 0 0; }
+.lobby::before { margin-bottom: calc(var(--gap) * -1); }
+.lobby::after { margin-top: calc(var(--gap) * -1); }
 .lobby.leaving { opacity: 0; transition: opacity 260ms ease; pointer-events: none; }
 
 .brand { text-align: center; max-width: 32rem; }
@@ -155,7 +170,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   margin: 0; padding: 0.75rem 1rem; border-radius: var(--r-md);
   background: var(--tally-soft); color: #ffcfcb; font-size: 0.9375rem;
 }
-.footnote { margin: 0; max-width: 26rem; text-align: center; color: var(--muted); font-size: 0.8125rem; opacity: 0.8; }
+.footnote { margin: 0; max-width: 26rem; text-align: center; color: var(--muted); font-size: 0.875rem; }
 /* Only shows when this server publishes the desktop app (app.js checks). */
 .get-app {
   position: fixed; top: max(1rem, env(safe-area-inset-top)); right: 1rem;
@@ -168,6 +183,31 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .get-app svg { width: 1.05rem; height: 1.05rem; }
 .get-app:hover { color: var(--text); background: rgba(200, 212, 255, 0.08); }
 .get-app:active { transform: scale(0.96); transition-duration: 60ms; }
+
+/* Short screens: the entry gets tighter, and a phone on its side puts the TV next to the form. */
+@media (max-height: 700px) {
+  .lobby { --gap: 1.25rem; }
+  .tv { aspect-ratio: 16 / 9; }
+  .osd-digits { font-size: clamp(3.75rem, 17vw, 8.5rem); }
+}
+@media (orientation: landscape) and (max-height: 520px) {
+  .lobby {
+    --gap: 1rem;
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 22rem);
+    grid-template-areas: "tv brand" "tv controls" "tv foot";
+    column-gap: 2rem; row-gap: 0.75rem; justify-items: center;
+  }
+  .lobby::before, .lobby::after { display: none; }
+  .brand { grid-area: brand; align-self: end; }
+  .brand h1 { font-size: 1.75rem; }
+  .brand p { margin-top: 0.25rem; font-size: 0.9375rem; }
+  .tv { grid-area: tv; align-self: center; aspect-ratio: 4 / 3; gap: 0.5rem; }
+  .osd-digits { font-size: clamp(3.25rem, 17vh, 5.5rem); }
+  .tv-hint { font-size: 0.8125rem; }
+  .controls { grid-area: controls; align-self: center; gap: 0.75rem; }
+  .actions { grid-template-columns: 1fr 1fr; }
+  .footnote { grid-area: foot; align-self: start; font-size: 0.8125rem; }
+}
 
 /* ---------- Room ---------- */
 .room {
@@ -382,7 +422,8 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 
 /* Off air */
 .offair {
-  position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 1rem;
+  position: fixed; inset: 0; z-index: 10; display: grid; place-items: center;
+  padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
   background: rgba(5, 8, 22, 0.6);
   -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
   animation: fade 240ms ease both;
@@ -398,12 +439,13 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 
 /* Notices */
 .toasts {
-  position: fixed; top: 1rem; left: 50%; translate: -50% 0; z-index: 20;
+  position: fixed; top: max(1rem, calc(env(safe-area-inset-top) + 0.5rem)); left: 50%; translate: -50% 0; z-index: 20;
+  width: calc(100% - 2rem); max-width: 30rem;
   display: grid; gap: 0.5rem; justify-items: center; pointer-events: none;
 }
 .toast {
-  padding: 0.6rem 1.1rem; border-radius: 999px; font-size: 0.9375rem; font-weight: 600;
-  letter-spacing: -0.01em; white-space: nowrap;
+  max-width: 100%; padding: 0.65rem 1.1rem; border-radius: 1.4rem; font-size: 0.9375rem; font-weight: 600;
+  line-height: 1.3; letter-spacing: -0.01em; text-align: center; text-wrap: balance;
   background: var(--glass-strong);
   -webkit-backdrop-filter: blur(24px) saturate(170%); backdrop-filter: blur(24px) saturate(170%);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px var(--line), 0 12px 30px rgba(0,0,0,0.5);
@@ -422,6 +464,14 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   .dock-share span { display: none; }
   .dock-share { width: 3rem; padding: 0; }
   .actions { grid-template-columns: 1fr; }
+}
+
+/* ---------- Touch ---------- */
+@media (pointer: coarse) {
+  .icon-btn { width: 2.75rem; height: 2.75rem; }
+  .btn-small { min-height: 2.75rem; }
+  .seg label { height: 2.75rem; }
+  .field input { height: 3.25rem; }
 }
 
 /* ---------- Accessibility ---------- */
