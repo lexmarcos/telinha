@@ -411,6 +411,9 @@ impl Encoder {
             c.gop_size = (p.fps * 600) as i32;
             c.keyint_min = c.gop_size;
             c.max_b_frames = 0;
+            // One reference frame: a smaller DPB the decoder has to keep, and the
+            // SPS rewrite (h264.rs) then declares max_dec_frame_buffering = 1.
+            c.refs = 1;
             c.bit_rate = p.bitrate as i64;
             c.rc_max_rate = p.bitrate as i64;
             // Rate buffer of 1/4 second. Sunshine uses a single frame, good
