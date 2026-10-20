@@ -10,10 +10,20 @@
 // Packet (little endian):
 //   u8 0x54 | u8 flags (1 = keyframe, 2 = has config) | u16 index | u16 total
 //   u16 config size | u32 sequence | f64 timestamp (µs) | [config JSON] | data
+//
+// Parity (flags 4): index = total + group, data = u32 frame size | XOR of the
+// group's fragments, each zero-padded to the longest. Fragment i belongs to
+// group i % groups, groups = ceil(total / FEC_GROUP), so any one fragment lost
+// per group is rebuilt without waiting for a keyframe. Keyframes' parity
+// carries the config too (it may be the first fragment that is rebuilt).
+// Viewers from before parity drop it (index >= total); senders only add it for
+// viewers that announce `fec` in their reports, while they are losing data.
 
 const MAGIC = 0x54;
 const HEADER = 20;
 const FRAG = 16000;
+const FEC_GROUP = 5;          // fragments per parity packet (20% more data at most... 50% for 2)
+const FEC_HOLD_MS = 30000;    // parity stays on this long after the last loss a viewer reported
 const HOLD_MS = 150;        // minimum wait for a missing frame
 const HOLD_MAX_MS = 600;    // ... and maximum (long round trip, via relay)
 // Sender-side retransmission, no longer than the viewer waits (HOLD_MS, which
@@ -92,6 +102,43 @@ export function openVideoChannel(pc) {
   return ch;
 }
 
+/* ---------------- Packets ---------------- */
+
+export function fecGroups(count) { return count < 2 ? 0 : Math.ceil(count / FEC_GROUP); }
+
+// A frame's packets: its fragments and, with `parity`, the parity packets.
+export function packetize(seq, data, key, ts, config, parity = false) {
+  const count = Math.max(1, Math.ceil(data.byteLength / FRAG));
+  const out = [];
+  const pack = (flags, idx, extra, body) => {
+    const extraLen = extra?.byteLength ?? 0;
+    const buf = new Uint8Array(HEADER + extraLen + body.byteLength);
+    const dv = new DataView(buf.buffer);
+    dv.setUint8(0, MAGIC);
+    dv.setUint8(1, flags | (key ? 1 : 0) | (extra ? 2 : 0));
+    dv.setUint16(2, idx, true);
+    dv.setUint16(4, count, true);
+    dv.setUint16(6, extraLen, true);
+    dv.setUint32(8, seq, true);
+    dv.setFloat64(12, ts, true);
+    if (extra) buf.set(extra, HEADER);
+    buf.set(body, HEADER + extraLen);
+    return buf;
+  };
+  for (let i = 0; i < count; i++) out.push(pack(0, i, i === 0 && key ? config : null, data.subarray(i * FRAG, (i + 1) * FRAG)));
+  const groups = parity ? fecGroups(count) : 0;
+  for (let g = 0; g < groups; g++) {
+    const x = new Uint8Array(4 + Math.min(FRAG, data.byteLength));
+    new DataView(x.buffer).setUint32(0, data.byteLength, true);
+    for (let i = g; i < count; i += groups) {
+      const body = data.subarray(i * FRAG, (i + 1) * FRAG);
+      for (let k = 0; k < body.length; k++) x[4 + k] ^= body[k];
+    }
+    out.push(pack(4, count + g, key ? config : null, x));
+  }
+  return out;
+}
+
 /* ---------------- Streamer ---------------- */
 
 // Preference: H.264 on the GPU, then H.264 and VP8 in software.
@@ -165,10 +212,12 @@ export class TurboSender {
   // Viewers count what arrived. The channel silently drops anything past its
   // lifetime, so the queue here does not show congestion; the report does.
   // Three bad reports in a row: that person falls back to WebRTC.
-  report(id, { bytes, lost }) {
+  report(id, { bytes, lost, recovered, fec }) {
     const v = this.viewers.get(id);
     if (!v) return;
-    const now = { sent: v.bytes, bytes, lost };
+    // Parity while this viewer loses data (and can use it).
+    if (fec && v.last && (lost > v.last.lost || (recovered ?? 0) > (v.last.recovered ?? 0))) v.fecUntil = performance.now() + FEC_HOLD_MS;
+    const now = { sent: v.bytes, bytes, lost, recovered };
     const prev = v.last;
     v.last = now;
     if (!prev) return;
@@ -304,23 +353,8 @@ export class TurboSender {
       if (v.drops.length > 20) v.onCongested?.(); // queue full all the time: this person falls back to WebRTC
       return;
     }
-    const count = Math.max(1, Math.ceil(data.byteLength / FRAG));
-    const seq = v.seq++;
-    for (let i = 0; i < count; i++) {
-      const body = data.subarray(i * FRAG, (i + 1) * FRAG);
-      const extra = i === 0 && key ? config : null;
-      const extraLen = extra?.byteLength ?? 0;
-      const buf = new Uint8Array(HEADER + extraLen + body.byteLength);
-      const dv = new DataView(buf.buffer);
-      dv.setUint8(0, MAGIC);
-      dv.setUint8(1, (key ? 1 : 0) | (extra ? 2 : 0));
-      dv.setUint16(2, i, true);
-      dv.setUint16(4, count, true);
-      dv.setUint16(6, extraLen, true);
-      dv.setUint32(8, seq, true);
-      dv.setFloat64(12, ts, true);
-      if (extra) buf.set(extra, HEADER);
-      buf.set(body, HEADER + extraLen);
+    const parity = (v.fecUntil ?? 0) > performance.now();
+    for (const buf of packetize(v.seq++, data, key, ts, config, parity)) {
       try { ch.send(buf); } catch { v.needKey = true; return; }
     }
     if (key) { v.needKey = false; v.lastKey = { size: data.byteLength, at: performance.now() }; }
@@ -364,9 +398,10 @@ export class TurboReceiver {
     this.pending = new Map(); // timestamp -> time of decode()
     this.stats = {
       codec: null, width: 0, height: 0, frames: 0, bytes: 0, lost: 0, keyRequests: 0, assemblyMs: null, decodeMs: null,
-      decodeQueue: 0, decodeDrops: 0, renderDrops: 0,
+      decodeQueue: 0, decodeDrops: 0, renderDrops: 0, recovered: 0,
     };
-    this.reportTimer = report ? setInterval(() => report({ bytes: this.payload, lost: this.stats.lost }), REPORT_MS) : 0;
+    // fec: this viewer rebuilds fragments from parity packets.
+    this.reportTimer = report ? setInterval(() => report({ bytes: this.payload, lost: this.stats.lost, recovered: this.stats.recovered, fec: 1 }), REPORT_MS) : 0;
     this.payload = 0; // video data only, to compare with what was sent
     this.onUnsupported = onUnsupported;
     this.hold = HOLD_MS;
@@ -410,28 +445,60 @@ export class TurboReceiver {
     const seq = dv.getUint32(8, true), ts = dv.getFloat64(12, true);
     this.stats.bytes += buf.byteLength;
     if (this.expected !== null && seq < this.expected) return; // arrived too late
-    if (idx >= count) return;
+    const parity = !!(flags & 4);
+    if (parity ? idx - count >= fecGroups(count) : idx >= count) return;
 
     let f = this.frames.get(seq);
     if (!f) {
-      f = { parts: new Array(count), got: 0, size: 0, key: !!(flags & 1), ts, at: performance.now(), done: 0, config: null };
+      f = { parts: new Array(count), parity: new Array(fecGroups(count)), total: 0, got: 0, size: 0, key: !!(flags & 1), ts, at: performance.now(), done: 0, config: null };
       this.frames.set(seq, f);
     }
-    if (f.parts[idx]) return;
+    if (f.done || (parity ? f.parity[idx - count] : f.parts[idx])) return;
     let off = HEADER;
     if (flags & 2) {
-      try { f.config = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, HEADER, cfgLen))); } catch {}
+      if (!f.config) try { f.config = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, HEADER, cfgLen))); } catch {}
       off += cfgLen;
     }
-    f.parts[idx] = new Uint8Array(buf, off);
-    this.payload += buf.byteLength - off;
-    f.got++;
-    f.size += f.parts[idx].byteLength;
+    if (parity) {
+      if (buf.byteLength < off + 4) return;
+      f.total = new DataView(buf, off, 4).getUint32(0, true);
+      f.parity[idx - count] = new Uint8Array(buf, off + 4);
+    } else {
+      f.parts[idx] = new Uint8Array(buf, off);
+      this.payload += buf.byteLength - off;
+      f.got++;
+      f.size += f.parts[idx].byteLength;
+    }
+    if (f.got < f.parts.length) this.#recover(f);
     if (f.got === f.parts.length) {
       f.done = performance.now();
       this.stats.assemblyMs = ema(this.stats.assemblyMs, f.done - f.at);
     }
     this.#drain();
+  }
+
+  // Rebuilds the one fragment missing from a parity group, if that is all.
+  #recover(f) {
+    const groups = f.parity.length;
+    for (let g = 0; g < groups; g++) {
+      const p = f.parity[g];
+      if (!p) continue;
+      let missing = -1, n = 0;
+      for (let i = g; i < f.parts.length; i += groups) if (!f.parts[i]) { missing = i; n++; }
+      if (n !== 1) continue;
+      const len = missing === f.parts.length - 1 ? f.total - FRAG * (f.parts.length - 1) : FRAG;
+      if (len <= 0 || len > p.length) continue;
+      const x = p.slice(0, len);
+      for (let i = g; i < f.parts.length; i += groups) {
+        if (i === missing) continue;
+        const b = f.parts[i];
+        for (let k = 0; k < Math.min(len, b.length); k++) x[k] ^= b[k];
+      }
+      f.parts[missing] = x;
+      f.got++;
+      f.size += len;
+      this.stats.recovered++;
+    }
   }
 
   // Decode in order. A complete keyframe further ahead jumps the queue.

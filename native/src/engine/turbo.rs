@@ -3,6 +3,12 @@
 //!   u8 0x54 | u8 flags (1 = keyframe, 2 = has config) | u16 index | u16 total
 //!   u16 config length | u32 sequence | f64 timestamp (µs) | [config JSON] | data
 //!
+//! Parity (flags 4): index = total + group, data = u32 frame size | XOR of the
+//! group's fragments zero-padded to the longest (fragment i is in group
+//! i % groups, groups = ceil(total / FEC_GROUP)). Viewers from before it drop
+//! it (index >= total); it only goes to viewers that report `fec`, while they
+//! are losing data.
+//!
 //! Each viewer has its own sender, which receives the already encoded frames
 //! (encoded once, for everyone) and manages that connection's queue.
 
@@ -19,29 +25,49 @@ use crate::video::{Control, EncodedFrame};
 const MAGIC: u8 = 0x54;
 const HEADER: usize = 20;
 const FRAG: usize = 16000;
+const FEC_GROUP: usize = 5;
+/// Parity stays on this long after the last loss a viewer reported.
+pub const FEC_HOLD: Duration = Duration::from_secs(30);
+
+fn fec_groups(count: usize) -> usize {
+    if count < 2 { 0 } else { count.div_ceil(FEC_GROUP) }
+}
 
 /// Splits a frame into packets. The config (codec and size) goes in the first
 /// packet of keyframes, so viewers joining midway can configure the decoder.
-pub fn packets(seq: u32, frame: &EncodedFrame, ts_us: f64) -> Vec<BytesMut> {
+/// With `parity`, a parity packet per group of fragments follows.
+pub fn packets(seq: u32, frame: &EncodedFrame, ts_us: f64, parity: bool) -> Vec<BytesMut> {
     let config = frame.key.then(|| format!(r#"{{"codec":"{}","w":{},"h":{}}}"#, frame.codec, frame.width, frame.height));
-    let count = frame.data.len().div_ceil(FRAG).max(1);
-    (0..count)
-        .map(|i| {
-            let body = &frame.data[i * FRAG..((i + 1) * FRAG).min(frame.data.len())];
-            let extra = if i == 0 { config.as_deref().unwrap_or("").as_bytes() } else { &[] };
-            let mut b = BytesMut::with_capacity(HEADER + extra.len() + body.len());
-            b.put_u8(MAGIC);
-            b.put_u8(u8::from(frame.key) | if extra.is_empty() { 0 } else { 2 });
-            b.put_u16_le(i as u16);
-            b.put_u16_le(count as u16);
-            b.put_u16_le(extra.len() as u16);
-            b.put_u32_le(seq);
-            b.put_f64_le(ts_us);
-            b.put_slice(extra);
-            b.put_slice(body);
-            b
-        })
-        .collect()
+    let data = &frame.data;
+    let count = data.len().div_ceil(FRAG).max(1);
+    let pack = |flags: u8, idx: usize, extra: &[u8], body: &[u8]| {
+        let mut b = BytesMut::with_capacity(HEADER + extra.len() + body.len());
+        b.put_u8(MAGIC);
+        b.put_u8(flags | u8::from(frame.key) | if extra.is_empty() { 0 } else { 2 });
+        b.put_u16_le(idx as u16);
+        b.put_u16_le(count as u16);
+        b.put_u16_le(extra.len() as u16);
+        b.put_u32_le(seq);
+        b.put_f64_le(ts_us);
+        b.put_slice(extra);
+        b.put_slice(body);
+        b
+    };
+    let config = config.as_deref().unwrap_or("").as_bytes();
+    let fragment = |i: usize| &data[i * FRAG..((i + 1) * FRAG).min(data.len())];
+    let mut out: Vec<BytesMut> = (0..count).map(|i| pack(0, i, if i == 0 { config } else { &[] }, fragment(i))).collect();
+    let groups = if parity { fec_groups(count) } else { 0 };
+    for g in 0..groups {
+        let mut x = vec![0u8; 4 + FRAG.min(data.len())];
+        x[..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        for i in (g..count).step_by(groups) {
+            for (d, s) in x[4..].iter_mut().zip(fragment(i)) {
+                *d ^= s;
+            }
+        }
+        out.push(pack(4, count + g, config, &x));
+    }
+    out
 }
 
 /// A sender's counters (read by the session for reports and the panel).
@@ -108,6 +134,8 @@ pub struct Sender {
     pub counters: Arc<Counters>,
     /// This viewer's keyframe requests (its sender's and its own messages).
     pub keys: Arc<KeyLimiter>,
+    /// Parity packets go out until then (the viewer reported losses).
+    pub fec_until: Arc<std::sync::Mutex<Option<Instant>>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -151,7 +179,8 @@ pub fn spawn(
     let counters = Arc::new(Counters::default());
     let keys = Arc::new(KeyLimiter::new());
     let stop = Arc::new(AtomicBool::new(false));
-    let (c, s, k) = (counters.clone(), stop.clone(), keys.clone());
+    let fec_until = Arc::new(std::sync::Mutex::new(None::<Instant>));
+    let (c, s, k, fec) = (counters.clone(), stop.clone(), keys.clone(), fec_until.clone());
     tokio::spawn(async move {
         let keys = k;
         let mut seq: u32 = 0;
@@ -167,7 +196,7 @@ pub fn spawn(
             Some(gop) => {
                 for frame in &gop {
                     let ts = frame.captured.saturating_duration_since(epoch).as_micros() as f64;
-                    if !send_frame(&channel, seq, frame, ts).await {
+                    if !send_frame(&channel, seq, frame, ts, false).await {
                         return;
                     }
                     seq = seq.wrapping_add(1);
@@ -213,7 +242,8 @@ pub fn spawn(
                 continue;
             }
             let ts = frame.captured.saturating_duration_since(epoch).as_micros() as f64;
-            if !send_frame(&channel, seq, &frame, ts).await {
+            let parity = fec.lock().unwrap().is_some_and(|t| Instant::now() < t);
+            if !send_frame(&channel, seq, &frame, ts, parity).await {
                 break;
             }
             seq = seq.wrapping_add(1);
@@ -225,11 +255,11 @@ pub fn spawn(
             c.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
         }
     });
-    Sender { counters, keys, stop }
+    Sender { counters, keys, fec_until, stop }
 }
 
-async fn send_frame(channel: &Arc<dyn DataChannel>, seq: u32, frame: &EncodedFrame, ts: f64) -> bool {
-    for p in packets(seq, frame, ts) {
+async fn send_frame(channel: &Arc<dyn DataChannel>, seq: u32, frame: &EncodedFrame, ts: f64, parity: bool) -> bool {
+    for p in packets(seq, frame, ts, parity) {
         if channel.send(p).await.is_err() {
             return false;
         }
@@ -274,7 +304,7 @@ mod tests {
             captured: Instant::now(),
             index: 1,
         };
-        let ps = packets(9, &f, 1234.0);
+        let ps = packets(9, &f, 1234.0, false);
         assert_eq!(ps.len(), 3);
         let p0 = &ps[0];
         assert_eq!(p0[0], MAGIC);
@@ -287,6 +317,38 @@ mod tests {
         assert_eq!(ps[1][1], 1); // keyframe without config
         let total: usize = ps.iter().enumerate().map(|(i, p)| p.len() - HEADER - if i == 0 { cfg_len } else { 0 }).sum();
         assert_eq!(total, 40_000);
+    }
+
+    #[test]
+    fn paridade_refaz_um_pedaco_perdido() {
+        let data: Vec<u8> = (0..70_000u32).map(|i| (i * 7 + i / 300) as u8).collect();
+        let f = EncodedFrame { data: bytes::Bytes::from(data.clone()), key: true, codec: "avc1.640028".into(), width: 1920, height: 1080, captured: Instant::now(), index: 1 };
+        let ps = packets(3, &f, 0.0, true);
+        // 5 fragments, one parity group.
+        assert_eq!(ps.len(), 6);
+        let p = &ps[5];
+        assert_eq!(p[1], 1 | 2 | 4);
+        assert_eq!(u16::from_le_bytes([p[2], p[3]]), 5);
+        let cfg_len = u16::from_le_bytes([p[6], p[7]]) as usize;
+        let body = &p[HEADER + cfg_len..];
+        assert_eq!(u32::from_le_bytes(body[..4].try_into().unwrap()), 70_000);
+        // Lose fragment 4 (the short last one): XOR of parity and the rest.
+        let mut x = body[4..].to_vec();
+        for i in 0..4 {
+            for (d, s) in x.iter_mut().zip(&data[i * FRAG..(i + 1) * FRAG]) {
+                *d ^= s;
+            }
+        }
+        assert_eq!(&x[..70_000 - 4 * FRAG], &data[4 * FRAG..]);
+        // Single-fragment frames get none; 12 fragments get 3 interleaved groups.
+        let small = EncodedFrame { data: bytes::Bytes::from(vec![1u8; 100]), ..f };
+        assert_eq!(packets(4, &small, 0.0, true).len(), 1);
+        assert_eq!(fec_groups(12), 3);
+        if let Some(path) = std::env::var_os("TURBO_DUMP") {
+            // For the cross-check against turbo.js (see tools/latency).
+            let all: Vec<u8> = ps.iter().flat_map(|p| (p.len() as u32).to_le_bytes().into_iter().chain(p.iter().copied())).collect();
+            std::fs::write(path, all).unwrap();
+        }
     }
 
     #[test]

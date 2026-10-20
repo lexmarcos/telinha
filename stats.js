@@ -313,7 +313,8 @@ function renderTurbo(b, t, rtt) {
     setHTML(f.buffer, msPerFrame(t.assemblyMs));
     setHTML(f.decode, msPerFrame(t.decodeMs));
     setText(f.rtt, ms(rtt));
-    setText(f.lost, isNum(t.lost) ? n0.format(t.lost) : DASH);
+    setText(f.lost, isNum(t.lost) ? n0.format(t.lost) + (t.recovered ? ` · ${n0.format(t.recovered)} pedaços refeitos` : "") : DASH);
+    f.lost.title = t.recovered ? "Pedaços refeitos: perdidos na rede e reconstruídos com a paridade, sem pedir keyframe." : "";
     setText(f.freeze, isNum(t.keyRequests) ? n0.format(t.keyRequests) : DASH);
     renderLocalTurbo(b, t);
     renderRemote(b, t.remote);

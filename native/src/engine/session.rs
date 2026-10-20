@@ -79,6 +79,8 @@ struct Health {
     last: Option<(u64, u64, u64)>,
     /// Consecutive bad reports.
     bad: u32,
+    /// Fragments the viewer rebuilt from parity, as of its last report.
+    recovered: u64,
 }
 
 struct Live {
@@ -1024,6 +1026,15 @@ impl Session {
         }
         let Some(c) = self.conns.get_mut(conn) else { return };
         let Some(counters) = c.sender.as_ref().map(|s| s.counters.clone()) else { return };
+        // Parity while a viewer that can use it loses data.
+        let recovered = v["recovered"].as_u64().unwrap_or(0);
+        let lost_any = c.health.last.is_some_and(|(_, _, lost)| v["lost"].as_u64().unwrap_or(0) > lost) || recovered > c.health.recovered;
+        c.health.recovered = recovered;
+        if lost_any && v["fec"].as_u64() == Some(1) {
+            if let Some(s) = &c.sender {
+                *s.fec_until.lock().unwrap() = Some(Instant::now() + turbo::FEC_HOLD);
+            }
+        }
         let now = (counters.bytes.load(Ordering::Relaxed), v["bytes"].as_u64().unwrap_or(0), v["lost"].as_u64().unwrap_or(0));
         let Some(prev) = c.health.last.replace(now) else { return };
         let sent = now.0.saturating_sub(prev.0);
