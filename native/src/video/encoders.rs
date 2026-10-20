@@ -5,6 +5,8 @@
 
 use ffmpeg_sys_next::AVHWDeviceType;
 
+use super::Codec;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     /// BGRX frames coming from the CPU (PipeWire, test pattern).
@@ -31,6 +33,7 @@ pub struct Candidate {
     /// Human-readable name ("NVENC").
     pub label: &'static str,
     pub encoder: &'static str,
+    pub codec: Codec,
     pub hardware: bool,
     pub device: Option<(AVHWDeviceType, Option<&'static str>)>,
     pub source: SourceKind,
@@ -150,6 +153,7 @@ pub fn candidates() -> Vec<Candidate> {
         v.push(Candidate {
             label: "NVENC",
             encoder: "h264_nvenc",
+            codec: Codec::H264,
             hardware: true,
             device: None,
             source: SourceKind::Desktop,
@@ -159,6 +163,7 @@ pub fn candidates() -> Vec<Candidate> {
         v.push(Candidate {
             label: "AMF",
             encoder: "h264_amf",
+            codec: Codec::H264,
             hardware: true,
             device: None,
             source: SourceKind::Desktop,
@@ -168,6 +173,7 @@ pub fn candidates() -> Vec<Candidate> {
         v.push(Candidate {
             label: "Quick Sync",
             encoder: "h264_qsv",
+            codec: Codec::H264,
             hardware: true,
             device: None,
             source: SourceKind::Desktop,
@@ -177,6 +183,7 @@ pub fn candidates() -> Vec<Candidate> {
         v.push(Candidate {
             label: "Media Foundation",
             encoder: "h264_mf",
+            codec: Codec::H264,
             hardware: true,
             device: None,
             source: SourceKind::Desktop,
@@ -194,6 +201,7 @@ pub fn candidates() -> Vec<Candidate> {
             v.push(Candidate {
                 label,
                 encoder,
+                codec: Codec::H264,
                 hardware: true,
                 device: None,
                 source: SourceKind::Desktop,
@@ -204,6 +212,7 @@ pub fn candidates() -> Vec<Candidate> {
         v.push(Candidate {
             label: "OpenH264",
             encoder: "libopenh264",
+            codec: Codec::H264,
             hardware: false,
             device: None,
             source: SourceKind::Desktop,
@@ -218,6 +227,7 @@ pub fn candidates() -> Vec<Candidate> {
         v.push(Candidate {
             label: "VAAPI",
             encoder: "h264_vaapi",
+            codec: Codec::H264,
             hardware: true,
             device: Some((AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI, None)),
             source: SourceKind::Cpu,
@@ -227,6 +237,7 @@ pub fn candidates() -> Vec<Candidate> {
         v.push(Candidate {
             label: "VAAPI",
             encoder: "h264_vaapi",
+            codec: Codec::H264,
             hardware: true,
             device: Some((AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI, None)),
             source: SourceKind::Cpu,
@@ -243,6 +254,7 @@ pub fn candidates() -> Vec<Candidate> {
             v.push(Candidate {
                 label,
                 encoder: "h264_vaapi",
+                codec: Codec::H264,
                 hardware: true,
                 device: None,
                 source: SourceKind::Prime,
@@ -254,6 +266,7 @@ pub fn candidates() -> Vec<Candidate> {
         v.push(Candidate {
             label: "NVENC",
             encoder: "h264_nvenc",
+            codec: Codec::H264,
             hardware: true,
             device: None,
             source: SourceKind::Prime,
@@ -263,6 +276,7 @@ pub fn candidates() -> Vec<Candidate> {
         v.push(Candidate {
             label: "OpenH264",
             encoder: "libopenh264",
+            codec: Codec::H264,
             hardware: false,
             device: None,
             source: SourceKind::Prime,
@@ -276,6 +290,7 @@ pub fn candidates() -> Vec<Candidate> {
     v.push(Candidate {
         label: "NVENC",
         encoder: "h264_nvenc",
+        codec: Codec::H264,
         hardware: true,
         device: None,
         source: SourceKind::Cpu,
@@ -285,11 +300,51 @@ pub fn candidates() -> Vec<Candidate> {
     v.push(Candidate {
         label: "OpenH264",
         encoder: "libopenh264",
+        codec: Codec::H264,
         hardware: false,
         device: None,
         source: SourceKind::Cpu,
         chain: |c| cpu_convert(c, "yuv420p"),
         options: openh264_opts,
     });
+    let hevc: Vec<Candidate> = v.iter().filter_map(hevc).collect();
+    v.extend(hevc);
     v
+}
+
+/// The HEVC twin of a hardware H.264 candidate: same chain and device, the
+/// same low-latency settings (no B-frames, IDR on demand, constant bitrate),
+/// Main profile. Software H.264 has none (no HEVC encoder is shipped).
+fn hevc(c: &Candidate) -> Option<Candidate> {
+    let encoder = match c.encoder {
+        "h264_nvenc" => "hevc_nvenc",
+        "h264_vaapi" => "hevc_vaapi",
+        "h264_amf" => "hevc_amf",
+        "h264_qsv" => "hevc_qsv",
+        _ => return None,
+    };
+    Some(Candidate {
+        label: c.label,
+        encoder,
+        codec: Codec::Hevc,
+        hardware: c.hardware,
+        device: c.device,
+        source: c.source,
+        chain: c.chain,
+        options: c.options,
+    })
+}
+
+/// The candidate's options for its codec: HEVC takes Main where H.264 asks
+/// for High.
+pub fn options(c: &Candidate, ctx: &Ctx) -> Vec<(&'static str, String)> {
+    let mut opts = (c.options)(ctx);
+    if c.codec == Codec::Hevc {
+        for (k, v) in &mut opts {
+            if *k == "profile" {
+                *v = "main".into();
+            }
+        }
+    }
+    opts
 }

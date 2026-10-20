@@ -479,7 +479,8 @@ pub fn spawn(
         // 1 MB in all); otherwise ask for a new one.
         let allowance = bitrate as usize / 8 / 4;
         let mut replayed: u64 = 0;
-        match control.replay(|key, rest| rest <= allowance && key + rest <= 1 << 20) {
+        let h264 = control.gop.lock().unwrap().is_h264();
+        match control.replay(|key, rest| h264 && rest <= allowance && key + rest <= 1 << 20) {
             Some(gop) => {
                 for frame in &gop {
                     // Replayed frames go out back to back: on the receiver's
@@ -516,6 +517,12 @@ pub fn spawn(
             };
             if frame.index <= replayed {
                 continue; // already sent from the cache
+            }
+            // HEVC only goes out while nobody is on RTP; until the switch back
+            // to H.264 lands (with a keyframe), there is nothing to send here.
+            if !frame.codec.starts_with("avc") {
+                need_key = true;
+                continue;
             }
             if need_key && !frame.key {
                 keys.request(&control, Duration::from_millis(500));

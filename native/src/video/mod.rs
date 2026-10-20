@@ -4,6 +4,7 @@
 pub mod encoders;
 pub mod ffi;
 pub mod h264;
+pub mod h265;
 pub mod source;
 mod stage;
 
@@ -70,6 +71,11 @@ impl Gop {
     fn clear(&mut self) {
         self.frames.clear();
         self.rest = 0;
+    }
+
+    /// Whether the cached keyframe is H.264 (all RTP can carry).
+    pub fn is_h264(&self) -> bool {
+        self.frames.first().is_some_and(|f| f.codec.starts_with("avc"))
     }
 
     /// The cached frames, keyframe first, if `fits(keyframe bytes, bytes
@@ -147,6 +153,23 @@ pub struct Settings {
     pub quality: Quality,
     /// Current bitrate (network adaptation may lower it below the ideal).
     pub bitrate: u32,
+    pub codec: Codec,
+}
+
+/// What the stream is encoded in. HEVC only goes to minimum delay viewers
+/// whose browsers decode it in hardware (see the session); RTP is H.264.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Codec {
+    #[default]
+    H264,
+    Hevc,
+}
+
+impl Codec {
+    /// TELINHA_CODEC=hevc picks HEVC from the start (for --teste-video).
+    pub fn from_env() -> Self {
+        if std::env::var("TELINHA_CODEC").is_ok_and(|v| v.eq_ignore_ascii_case("hevc")) { Self::Hevc } else { Self::H264 }
+    }
 }
 
 impl Control {
@@ -212,7 +235,7 @@ struct Pipeline {
 
 fn open_encoder(cand: &Candidate, graph: &Graph, ctx: &Ctx, bitrate: u32) -> ffi::Result<Encoder> {
     let (w, h) = graph.out_size();
-    let options = (cand.options)(ctx);
+    let options = encoders::options(cand, ctx);
     Encoder::open(&EncoderParams {
         name: cand.encoder,
         width: w,
@@ -233,7 +256,7 @@ fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Set
     let ctx = Ctx { native, out, fps: s.quality.fps };
     let mut last = ffi::Error("nenhum codificador disponível".into());
     for (i, cand) in encoders::candidates().iter().enumerate().skip(start_at) {
-        if cand.source != kind {
+        if cand.source != kind || cand.codec != s.codec {
             continue;
         }
         let attempt = || -> ffi::Result<(Pipeline, Encoder)> {
@@ -272,7 +295,7 @@ fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Set
             Err(e) => {
                 tracing::info!(encoder = cand.encoder, "candidate rejected: {e}");
                 // ENOSYS when opening NVENC = driver too old for its API.
-                if cand.encoder == "h264_nvenc" && e.0.contains("Function not implemented") {
+                if cand.encoder.ends_with("_nvenc") && e.0.contains("Function not implemented") {
                     NVENC_DRIVER_TOO_OLD.store(true, Ordering::Relaxed);
                 }
                 last = e;
@@ -312,7 +335,7 @@ fn rebuild(pipe: Pipeline, stage: &EncodeStage, kind: SourceKind, native: (u32, 
 /// the new one does not open, the old bitrate comes back.
 fn set_bitrate(pipe: &Pipeline, encoder: &mut Encoder, native: (u32, u32), s: &Settings, bitrate: u32) -> ffi::Result<u32> {
     let cand = &encoders::candidates()[pipe.candidate];
-    if cand.encoder == "h264_nvenc" {
+    if cand.encoder.ends_with("_nvenc") {
         encoder.set_bitrate(bitrate);
         return Ok(bitrate);
     }
@@ -360,7 +383,7 @@ fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast:
     control.stats.lock().unwrap().native = Some(native);
 
     // Sized for the real screen from the start: no encoder reopen a second in.
-    let mut settings = Settings { quality, bitrate: quality.bitrate(native) };
+    let mut settings = Settings { quality, bitrate: quality.bitrate(native), codec: Codec::from_env() };
     let (mut pipe, encoder) = build(kind, native, pixel, &settings, 0)?;
     // Declared after the pipeline so it goes first: its thread stops and the
     // encoder closes before the graph and devices do.
@@ -388,7 +411,9 @@ fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast:
         // A failure keeps the stream going with what it had.
         if let Some(next) = control.pending.lock().unwrap().take() {
             if next != settings {
-                let rebuild_all = next.quality.output_size(native) != settings.quality.output_size(native) || next.quality.fps != settings.quality.fps;
+                let rebuild_all = next.quality.output_size(native) != settings.quality.output_size(native)
+                    || next.quality.fps != settings.quality.fps
+                    || next.codec != settings.codec;
                 if rebuild_all {
                     (pipe, settings) = rebuild(pipe, &stage, kind, native, pixel, settings, next)?;
                     last_input = None;
@@ -446,7 +471,7 @@ fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast:
                         (kind, native, pixel) = shape;
                         control.stats.lock().unwrap().native = Some(native);
                         // The ideal bitrate for the new size (the session follows).
-                        let next = Settings { quality: settings.quality, bitrate: settings.quality.bitrate(native) };
+                        let next = Settings { quality: settings.quality, bitrate: settings.quality.bitrate(native), codec: settings.codec };
                         drop(stage.remove());
                         drop(pipe);
                         let encoder;
@@ -514,7 +539,7 @@ fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast:
             }
             let captured = captured_at.remove(&filtered.pts()).unwrap_or(t0);
             let frame = std::mem::replace(&mut filtered, Frame::new());
-            let job = Job { frame, captured, converted: Instant::now(), size: pipe.out };
+            let job = Job { frame, captured, converted: Instant::now(), size: pipe.out, codec: settings.codec };
             let period_ms = 1000.0 / settings.quality.fps.max(1) as f32;
             let encoded = control.stats.lock().unwrap().encoded;
             if overlap.update(t0, convert_ms, stage.encode_ms(), period_ms, encoded) {

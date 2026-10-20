@@ -21,7 +21,7 @@ use bytes::Bytes;
 use tokio::sync::broadcast;
 
 use super::ffi::{self, Encoder, Frame};
-use super::{Control, EncodedFrame, Timings, h264};
+use super::{Codec, Control, EncodedFrame, Timings, h264, h265};
 
 /// A converted frame on its way to the encoder.
 pub struct Job {
@@ -30,6 +30,7 @@ pub struct Job {
     /// When conversion finished (the encode time counts from here).
     pub converted: Instant,
     pub size: (u32, u32),
+    pub codec: Codec,
 }
 
 struct Shared {
@@ -45,6 +46,7 @@ struct Shared {
 
 struct Output {
     headers: h264::Headers,
+    hevc: h265::Headers,
     /// pts -> (capture time, size), for packets that come out after their frame.
     pending: HashMap<i64, (Instant, (u32, u32))>,
     index: u64,
@@ -63,7 +65,7 @@ impl EncodeStage {
             slot: Mutex::new(None),
             ready: Condvar::new(),
             encoder: Mutex::new(None),
-            out: Mutex::new(Output { headers: h264::Headers::default(), pending: HashMap::new(), index: 0, encode_ms: 0.0 }),
+            out: Mutex::new(Output { headers: h264::Headers::default(), hevc: h265::Headers::default(), pending: HashMap::new(), index: 0, encode_ms: 0.0 }),
             stop: AtomicBool::new(false),
             failed: Mutex::new(None),
         });
@@ -162,7 +164,7 @@ fn encode_loop(shared: &Shared, control: &Control, out: &broadcast::Sender<Arc<E
 }
 
 fn encode(encoder: &mut Encoder, output: &Mutex<Output>, job: Job, control: &Control, out: &broadcast::Sender<Arc<EncodedFrame>>) -> ffi::Result<()> {
-    let Job { mut frame, captured, converted, size } = job;
+    let Job { mut frame, captured, converted, size, codec } = job;
     let mut o = output.lock().unwrap();
     let key = control.force_key.swap(false, Ordering::Relaxed);
     frame.set_keyframe(key);
@@ -185,8 +187,17 @@ fn encode(encoder: &mut Encoder, output: &Mutex<Output>, job: Job, control: &Con
             st.encoded += 1;
             st.encode_ms = Some(st.encode_ms.map_or(ms, |p| p * 0.9 + ms * 0.1));
         }
-        let data = o.headers.fix_keyframe(pkt.data, pkt.key);
-        let Some(codec) = o.headers.codec() else { continue };
+        let (data, codec) = match codec {
+            Codec::H264 => {
+                let data = o.headers.fix_keyframe(pkt.data, pkt.key);
+                (data, o.headers.codec())
+            }
+            Codec::Hevc => {
+                let data = o.hevc.fix_keyframe(pkt.data, pkt.key);
+                (data, o.hevc.codec())
+            }
+        };
+        let Some(codec) = codec else { continue };
         o.index += 1;
         let frame = Arc::new(EncodedFrame { data: Bytes::from(data), key: pkt.key, codec, width: size.0, height: size.1, captured, index: o.index });
         // Into the cache before it goes out: a sender subscribed to `out`

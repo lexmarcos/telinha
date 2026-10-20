@@ -12,13 +12,14 @@
 // server, open with ?servidor=server.domain.
 
 import { createStatsPanel } from "./stats.js";
-import { turboSupport, openVideoChannel, TurboSender, TurboReceiver } from "./turbo.js";
+import { turboSupport, hardwareDecoders, openVideoChannel, TurboSender, TurboReceiver } from "./turbo.js";
 
 const SERVER = new URLSearchParams(location.search).get("servidor")
   ?? (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) ? null : location.host);
 // A signaling server on this machine (tools/latency/sinal.mjs) speaks plain HTTP.
 const LOCAL_SERVER = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(SERVER ?? "");
 const TURBO = turboSupport();
+const DECODERS = hardwareDecoders().catch(() => []); // goes with "wc" in the roster
 const PREFIX = "telinha-canal-v1-";
 const MAX_BITRATE = 8_000_000;
 const $ = (id) => document.getElementById(id);
@@ -115,6 +116,11 @@ if (hashCode.length === 4) {
 if (opening) setTimeout(() => host(), 0);
 syncLobby();
 
+/** Codec names a browser reported (hardwareDecoders), kept short and few. */
+function decoderList(v) {
+  return Array.isArray(v) ? v.filter((d) => typeof d === "string" && d.length <= 8).slice(0, 4) : [];
+}
+
 /** Only Discord's avatar CDN: nobody can make others load an arbitrary URL. */
 function isDiscordAvatar(url) {
   return typeof url === "string" && url.startsWith("https://cdn.discordapp.com/avatars/");
@@ -172,7 +178,7 @@ async function host(attempt = 0) {
     state.peer = peer;
     state.isHost = true;
     state.code = code;
-    state.roster.set(peer.id, { name: state.name, avatar: myAvatar, sharing: false, wc: TURBO.receive });
+    state.roster.set(peer.id, { name: state.name, avatar: myAvatar, sharing: false, wc: TURBO.receive, dec: await DECODERS });
     peer.on("connection", acceptGuest);
     wirePeer(peer);
     broadcastRoster();
@@ -191,7 +197,7 @@ function acceptGuest(conn) {
     const name = String(conn.metadata?.name || "Alguém").slice(0, 24);
     state.guests.set(conn.peer, conn);
     const avatar = isDiscordAvatar(conn.metadata?.avatar) ? conn.metadata.avatar : "";
-    state.roster.set(conn.peer, { name, avatar, sharing: false, wc: !!conn.metadata?.wc });
+    state.roster.set(conn.peer, { name, avatar, sharing: false, wc: !!conn.metadata?.wc, dec: decoderList(conn.metadata?.dec) });
     broadcastRoster();
   });
   conn.on("data", (msg) => {
@@ -226,7 +232,7 @@ async function join(code) {
   let peer;
   try {
     peer = await openPeer();
-    const conn = await connectTo(peer, PREFIX + code, { name: state.name, avatar: myAvatar, wc: TURBO.receive });
+    const conn = await connectTo(peer, PREFIX + code, { name: state.name, avatar: myAvatar, wc: TURBO.receive, dec: await DECODERS });
     state.peer = peer;
     state.code = code;
     state.hostConn = conn;
@@ -495,7 +501,7 @@ function deliverPass(id) {
 
 function applyRoster(list) {
   const me = state.peer.id;
-  const next = new Map(list.map((m) => [m.id, { name: m.name, avatar: isDiscordAvatar(m.avatar) ? m.avatar : "", sharing: !!m.sharing, wc: !!m.wc, discord: !!m.discord }]));
+  const next = new Map(list.map((m) => [m.id, { name: m.name, avatar: isDiscordAvatar(m.avatar) ? m.avatar : "", sharing: !!m.sharing, wc: !!m.wc, dec: decoderList(m.dec), discord: !!m.discord }]));
 
   for (const [id, prev] of state.members) {
     if (id === me) continue;

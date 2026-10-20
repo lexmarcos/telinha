@@ -35,6 +35,13 @@ struct Member {
     discord: bool,
     /// Discord avatar URL (only from Discord's CDN), passed along in the roster.
     avatar: String,
+    /// Codecs past H.264 the browser decodes in hardware ("hevc", "av1").
+    dec: Vec<String>,
+}
+
+/// Codec names a browser reported, kept short and few.
+fn decoders(v: &Value) -> Vec<String> {
+    v.as_array().map(|a| a.iter().filter_map(|d| d.as_str()).filter(|d| d.len() <= 8).take(4).map(str::to_owned).collect()).unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +111,8 @@ struct Live {
     cap: Option<u32>,
     /// RTP connection currently left out of `cap` for being far below the rest.
     outlier: Option<String>,
+    /// What the stream is encoded in (see `wanted_codec`).
+    codec: video::Codec,
 }
 
 /// Network adaptation of the shared bitrate: few, large, well spaced steps.
@@ -198,6 +207,8 @@ struct Session {
     demoted: std::collections::HashSet<String>,
     /// Of those, who receives through the relay (keeps the bitrate at RELAY_BITRATE).
     relayed: std::collections::HashSet<String>,
+    /// Who said they decode HEVC but could not: H.264 for the rest of the stream.
+    no_hevc: std::collections::HashSet<String>,
     /// Discord session for the gatekeeper of the next stream.
     discord: Option<String>,
     /// Gatekeeper of the current stream (only people in the call can watch).
@@ -297,6 +308,7 @@ async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, c
         inputs: None,
         demoted: Default::default(),
         relayed: Default::default(),
+        no_hevc: Default::default(),
         discord: None,
         gate: None,
         heard: None,
@@ -305,7 +317,7 @@ async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, c
 
     if is_host {
         s.heard = Some([me.clone()].into());
-        s.members = vec![Member { id: me, name, sharing: false, wc: false, discord: false, avatar: String::new() }];
+        s.members = vec![Member { id: me, name, sharing: false, wc: false, discord: false, avatar: String::new(), dec: vec![] }];
         s.joined = true;
         s.announce_joined().await;
     } else {
@@ -541,6 +553,7 @@ impl Session {
                 tracing::warn!("failed to open RTP video for {peer}: {e}");
             }
             self.cap_for_relay();
+            self.follow_codec();
         }
     }
 
@@ -740,7 +753,8 @@ impl Session {
                 let id = c.peer.clone();
                 self.members.retain(|m| m.id != id);
                 let avatar = c.meta["avatar"].as_str().filter(|a| a.starts_with("https://cdn.discordapp.com/avatars/")).unwrap_or_default().to_owned();
-                self.members.push(Member { id, name, sharing: false, wc, discord: false, avatar });
+                let dec = decoders(&c.meta["dec"]);
+                self.members.push(Member { id, name, sharing: false, wc, discord: false, avatar, dec });
                 self.broadcast_roster().await;
             }
             (Kind::Turbo, Which::Video) => {
@@ -799,6 +813,7 @@ impl Session {
                                 name: m["name"].as_str().unwrap_or("Alguém").to_owned(),
                                 sharing: m["sharing"].as_bool().unwrap_or(false),
                                 wc: m["wc"].as_bool().unwrap_or(false),
+                                dec: decoders(&m["dec"]),
                                 discord: m["discord"].as_bool().unwrap_or(false),
                                 avatar: m["avatar"].as_str().unwrap_or_default().to_owned(),
                             })
@@ -834,10 +849,19 @@ impl Session {
                 }
             }
             (Kind::Turbo, "unsupported") => {
-                // The browser has WebCodecs but cannot decode this video (Firefox
-                // without an H.264 decoder, say): it gets RTP instead, video and
-                // audio in one call (demote closes the audio-only one).
-                self.demote(&conn, "cannot decode over the data channel").await;
+                let peer = self.conns.get(&conn).map(|c| c.peer.clone()).unwrap_or_default();
+                if self.live.as_ref().is_some_and(|l| l.codec == video::Codec::Hevc) && self.no_hevc.insert(peer.clone()) {
+                    // It claimed HEVC and could not: back to H.264 on the data
+                    // channel (a fresh connection; its decoder gave up on this one).
+                    tracing::info!(peer, "viewer could not decode HEVC");
+                    self.close_conn(&conn).await;
+                    self.sync_viewers().await;
+                } else {
+                    // The browser has WebCodecs but cannot decode this video (Firefox
+                    // without an H.264 decoder, say): it gets RTP instead, video and
+                    // audio in one call (demote closes the audio-only one).
+                    self.demote(&conn, "cannot decode over the data channel").await;
+                }
             }
             _ => {}
         }
@@ -851,7 +875,7 @@ impl Session {
             me.discord = self.gate.is_some();
         }
         let members: Vec<Value> =
-            self.members.iter().map(|m| json!({ "id": m.id, "name": m.name, "avatar": m.avatar, "sharing": m.sharing, "wc": m.wc, "discord": m.discord })).collect();
+            self.members.iter().map(|m| json!({ "id": m.id, "name": m.name, "avatar": m.avatar, "sharing": m.sharing, "wc": m.wc, "dec": m.dec, "discord": m.discord })).collect();
         let msg = json!({ "t": "roster", "members": members });
         for c in self.conns.values().filter(|c| c.kind == Kind::Guest && c.open) {
             if let Some(ch) = &c.control {
@@ -902,7 +926,7 @@ impl Session {
                 }
                 if let (Some(bitrate), Some(live)) = (self.ceiling(), &self.live) {
                     live.bitrate.store(bitrate, Ordering::Relaxed);
-                    live.control.reconfigure(Settings { quality, bitrate });
+                    live.control.reconfigure(Settings { quality, bitrate, codec: live.codec });
                 }
             }
             _ => {}
@@ -943,6 +967,7 @@ impl Session {
             ladder: Ladder::new(Instant::now()),
             cap: None,
             outlier: None,
+            codec: video::Codec::from_env(),
         });
         self.set_sharing(true).await;
         self.sync_viewers().await;
@@ -1021,6 +1046,26 @@ impl Session {
                 }
             }
         }
+        self.follow_codec();
+    }
+
+    /// Switches the encoder to the codec the current viewers allow.
+    fn follow_codec(&mut self) {
+        let rtp = self.conns.values().any(|c| c.kind == Kind::Media && !c.audio_only);
+        let viewers: Vec<(bool, bool)> = self
+            .members
+            .iter()
+            .filter(|m| m.id != self.me)
+            .filter(|m| self.gate.as_ref().is_none_or(|g| g.allowed.contains_key(&m.id)))
+            .map(|m| (m.wc && !self.demoted.contains(&m.id), m.dec.iter().any(|d| d == "hevc") && !self.no_hevc.contains(&m.id)))
+            .collect();
+        let wanted = pick_codec(std::env::var_os("TELINHA_HEVC").is_some(), &viewers, rtp);
+        let Some(live) = &mut self.live else { return };
+        if wanted != live.codec {
+            tracing::info!(from = ?live.codec, to = ?wanted, "switching codec for the viewers in the channel");
+            live.codec = wanted;
+            live.control.reconfigure(Settings { quality: live.quality, bitrate: live.bitrate.load(Ordering::Relaxed), codec: wanted });
+        }
     }
 
     /// Viewer report. If someone receives much less than was sent, the video
@@ -1070,7 +1115,7 @@ impl Session {
         if live.bitrate.load(Ordering::Relaxed) > ceiling {
             tracing::info!(to = ceiling, "someone watches through the relay: capping the bitrate");
             live.bitrate.store(ceiling, Ordering::Relaxed);
-            live.control.reconfigure(Settings { quality: live.quality, bitrate: ceiling });
+            live.control.reconfigure(Settings { quality: live.quality, bitrate: ceiling, codec: live.codec });
         }
     }
 
@@ -1094,7 +1139,7 @@ impl Session {
             c.health.bad = 0;
             tracing::info!(from = current, to = next, "adjusting bitrate");
             live.bitrate.store(next, Ordering::Relaxed);
-            live.control.reconfigure(Settings { quality: live.quality, bitrate: next });
+            live.control.reconfigure(Settings { quality: live.quality, bitrate: next, codec: live.codec });
         }
         give_up && c.kind == Kind::Turbo
     }
@@ -1231,6 +1276,14 @@ impl Session {
     }
 }
 
+/// HEVC needs every viewer on the data channel (RTP is H.264 only) with a
+/// browser that reported a hardware HEVC decoder; anyone else, or nobody,
+/// means H.264. `viewers`: (gets the data channel, decodes HEVC) each.
+/// Off unless TELINHA_HEVC is set: not yet tried on real viewers.
+fn pick_codec(enabled: bool, viewers: &[(bool, bool)], rtp: bool) -> video::Codec {
+    if enabled && !rtp && !viewers.is_empty() && viewers.iter().all(|&(turbo, hevc)| turbo && hevc) { video::Codec::Hevc } else { video::Codec::H264 }
+}
+
 /// What the RTP viewers' estimates allow for the shared video, and which
 /// viewer (if any) is left out for being far below the next worst: one bad
 /// network should not take everyone's picture down with it. That viewer still
@@ -1294,6 +1347,18 @@ mod tests {
         assert_eq!(l.next(s(60), 9_000_000, ideal, floor, 0, Some(50_000_000)), 12_000_000);
         // An estimate below the bitrate never turns a step up into a step down.
         assert_eq!(l.next(s(80), 12_000_000, ideal, floor, 0, Some(11_000_000)), 12_000_000);
+    }
+
+    #[test]
+    fn hevc_so_se_todos_decodificam() {
+        use video::Codec::{H264, Hevc};
+        assert_eq!(pick_codec(true, &[(true, true), (true, true)], false), Hevc);
+        // Off by default, nobody watching, someone on RTP, or one without it: H.264.
+        assert_eq!(pick_codec(false, &[(true, true)], false), H264);
+        assert_eq!(pick_codec(true, &[], false), H264);
+        assert_eq!(pick_codec(true, &[(true, true)], true), H264);
+        assert_eq!(pick_codec(true, &[(true, true), (true, false)], false), H264);
+        assert_eq!(pick_codec(true, &[(false, true)], false), H264);
     }
 
     #[test]

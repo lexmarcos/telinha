@@ -328,7 +328,7 @@ fn hrd(r: &mut Bits) -> Option<()> {
 }
 
 /// Removes emulation prevention bytes (00 00 03 → 00 00).
-fn unescape(ebsp: &[u8]) -> Vec<u8> {
+pub(crate) fn unescape(ebsp: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(ebsp.len());
     let mut zeros = 0;
     for &b in ebsp {
@@ -357,20 +357,24 @@ fn escape(rbsp: &[u8]) -> Vec<u8> {
     out
 }
 
-struct Bits<'a> {
+pub(crate) struct Bits<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
-impl Bits<'_> {
-    fn bit(&mut self) -> Option<u32> {
+impl<'a> Bits<'a> {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    pub(crate) fn bit(&mut self) -> Option<u32> {
         let byte = *self.data.get(self.pos / 8)?;
         let v = byte >> (7 - self.pos % 8) & 1;
         self.pos += 1;
         Some(u32::from(v))
     }
 
-    fn bits(&mut self, n: u32) -> Option<u32> {
+    pub(crate) fn bits(&mut self, n: u32) -> Option<u32> {
         let mut v: u64 = 0;
         for _ in 0..n {
             v = v << 1 | u64::from(self.bit()?);
@@ -379,7 +383,7 @@ impl Bits<'_> {
     }
 
     /// Exp-Golomb, unsigned.
-    fn ue(&mut self) -> Option<u32> {
+    pub(crate) fn ue(&mut self) -> Option<u32> {
         let mut zeros = 0;
         while self.bit()? == 0 {
             zeros += 1;

@@ -86,6 +86,25 @@ class KeyBackoff {
   }
 }
 
+// Codecs past H.264 this browser decodes in hardware, for the streamer to
+// choose (only the desktop app uses it so far, and only HEVC, behind a flag).
+// isConfigSupported says "maybe" more than "yes" for hardware: a viewer whose
+// decoder still fails asks for normal WebRTC, as with any other codec.
+// ?dec=hevc claims a list instead (to test the streamer's switch and fallback).
+export async function hardwareDecoders() {
+  const claimed = new URLSearchParams(globalThis.location?.search ?? "").get("dec");
+  if (claimed !== null) return claimed.split(",").filter(Boolean);
+  if (typeof VideoDecoder !== "function" || !turboSupport().receive) return [];
+  const out = [];
+  for (const [name, codec] of [["hevc", "hvc1.1.6.L153.B0"], ["av1", "av01.0.12M.08"]]) {
+    try {
+      const { supported } = await VideoDecoder.isConfigSupported({ codec, codedWidth: 3840, codedHeight: 2160, hardwareAcceleration: "prefer-hardware" });
+      if (supported) out.push(name);
+    } catch {}
+  }
+  return out;
+}
+
 export function turboSupport() {
   const render = typeof VideoDecoder === "function" ? renderMode() : null;
   return {
