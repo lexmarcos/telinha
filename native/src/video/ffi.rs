@@ -192,10 +192,6 @@ impl Frame {
         frame
     }
 
-    pub fn unref(&mut self) {
-        unsafe { ff::av_frame_unref(self.0) };
-    }
-
     /// Another reference to the same image (without copying the pixels).
     pub fn share(&self) -> Option<Self> {
         let f = unsafe { ff::av_frame_clone(self.0) };
