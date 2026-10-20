@@ -34,7 +34,7 @@ const ui = {
   create: $("create"), controls: $("controls"), lobbyError: $("lobbyError"), tvHint: $("tvHint"),
   room: $("room"), stage: $("stage"), feature: $("feature"), featureCanvas: $("featureCanvas"), strip: $("strip"),
   stageBar: $("stageBar"), featureName: $("featureName"), unmute: $("unmute"),
-  volume: $("volume"), muteBtn: $("muteBtn"), pipBtn: $("pipBtn"), fullBtn: $("fullBtn"),
+  volume: $("volume"), muteBtn: $("muteBtn"), pipBtn: $("pipBtn"), fullBtn: $("fullBtn"), rotateBtn: $("rotateBtn"), exitFsBtn: $("exitFsBtn"),
   channelDigits: $("channelDigits"), emptyDigits: $("emptyDigits"),
   emptyTitle: $("emptyTitle"), emptyText: $("emptyText"),
   people: $("people"), peopleBtn: $("peopleBtn"), peoplePanel: $("peoplePanel"), roster: $("roster"),
@@ -1150,6 +1150,7 @@ function renderStreams() {
 
   showCanvas(s?.view ?? null);
   if (!s) {
+    setImmersive(false);
     ui.feature.srcObject = null;
     ui.unmute.hidden = true;
   } else {
@@ -1170,7 +1171,6 @@ function renderStreams() {
     $("volumeWrap").hidden = !hasAudio;
     // On a canvas, picture in picture goes through a captured copy of it.
     ui.pipBtn.hidden = !document.pictureInPictureEnabled || (!!s.view && !ui.featureCanvas.captureStream);
-    ui.fullBtn.hidden = !!s.view && !fullscreenApi().request;
   }
 
   const showStrip = state.streams.size > 1;
@@ -1271,6 +1271,7 @@ statsBtn.addEventListener("click", () => stats.toggle());
 ui.stage.addEventListener("statstoggle", (e) => statsBtn.setAttribute("aria-pressed", String(e.detail.open)));
 
 ui.fullBtn.addEventListener("click", toggleFullscreen);
+ui.exitFsBtn.addEventListener("click", () => setImmersive(false));
 // Double click or double tap on the picture; a touch double tap raises both events, so only one counts.
 let lastFullscreenGesture = 0;
 function fullscreenGesture() {
@@ -1282,27 +1283,77 @@ function fullscreenGesture() {
 ui.feature.addEventListener("dblclick", fullscreenGesture);
 ui.featureCanvas.addEventListener("dblclick", fullscreenGesture);
 // Older iPadOS Safari only has the prefixed API; iPhone has none for elements
-// (only the video's own player, which cannot show a canvas).
+// (fullscreenEnabled is false there, if the methods exist at all).
 function fullscreenApi() {
   const st = ui.stage, d = document;
+  const enabled = (d.fullscreenEnabled ?? d.webkitFullscreenEnabled) !== false;
   return {
     element: d.fullscreenElement ?? d.webkitFullscreenElement,
-    request: st.requestFullscreen?.bind(st) ?? st.webkitRequestFullscreen?.bind(st),
+    request: enabled ? st.requestFullscreen?.bind(st) ?? st.webkitRequestFullscreen?.bind(st) : undefined,
     exit: d.exitFullscreen?.bind(d) ?? d.webkitExitFullscreen?.bind(d),
   };
 }
+// The button always does something: the Fullscreen API where it exists; on iPhone
+// the video's own player when the picture is in the <video> (real fullscreen, no
+// added delay), otherwise the immersive stage below.
 function toggleFullscreen() {
   const fs = fullscreenApi();
   if (fs.element) fs.exit?.();
-  else if (fs.request) fs.request()?.catch?.(() => {});
-  else if (!state.canvasView) ui.feature.webkitEnterFullscreen?.();
+  else if (state.immersive) setImmersive(false);
+  else if (fs.request) fs.request()?.catch?.(() => { if (touchOnly.matches && state.streams.get(state.featured)) setImmersive(true); });
+  else if (state.streams.get(state.featured) && !videoFullscreen()) setImmersive(true);
 }
-// The layout drops its portrait arrangement while the stage is fullscreen; and a
-// phone held upright turns to landscape for it (Android; iOS has no such lock).
+// The system player only takes a <video> that has its picture, and the canvas path has none
+// (a captured copy would add a frame or more of delay). It also needs a tap: if it does not
+// open within a moment (the browser refused it), the immersive stage takes over.
+let videoFullscreenOpen = false;
+function videoFullscreen() {
+  const v = ui.feature;
+  if (state.canvasView || !v.webkitSupportsFullscreen || !v.webkitEnterFullscreen) return false;
+  try { v.webkitEnterFullscreen(); } catch { return false; }
+  videoFullscreenOpen = false;
+  setTimeout(() => { if (!videoFullscreenOpen && !v.webkitDisplayingFullscreen) setImmersive(true); }, 800);
+  return true;
+}
+ui.feature.addEventListener("webkitbeginfullscreen", () => { videoFullscreenOpen = true; });
+// iOS tends to leave the video paused after its player closes.
+ui.feature.addEventListener("webkitendfullscreen", () => { videoFullscreenOpen = false; ui.feature.play().catch(() => {}); });
+
+// Immersive stage: the stage covers the viewport (style.css) with the controls resting
+// over the picture. In portrait it can turn a quarter so a wide picture fills the tall screen.
+state.immersive = false;
+state.rotateFs = safeGet("telinha:fsRotate") !== "off";
+const portrait = matchMedia("(orientation: portrait)");
+function setImmersive(on) {
+  if (state.immersive === on) return;
+  state.immersive = on;
+  ui.stage.classList.toggle("is-immersive", on);
+  syncFullscreenLayout();
+  renderImmersive();
+  if (on) wake();
+  else syncAspect();
+}
+function renderImmersive() {
+  ui.stage.classList.toggle("is-rotated", state.immersive && state.rotateFs);
+  ui.exitFsBtn.hidden = !state.immersive;
+  ui.rotateBtn.hidden = !state.immersive || !portrait.matches;
+  ui.rotateBtn.setAttribute("aria-pressed", String(state.rotateFs));
+}
+portrait.addEventListener("change", renderImmersive);
+ui.rotateBtn.addEventListener("click", () => {
+  state.rotateFs = !state.rotateFs;
+  safeSet("telinha:fsRotate", state.rotateFs ? "on" : "off");
+  renderImmersive();
+});
+// The layout drops its portrait arrangement while the stage is fullscreen.
+function syncFullscreenLayout() {
+  ui.stage.classList.toggle("is-fs", state.immersive || fullscreenApi().element === ui.stage);
+}
+// A phone held upright turns to landscape for it (Android; iOS has no such lock).
 for (const ev of ["fullscreenchange", "webkitfullscreenchange"]) {
   document.addEventListener(ev, () => {
     const on = fullscreenApi().element === ui.stage;
-    ui.stage.classList.toggle("is-fs", on);
+    syncFullscreenLayout();
     if (!touchOnly.matches) return;
     if (on) screen.orientation?.lock?.("landscape").catch(() => {});
     else screen.orientation?.unlock?.();
@@ -1336,6 +1387,7 @@ async function canvasPictureInPicture() {
 document.addEventListener("keydown", (e) => {
   if (!state.inRoom || e.target.matches("input") || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === "f" || e.key === "F") toggleFullscreen();
+  if (e.key === "Escape" && state.immersive) setImmersive(false);
   if (e.key === "i" || e.key === "I") stats.toggle();
 });
 
@@ -1365,10 +1417,11 @@ ui.stage.addEventListener("click", (e) => {
 });
 // A double tap on the picture is a fullscreen gesture (not for the controls).
 let lastTap = { t: 0, x: 0, y: 0 };
-ui.stage.addEventListener("pointerup", (e) => {
-  if (e.pointerType === "mouse" || e.target.closest("button, input, label, .stats-panel, .unmute")) return;
+// A click, not a pointer event: the system player on iPhone only opens from one.
+ui.stage.addEventListener("click", (e) => {
+  if (!touchOnly.matches || e.target.closest("button, input, label, .stats-panel, .unmute") || !state.streams.get(state.featured)) return;
   const now = performance.now();
-  if (now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 40 && fullscreenApi().request) fullscreenGesture();
+  if (now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 40) fullscreenGesture();
   lastTap = { t: now, x: e.clientX, y: e.clientY };
 });
 

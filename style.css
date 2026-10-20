@@ -598,6 +598,48 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   .empty p:not(.empty-digits) { margin-bottom: 0.5rem; max-width: 36ch; font-size: 0.9375rem; line-height: 1.35; }
 }
 
+/* ---------- Immersive: the stage covers the screen where the Fullscreen API does not exist (iPhone) ---------- */
+/* The picture, the channel and the stream bar over black; the dock and the lists step aside. In
+   portrait the whole stage turns a quarter so a wide picture fills the tall screen (app.js, setImmersive). */
+.stage.is-immersive {
+  --sat: env(safe-area-inset-top); --sar: env(safe-area-inset-right);
+  --sab: env(safe-area-inset-bottom); --sal: env(safe-area-inset-left);
+  position: fixed; inset: 0; z-index: 6; margin: 0;
+  border-radius: 0; box-shadow: none; background: #000; overflow: hidden;
+  overscroll-behavior: none; animation: immersive-in 220ms ease-out both;
+}
+@keyframes immersive-in { from { opacity: 0; } }
+.room:has(.stage.is-immersive) :is(.dock, .strip, .roster, .quality) { visibility: hidden; }
+.stage.is-immersive .feature {
+  inset: auto; left: var(--sal); top: var(--sat);
+  width: calc(100% - var(--sal) - var(--sar)); height: calc(100% - var(--sat) - var(--sab));
+}
+.stage.is-immersive .channel { left: max(0.75rem, var(--sal)); top: max(0.75rem, var(--sat)); }
+.stage.is-immersive .stage-bar {
+  left: max(0.75rem, var(--sal)); right: max(0.75rem, var(--sar)); bottom: max(0.75rem, var(--sab));
+}
+.stage.is-immersive .unmute { top: max(1rem, var(--sat)); bottom: auto; }
+.stage.is-immersive .stats-panel {
+  top: calc(max(0.75rem, var(--sat)) + 3.25rem); right: max(0.75rem, var(--sar));
+  max-height: calc(100% - max(0.75rem, var(--sat)) - 3.25rem - max(0.75rem, var(--sab)) - 4.5rem);
+}
+.exit-fs {
+  position: absolute; z-index: 3; top: max(0.5rem, var(--sat, 0px)); right: max(0.5rem, var(--sar, 0px));
+  background: var(--glass); -webkit-backdrop-filter: blur(24px) saturate(170%); backdrop-filter: blur(24px) saturate(170%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px var(--line);
+  transition: opacity 260ms ease;
+}
+.stage.idle-cursor .exit-fs { opacity: 0; pointer-events: none; }
+@media (orientation: portrait) {
+  .stage.is-immersive.is-rotated {
+    /* the screen's top edge becomes the stage's left edge, so the safe areas turn with it */
+    --sat: env(safe-area-inset-right); --sar: env(safe-area-inset-bottom);
+    --sab: env(safe-area-inset-left); --sal: env(safe-area-inset-top);
+    inset: auto; left: 50%; top: 50%; width: 100dvh; height: 100vw;
+    translate: -50% -50%; rotate: 90deg;
+  }
+}
+
 /* ---------- Touch ---------- */
 @media (pointer: coarse) {
   .icon-btn { width: 2.75rem; height: 2.75rem; }

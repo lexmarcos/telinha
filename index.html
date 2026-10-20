@@ -26,6 +26,8 @@
   <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   <symbol id="i-leave" viewBox="0 0 24 24"><path d="M14 4.5h3.5a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H14M10 8l-4 4 4 4M6 12h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-full" viewBox="0 0 24 24"><path d="M4.5 9V5.5a1 1 0 0 1 1-1H9M15 4.5h3.5a1 1 0 0 1 1 1V9M19.5 15v3.5a1 1 0 0 1-1 1H15M9 19.5H5.5a1 1 0 0 1-1-1V15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6.5 6.5 11 11m0-11-11 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-rotate" viewBox="0 0 24 24"><rect x="3.5" y="9" width="10" height="11.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M13.5 4.5h3.5a3.5 3.5 0 0 1 3.5 3.5v2.5m0 0-1.8-1.8m1.8 1.8 1.8-1.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-pip" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="12" y="11.5" width="6" height="4.5" rx="1" fill="currentColor"/></symbol>
   <symbol id="i-sound" viewBox="0 0 24 24"><path d="M4.5 9.5h3l4-3.5v12l-4-3.5h-3z" fill="currentColor"/><path d="M15 9a4.2 4.2 0 0 1 0 6M17.5 6.5a7.8 7.8 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   <symbol id="i-stats" viewBox="0 0 24 24"><path d="M4.5 15.5a7.5 7.5 0 1 1 15 0M12 15.5l3.2-4.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="15.5" r="1.4" fill="currentColor"/></symbol>
@@ -93,6 +95,10 @@
       <span class="channel-digits" id="channelDigits">0000</span>
     </div>
 
+    <button class="icon-btn exit-fs" id="exitFsBtn" type="button" aria-label="Sair da tela cheia" title="Sair da tela cheia (Esc)" hidden>
+      <svg><use href="#i-close"/></svg>
+    </button>
+
     <div class="stage-bar" id="stageBar" hidden>
       <span class="live-chip"><i class="tally"></i><span id="featureName"></span></span>
       <div class="stage-tools">
@@ -107,6 +113,9 @@
         </button>
         <button class="icon-btn" id="pipBtn" type="button" aria-label="Janela flutuante" title="Janela flutuante">
           <svg><use href="#i-pip"/></svg>
+        </button>
+        <button class="icon-btn" id="rotateBtn" type="button" aria-label="Girar a imagem" aria-pressed="true" title="Girar a imagem" hidden>
+          <svg><use href="#i-rotate"/></svg>
         </button>
         <button class="icon-btn" id="fullBtn" type="button" aria-label="Tela cheia" title="Tela cheia (F)">
           <svg><use href="#i-full"/></svg>
