@@ -15,7 +15,7 @@ use webrtc::peer_connection::{PeerConnection, RTCIceCandidateInit, RTCIceServer,
 use super::peer::{self, PeerEvent, Which};
 use super::signaling::{self, Signal, Signaling};
 use super::rtp;
-use super::turbo::{self, KeyLimiter};
+use super::turbo;
 use super::{Command, Event};
 use crate::config::{Priority, Quality};
 use super::Viewer;
@@ -85,7 +85,6 @@ struct Live {
     quality: Quality,
     /// Current bitrate (adaptation lowers it when someone receives poorly).
     bitrate: Arc<AtomicU32>,
-    keys: Arc<KeyLimiter>,
     epoch: Instant,
     last_captured: u64,
     last_tick: Instant,
@@ -664,7 +663,7 @@ impl Session {
                         if c.kind == Kind::Media && !c.open {
                             c.open = true;
                             if let Some(track) = c.track.clone() {
-                                c.rtp_sender = Some(rtp::spawn(track, live.frames.subscribe(), live.control.clone(), live.keys.clone(), live.quality.fps));
+                                c.rtp_sender = Some(rtp::spawn(track, live.frames.subscribe(), live.control.clone(), live.quality.fps));
                             }
                             if let (Some(track), Some(audio)) = (c.audio_track.clone(), &live.audio) {
                                 c.audio_sender = Some(rtp::spawn_audio(track, audio.packets.subscribe()));
@@ -698,7 +697,7 @@ impl Session {
             (Kind::Turbo, Which::Video) => {
                 // Video channel open: start sending from a keyframe.
                 if let (Some(live), Some(video)) = (&self.live, c.video.clone()) {
-                    c.sender = Some(turbo::spawn(video, live.frames.subscribe(), live.control.clone(), live.keys.clone(), live.bitrate.clone(), live.epoch));
+                    c.sender = Some(turbo::spawn(video, live.frames.subscribe(), live.control.clone(), live.bitrate.clone(), live.quality.fps, live.epoch));
                 }
             }
             (Kind::Turbo, Which::Control) => c.open = true,
@@ -771,8 +770,8 @@ impl Session {
                 self.broadcast_roster().await;
             }
             (Kind::Turbo, "key") => {
-                if let Some(live) = &self.live {
-                    live.keys.request(&live.control, Duration::from_millis(500));
+                if let (Some(live), Some(sender)) = (&self.live, self.conns.get(&conn).and_then(|c| c.sender.as_ref())) {
+                    sender.keys.request(&live.control, Duration::from_millis(500));
                 }
             }
             (Kind::Turbo, "rx") => self.on_report(&conn, &v).await,
@@ -880,7 +879,6 @@ impl Session {
             frames,
             quality: self.quality,
             bitrate: Arc::new(AtomicU32::new(bitrate)),
-            keys: Arc::new(KeyLimiter::new()),
             epoch: Instant::now(),
             last_captured: 0,
             log_at: (Instant::now(), 0, 0),

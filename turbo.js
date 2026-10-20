@@ -16,8 +16,11 @@ const HEADER = 20;
 const FRAG = 16000;
 const HOLD_MS = 150;        // minimum wait for a missing frame
 const HOLD_MAX_MS = 600;    // ... and maximum (long round trip, via relay)
-const PACKET_LIFETIME_MS = 400; // sender-side retransmission; on a direct path it takes ~1 ms
-const KEY_INTERVAL_MS = 1000; // keyframe requested due to full queue: at most 1 per second
+// Sender-side retransmission, no longer than the viewer waits (HOLD_MS, which
+// only grows with the round trip): a later resend is for a frame already given up on.
+const PACKET_LIFETIME_MS = 150;
+const KEY_INTERVAL_MS = 1000; // keyframe requested due to full queue: at most 1 per second per viewer
+const QUEUE_FRAMES = 3;       // send queue allowed per viewer, in average frames (~50 ms)
 const VIEWER_KEY_MS = 500;    // keyframe requested by a viewer that lost a frame
 const REPORT_MS = 1000;       // report from viewer to streamer
 // Hardware encoders (NVENC/QuickSync via Media Foundation, VAAPI)
@@ -92,9 +95,9 @@ export class TurboSender {
   }
 
   addViewer(id, channel, { onCongested } = {}) {
-    const v = { channel, seq: 0, needKey: true, frames: 0, bytes: 0, dropped: 0, drops: [], onCongested, last: null, strikes: 0 };
+    const v = { id, channel, seq: 0, needKey: true, frames: 0, bytes: 0, dropped: 0, drops: [], onCongested, last: null, strikes: 0, lastKeyAt: -Infinity, lastKey: null };
     this.viewers.set(id, v);
-    const start = () => this.requestKey(0);
+    const start = () => this.requestKey(0, id);
     if (channel.readyState === "open") start();
     else channel.addEventListener("open", start, { once: true });
   }
@@ -117,11 +120,23 @@ export class TurboSender {
     if (v.strikes >= 3) v.onCongested?.();
   }
 
-  requestKey(minInterval = KEY_INTERVAL_MS) {
+  // Each viewer has its own limit, so one asking does not hold back another
+  // who just joined; requests within the same frame still make one keyframe.
+  requestKey(minInterval = KEY_INTERVAL_MS, id = null) {
+    const holder = (id !== null && this.viewers.get(id)) || this;
     const now = performance.now();
-    if (now - this.lastKeyAt < minInterval) return;
-    this.lastKeyAt = now;
+    if (now - holder.lastKeyAt < minInterval) return;
+    holder.lastKeyAt = now;
     this.needKey = true;
+  }
+
+  // Bytes allowed in a viewer's send queue: a few average frames, plus what is
+  // left of the last keyframe still draining at the bitrate (without it the
+  // frames after a keyframe would be dropped and another one asked for).
+  #budget(v) {
+    const perSecond = this.bitrate / 8;
+    const keyLeft = v.lastKey ? Math.max(0, v.lastKey.size - ((performance.now() - v.lastKey.at) / 1000) * perSecond) : 0;
+    return Math.max(32 * 1024, (perSecond / Math.max(1, this.framerate)) * QUEUE_FRAMES) + keyLeft;
   }
 
   setRate({ bitrate, framerate }) {
@@ -208,10 +223,10 @@ export class TurboSender {
   #sendTo(v, data, key, ts) {
     const ch = v.channel;
     if (ch.readyState !== "open") { v.needKey = true; return; }
-    const budget = Math.max(256e3, (this.bitrate / 8) * 0.3); // ~300 ms of video in the queue
+    const budget = this.#budget(v);
     if (v.needKey && !key) {
       // wait for the queue to drain before requesting the keyframe, or it won't fit either
-      if (ch.bufferedAmount < budget / 2) this.requestKey();
+      if (ch.bufferedAmount < budget / 2) this.requestKey(KEY_INTERVAL_MS, v.id);
       return;
     }
     if (ch.bufferedAmount > budget) {
@@ -242,7 +257,7 @@ export class TurboSender {
       buf.set(body, HEADER + extraLen);
       try { ch.send(buf); } catch { v.needKey = true; return; }
     }
-    if (key) v.needKey = false;
+    if (key) { v.needKey = false; v.lastKey = { size: data.byteLength, at: performance.now() }; }
     v.frames++;
     v.bytes += data.byteLength;
   }

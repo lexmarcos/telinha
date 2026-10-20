@@ -637,7 +637,7 @@ function turboMember(id) {
   state.outgoing.set(id, handle);
   state.turboOut.addViewer(id, channel, { onCongested: () => demote(id, true) });
   conn.on("data", (msg) => {
-    if (msg?.t === "key") state.turboOut?.requestKey(500);
+    if (msg?.t === "key") state.turboOut?.requestKey(500, id);
     else if (msg?.t === "rx") {
       if (msg.relay) demote(id);
       else state.turboOut?.report(id, msg);

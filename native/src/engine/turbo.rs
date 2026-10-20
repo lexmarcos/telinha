@@ -52,7 +52,9 @@ pub struct Counters {
     pub dropped: AtomicU64,
 }
 
-/// Rate-limits keyframe requests coming from several places at once.
+/// Rate-limits one viewer's keyframe requests. Each viewer has its own, so
+/// one asking does not hold back another who just joined; requests that
+/// land in the same frame still make a single keyframe (one encoder).
 pub struct KeyLimiter {
     last: std::sync::Mutex<Option<Instant>>,
 }
@@ -73,7 +75,26 @@ impl KeyLimiter {
 
 pub struct Sender {
     pub counters: Arc<Counters>,
+    /// This viewer's keyframe requests (its sender's and its own messages).
+    pub keys: Arc<KeyLimiter>,
     stop: Arc<AtomicBool>,
+}
+
+/// How many average frames may wait in the channel's send queue. Past that
+/// the frame is dropped (and a keyframe follows once it drains) instead of
+/// adding delay: the old 300 ms budget let latency grow that much before
+/// anything gave way.
+const QUEUE_FRAMES: f64 = 3.0;
+
+/// Bytes allowed in the send queue: about three average frames (~50 ms),
+/// plus what is left of the last keyframe still draining at the target
+/// bitrate (a keyframe is many frames' worth: without that allowance, the
+/// frames after it would be dropped and another keyframe asked for).
+fn budget(bitrate: u32, fps: u32, key: Option<(usize, Instant)>, now: Instant) -> usize {
+    let bytes_per_s = bitrate as f64 / 8.0;
+    let frames = (bytes_per_s / fps.max(1) as f64 * QUEUE_FRAMES) as usize;
+    let key_left = key.map_or(0.0, |(size, at)| size as f64 - now.saturating_duration_since(at).as_secs_f64() * bytes_per_s);
+    frames.max(32 * 1024) + key_left.max(0.0) as usize
 }
 
 impl Sender {
@@ -92,16 +113,20 @@ pub fn spawn(
     channel: Arc<dyn DataChannel>,
     mut frames: broadcast::Receiver<Arc<EncodedFrame>>,
     control: Arc<Control>,
-    keys: Arc<KeyLimiter>,
     bitrate: Arc<AtomicU32>,
+    fps: u32,
     epoch: Instant,
 ) -> Sender {
     let counters = Arc::new(Counters::default());
+    let keys = Arc::new(KeyLimiter::new());
     let stop = Arc::new(AtomicBool::new(false));
-    let (c, s) = (counters.clone(), stop.clone());
+    let (c, s, k) = (counters.clone(), stop.clone(), keys.clone());
     tokio::spawn(async move {
+        let keys = k;
         let mut seq: u32 = 0;
         let mut need_key = true;
+        // Size and send time of the last keyframe, for the queue budget.
+        let mut last_key: Option<(usize, Instant)> = None;
         keys.request(&control, Duration::ZERO);
         while !s.load(Ordering::Relaxed) {
             let frame = match tokio::time::timeout(Duration::from_millis(500), frames.recv()).await {
@@ -115,7 +140,7 @@ pub fn spawn(
                 Ok(Err(broadcast::error::RecvError::Closed)) => break,
                 Err(_) => continue,
             };
-            let budget = (bitrate.load(Ordering::Relaxed) as usize / 8 * 3 / 10).max(256 * 1024); // ~300 ms
+            let budget = budget(bitrate.load(Ordering::Relaxed), fps, last_key, Instant::now());
             let queued = channel.outstanding_bytes().await.unwrap_or(0);
             if need_key && !frame.key {
                 // Only request the keyframe once the queue drained, otherwise it won't fit either.
@@ -143,12 +168,13 @@ pub fn spawn(
             seq = seq.wrapping_add(1);
             if frame.key {
                 need_key = false;
+                last_key = Some((frame.data.len(), Instant::now()));
             }
             c.frames.fetch_add(1, Ordering::Relaxed);
             c.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
         }
     });
-    Sender { counters, stop }
+    Sender { counters, keys, stop }
 }
 
 #[cfg(test)]
@@ -178,5 +204,19 @@ mod tests {
         assert_eq!(ps[1][1], 1); // keyframe without config
         let total: usize = ps.iter().enumerate().map(|(i, p)| p.len() - HEADER - if i == 0 { cfg_len } else { 0 }).sum();
         assert_eq!(total, 40_000);
+    }
+
+    #[test]
+    fn fila_de_poucos_quadros_mais_a_keyframe() {
+        let now = Instant::now();
+        // 40 Mb/s at 60 fps: 3 frames of ~83 kB.
+        assert_eq!(budget(40_000_000, 60, None, now), 250_000);
+        // Low bitrates keep a floor.
+        assert_eq!(budget(2_000_000, 60, None, now), 32 * 1024);
+        // A 400 kB keyframe just sent counts on top, draining at the bitrate.
+        assert_eq!(budget(40_000_000, 60, Some((400_000, now)), now), 650_000);
+        let later = now + Duration::from_millis(40);
+        assert_eq!(budget(40_000_000, 60, Some((400_000, now)), later), 450_000);
+        assert_eq!(budget(40_000_000, 60, Some((400_000, now)), now + Duration::from_secs(1)), 250_000);
     }
 }

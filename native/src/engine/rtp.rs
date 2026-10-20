@@ -309,10 +309,11 @@ pub fn spawn(
     video: VideoTrack,
     mut frames: broadcast::Receiver<Arc<EncodedFrame>>,
     control: Arc<Control>,
-    keys: Arc<KeyLimiter>,
     fps: u32,
 ) -> Sender {
     let counters = Arc::new(Counters::default());
+    // This viewer's own keyframe limit (PLI/FIR and its sender's requests).
+    let keys = Arc::new(KeyLimiter::new());
     let stop = Arc::new(AtomicBool::new(false));
 
     let VideoTrack { track, sender } = video;

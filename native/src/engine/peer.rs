@@ -12,10 +12,14 @@ use webrtc::peer_connection::{
 };
 
 /// Minimum-latency video channel: negotiated on both sides with the same id,
-/// unordered, with retransmission for up to 400 ms. On a direct link a resend
-/// takes ~1 ms; over the relay (~130 ms round trip) 400 ms leaves time to retry.
+/// unordered, with retransmission for up to 150 ms, the same the viewer waits
+/// for a missing frame (turbo.js HOLD_MS, which only grows with the round
+/// trip). A resend later than that arrives for a frame already given up on.
+/// webrtc-rs's SCTP retransmission timer starts at 1 s, so what resends in time is the
+/// fast retransmit after the next packets: ~1 round trip, enough below 100 ms
+/// (viewers over the relay get RTP anyway).
 pub const VIDEO_CHANNEL_ID: u16 = 100;
-pub const VIDEO_PACKET_LIFETIME_MS: u16 = 400;
+pub const VIDEO_PACKET_LIFETIME_MS: u16 = 150;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Which {
