@@ -3,10 +3,12 @@
 //! in the call do not hear their own voice), otherwise all audio except
 //! Telinha's own chimes. Only one process tree can be left out, so with
 //! Discord open the capture goes silent while a chime plays. Discord is looked
-//! up again every few seconds, so opening or restarting it mid-stream works.
+//! up again every few seconds (on a thread of its own: a full process scan
+//! would stall the 10 ms capture loop), so opening or restarting it
+//! mid-stream works.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::SyncSender;
 
 use wasapi::{AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat, initialize_mta};
@@ -69,18 +71,39 @@ pub fn start(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<String, 
 /// the stream started, it must still be left out.
 const RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Keeps Discord's root PID (0 = not open) up to date, from its own thread.
+fn watch_discord(stop: Arc<AtomicBool>) -> Arc<AtomicU32> {
+    let pid = Arc::new(AtomicU32::new(discord_pid().unwrap_or(0)));
+    let p = pid.clone();
+    let spawned = std::thread::Builder::new().name("telinha-discord".into()).spawn(move || {
+        let mut last = std::time::Instant::now();
+        while !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if last.elapsed() >= RECHECK {
+                last = std::time::Instant::now();
+                p.store(discord_pid().unwrap_or(0), Ordering::Relaxed);
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("Discord lookup: {e}");
+    }
+    pid
+}
+
 fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<(), String> {
     let _boost = crate::realtime::boost(crate::realtime::Task::Audio);
     initialize_mta().ok().map_err(|e| format!("COM: {e:?}"))?;
+    let discord = watch_discord(stop.clone());
     while !stop.load(Ordering::Relaxed) {
-        let discord = discord_pid();
-        capture(&tx, &stop, discord)?;
+        let pid = discord.load(Ordering::Relaxed);
+        capture(&tx, &stop, (pid != 0).then_some(pid), &discord)?;
     }
     Ok(())
 }
 
 /// Captures until the stream stops or Discord's process changes.
-fn capture(tx: &SyncSender<Vec<f32>>, stop: &AtomicBool, discord: Option<u32>) -> Result<(), String> {
+fn capture(tx: &SyncSender<Vec<f32>>, stop: &AtomicBool, discord: Option<u32>, now: &AtomicU32) -> Result<(), String> {
     let format = WaveFormat::new(32, 32, &SampleType::Float, RATE as usize, CHANNELS, None);
     // Whether our own chimes reach the capture (then they are silenced).
     let mut hears_us = discord.is_some();
@@ -105,25 +128,27 @@ fn capture(tx: &SyncSender<Vec<f32>>, stop: &AtomicBool, discord: Option<u32>) -
     let capture = client.get_audiocaptureclient().map_err(|e| e.to_string())?;
     client.start_stream().map_err(|e| e.to_string())?;
 
-    let mut queue = std::collections::VecDeque::new();
-    let mut checked = std::time::Instant::now();
     while !stop.load(Ordering::Relaxed) {
-        capture.read_from_device_to_deque(&mut queue).map_err(|e| e.to_string())?;
-        if !queue.is_empty() {
-            let bytes: Vec<u8> = queue.drain(..queue.len() / 4 * 4).collect();
-            let mut samples: Vec<f32> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
-            if hears_us && super::chime::muting() {
+        // Every packet that is ready: reading one per wake-up would leave the
+        // rest behind as permanent delay.
+        while let Some(frames) = capture.get_next_packet_size().map_err(|e| e.to_string())?.filter(|&n| n > 0) {
+            let mut samples = vec![0f32; frames as usize * CHANNELS];
+            // SAFETY: any 4 bytes are a valid f32, and the buffer is exactly
+            // `frames` of 32-bit float stereo, the format asked for above.
+            let bytes = unsafe { std::slice::from_raw_parts_mut(samples.as_mut_ptr().cast::<u8>(), samples.len() * 4) };
+            let (read, info) = capture.read_from_device(bytes).map_err(|e| e.to_string())?;
+            samples.truncate(read as usize * CHANNELS);
+            if info.flags.silent || (hears_us && super::chime::muting()) {
                 samples.fill(0.0);
             }
-            let _ = tx.try_send(samples);
-        }
-        if checked.elapsed() >= RECHECK {
-            checked = std::time::Instant::now();
-            let now = discord_pid();
-            if now != discord {
-                tracing::info!(before = ?discord, now = ?now, "Discord changed; restarting the audio capture");
-                break;
+            if !samples.is_empty() {
+                let _ = tx.try_send(samples);
             }
+        }
+        let current = now.load(Ordering::Relaxed);
+        if current != discord.unwrap_or(0) {
+            tracing::info!(before = ?discord, now = current, "Discord changed; restarting the audio capture");
+            break;
         }
         if event.wait_for_event(200).is_err() {
             // With no audio playing the event does not fire; keep waiting.
