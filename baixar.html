@@ -15,10 +15,10 @@
     body { overflow: auto; }
     .download {
       min-height: 100dvh; display: grid; justify-items: center; align-content: center; gap: 2rem;
-      padding: max(4.5rem, env(safe-area-inset-top)) 1rem max(2.5rem, env(safe-area-inset-bottom));
+      padding: max(4.5rem, calc(env(safe-area-inset-top) + 3.5rem)) max(1rem, env(safe-area-inset-right)) max(2.5rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
     }
     .back {
-      position: fixed; top: max(1rem, env(safe-area-inset-top)); left: 1rem;
+      position: fixed; top: max(1rem, env(safe-area-inset-top)); left: max(1rem, env(safe-area-inset-left));
       display: inline-flex; align-items: center; gap: 0.25rem;
       min-height: 2.5rem; padding: 0 0.9rem 0 0.6rem; border-radius: 999px;
       color: var(--muted); text-decoration: none; font-weight: 600; font-size: 0.9375rem;
@@ -111,6 +111,11 @@
     .chip:hover { background: rgba(200, 212, 255, 0.18); }
     .chip:active { transform: scale(0.95); transition-duration: 60ms; }
 
+    @media (pointer: coarse) {
+      .back { min-height: 2.75rem; }
+      .chip { min-height: 2.75rem; }
+      .get .alt { padding: 0.6rem 0.75rem; }
+    }
     .empty-state { text-align: center; color: var(--muted); max-width: 24rem; margin: 0; }
     @media (prefers-reduced-motion: reduce) { .bubble { animation: fade 300ms ease both !important; } }
   </style>
