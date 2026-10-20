@@ -1176,7 +1176,7 @@ function renderStreams() {
     item.thumb.querySelector(".thumb-name > span").textContent = item.local ? "Você" : item.name;
     if (item.thumb.parentNode !== ui.strip) {
       ui.strip.append(item.thumb);
-      item.thumb.querySelector("video").play().catch(() => {}); // leaving the DOM pauses the video
+      item.thumb.querySelector("video")?.play().catch(() => {}); // leaving the DOM pauses the video (a canvas thumb has none)
     }
   }
   if (!showStrip) for (const item of state.streams.values()) item.thumb.remove();
