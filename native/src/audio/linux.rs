@@ -61,6 +61,12 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, everything: bool) -> Res
         *pw::keys::MEDIA_ROLE => "Music",
         *pw::keys::NODE_NAME => node_name(),
         *pw::keys::NODE_DESCRIPTION => "Telinha (som da transmissão)",
+        // 10 ms chunks, the same as an Opus frame, instead of PipeWire's
+        // default 1024 samples (21 ms). While streaming, the graph we are
+        // linked to then runs at that quantum unless something asks for
+        // less (games and browsers often do): more wake-ups for the apps
+        // playing, a common setting that PipeWire handles fine.
+        *pw::keys::NODE_LATENCY => "480/48000",
     };
     if everything {
         // Captures what plays on the default output (its monitor).

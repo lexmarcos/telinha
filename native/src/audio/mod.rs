@@ -48,8 +48,11 @@ impl Drop for Audio {
 
 pub fn start() -> Result<Audio, String> {
     let stop = Arc::new(AtomicBool::new(false));
-    let (packets, _) = broadcast::channel(64);
-    let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(64);
+    // Short queues: anything that piles up here is delay (64 of each held
+    // more than a second). 16 Opus packets = 160 ms; 8 capture chunks of
+    // 10 to 21 ms each. Capture drops when full (try_send).
+    let (packets, _) = broadcast::channel(16);
+    let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(8);
 
     #[cfg(target_os = "linux")]
     let source = linux::start(tx, stop.clone())?;
@@ -132,7 +135,11 @@ impl Opus {
             ff::av_channel_layout_default(&mut c.ch_layout, CHANNELS as i32);
             c.bit_rate = BITRATE;
             c.time_base = ff::AVRational { num: 1, den: RATE as i32 };
-            for (k, v) in [("application", "lowdelay"), ("frame_duration", "10"), ("vbr", "off")] {
+            // Loss: told to expect ~5%, libopus leans less on the previous
+            // frame. In-band FEC (what the SDP's useinbandfec refers to) only
+            // exists in its SILK modes; at this bitrate in low-delay mode it
+            // is all CELT, so "fec" only takes effect if that ever changes.
+            for (k, v) in [("application", "lowdelay"), ("frame_duration", "10"), ("vbr", "off"), ("packet_loss", "5"), ("fec", "1")] {
                 let (k, v) = (CString::new(k).unwrap(), CString::new(v).unwrap());
                 ff::av_opt_set(c.priv_data, k.as_ptr(), v.as_ptr(), 0);
             }

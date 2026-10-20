@@ -235,17 +235,39 @@ pub fn spawn_audio(track: Arc<TrackLocalStaticSample>, mut packets: broadcast::R
     let s = stop.clone();
     tokio::spawn(async move {
         let ssrc = track.ssrcs().await.first().copied().unwrap_or(0);
+        let mut skipped: u64 = 0;
         while !s.load(Ordering::Relaxed) {
-            match tokio::time::timeout(Duration::from_millis(500), packets.recv()).await {
-                Ok(Ok(p)) => {
-                    let sample = Sample { data: p.data.clone(), duration: p.duration, ..Sample::new(Instant::now()) };
-                    if track.sample_writer(ssrc, OPUS_PT).write_sample(&sample).await.is_err() {
-                        break;
-                    }
+            let p = match tokio::time::timeout(Duration::from_millis(500), packets.recv()).await {
+                Ok(Ok(p)) => p,
+                // Fell behind: jump to the newest packet. What was skipped goes
+                // out as lost (sequence and clock advance), so the viewer conceals
+                // it instead of playing late from then on.
+                Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+                    skipped += n;
+                    continue;
                 }
-                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
                 Ok(Err(broadcast::error::RecvError::Closed)) => break,
-                Err(_) => {}
+                Err(_) => continue,
+            };
+            let mut p = p;
+            // After a lag the queue is full of old packets: only the newest one
+            // goes out. (Bursts of 2 or 3 are normal: capture hands over ~21 ms
+            // at a time.)
+            while skipped > 0 {
+                match packets.try_recv() {
+                    Ok(newer) => {
+                        skipped += 1;
+                        p = newer;
+                    }
+                    Err(broadcast::error::TryRecvError::Lagged(n)) => skipped += n,
+                    Err(_) => break,
+                }
+            }
+            let prev_dropped_packets = skipped.min(u16::MAX as u64) as u16;
+            skipped = 0;
+            let sample = Sample { data: p.data.clone(), duration: p.duration, prev_dropped_packets, ..Sample::new(Instant::now()) };
+            if track.sample_writer(ssrc, OPUS_PT).write_sample(&sample).await.is_err() {
+                break;
             }
         }
     });
