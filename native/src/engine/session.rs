@@ -62,7 +62,7 @@ struct Conn {
     /// Name and capability sent in the offer (guest of the host).
     meta: Value,
     sender: Option<turbo::Sender>,
-    track: Option<Arc<webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample>>,
+    track: Option<rtp::VideoTrack>,
     rtp_sender: Option<rtp::Sender>,
     audio_track: Option<Arc<webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample>>,
     audio_sender: Option<rtp::AudioSender>,

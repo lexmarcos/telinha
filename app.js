@@ -373,6 +373,7 @@ function acceptTurbo(conn) {
 function acceptTurboAudio(call) {
   const id = call.peer;
   call.answer(undefined, { sdpTransform: hiFiAudio });
+  tuneReceiver(call.peerConnection);
   call.on("stream", (stream) => { state.audioIn.set(id, stream); showTurbo(id); });
   const end = () => {
     if (state.audioIn.get(id)?.id !== call.remoteStream?.id) return;
@@ -719,9 +720,20 @@ async function hardwareCodec(track) {
   return null;
 }
 
+// No wait on the receive side beyond what the network demands: the jitter
+// buffer target is a floor (0 = the least the browser allows), for video and
+// audio alike. The native app also asks for zero playout delay in RTP.
+function lowLatency(receiver) {
+  try {
+    if ("jitterBufferTarget" in receiver) receiver.jitterBufferTarget = 0;
+    else if ("playoutDelayHint" in receiver) receiver.playoutDelayHint = 0; // older Chrome
+  } catch {}
+}
+
 function tuneReceiver(pc, codec) {
   if (!pc) return;
   pc.addEventListener("track", ({ receiver, transceiver }) => {
+    lowLatency(receiver);
     if (codec && receiver.track.kind === "video" && transceiver.setCodecPreferences) {
       const all = RTCRtpReceiver.getCapabilities("video")?.codecs ?? [];
       const rank = (c) => c.mimeType !== codec ? 2 : /packetization-mode=1/.test(c.sdpFmtpLine ?? "") || codec !== "video/H264" ? 0 : 1;

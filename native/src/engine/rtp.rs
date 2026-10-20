@@ -13,7 +13,11 @@ use rtc::media::Sample;
 use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtcp::receiver_report::ReceiverReport;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind};
+use rtc::rtp::extension::HeaderExtension;
+use rtc::rtp::extension::playout_delay_extension::PlayoutDelayExtension;
+use rtc::rtp_transceiver::rtp_sender::{
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RTCRtpHeaderExtensionCapability, RtpCodecKind,
+};
 use rtc::sansio::Protocol;
 use rtc::shared::error::Error;
 use tokio::sync::broadcast;
@@ -21,21 +25,32 @@ use webrtc::media_stream::Track;
 use webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample;
 use webrtc::media_stream::track_local::{TrackLocal, TrackLocalEvent};
 use webrtc::peer_connection::{MediaEngine, PeerConnection};
+use webrtc::rtp_transceiver::RtpSender;
 
 use super::turbo::KeyLimiter;
 use crate::video::{Control, EncodedFrame};
 
-pub const H264_PT: u8 = 102;
+/// H.264 payload types offered, best first. The GPU encoders produce High
+/// profile without B-frames, which is also valid Constrained High; Safari
+/// lists only Constrained High, Chrome both. Constrained Baseline stays as a
+/// last resort for receivers that take nothing else (older Firefox): the same
+/// stream goes out under it, as it always did.
+const H264_PROFILES: [(u8, &str); 3] = [(102, "640c34"), (104, "640034"), (108, "42e01f")];
+pub const H264_PT: u8 = H264_PROFILES[0].0;
 
-fn h264_codec() -> RTCRtpCodec {
+fn h264_codec(profile_level_id: &str) -> RTCRtpCodec {
     let fb = |typ: &str, parameter: &str| rtc::rtp_transceiver::rtp_sender::RTCPFeedback { typ: typ.into(), parameter: parameter.into() };
     RTCRtpCodec {
         mime_type: "video/H264".into(),
         clock_rate: 90000,
         channels: 0,
-        sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".into(),
+        sdp_fmtp_line: format!("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={profile_level_id}"),
         rtcp_feedback: vec![fb("goog-remb", ""), fb("ccm", "fir"), fb("nack", ""), fb("nack", "pli")],
     }
+}
+
+fn h264_codecs() -> Vec<RTCRtpCodecParameters> {
+    H264_PROFILES.iter().map(|&(payload_type, p)| RTCRtpCodecParameters { rtp_codec: h264_codec(p), payload_type, ..Default::default() }).collect()
 }
 
 pub fn opus_codec() -> RTCRtpCodec {
@@ -48,13 +63,20 @@ pub fn opus_codec() -> RTCRtpCodec {
     }
 }
 
+/// Asks the receiver to show each frame as soon as it is decoded, without the
+/// smoothing buffer (Chrome honors it: the same as cloud gaming services).
+const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
+
 /// Media engine with only H.264 and Opus: negotiation cannot pick another
 /// video codec the app does not produce.
 pub fn media_engine() -> Result<MediaEngine, String> {
     let mut m = MediaEngine::default();
-    m.register_codec(RTCRtpCodecParameters { rtp_codec: h264_codec(), payload_type: H264_PT, ..Default::default() }, RtpCodecKind::Video)
-        .map_err(|e| e.to_string())?;
+    for codec in h264_codecs() {
+        m.register_codec(codec, RtpCodecKind::Video).map_err(|e| e.to_string())?;
+    }
     m.register_codec(RTCRtpCodecParameters { rtp_codec: opus_codec(), payload_type: 111, ..Default::default() }, RtpCodecKind::Audio)
+        .map_err(|e| e.to_string())?;
+    m.register_header_extension(RTCRtpHeaderExtensionCapability { uri: PLAYOUT_DELAY_URI.into() }, RtpCodecKind::Video, None)
         .map_err(|e| e.to_string())?;
     Ok(m)
 }
@@ -121,7 +143,14 @@ impl Interceptor for Feedback {
 
 /* ---------------- track and sender ---------------- */
 
-pub async fn add_video_track(pc: &Arc<dyn PeerConnection>) -> Result<Arc<TrackLocalStaticSample>, String> {
+/// The video track and its sender (which knows the negotiated payload type).
+#[derive(Clone)]
+pub struct VideoTrack {
+    track: Arc<TrackLocalStaticSample>,
+    sender: Arc<dyn RtpSender>,
+}
+
+pub async fn add_video_track(pc: &Arc<dyn PeerConnection>) -> Result<VideoTrack, String> {
     let ssrc = rand::random::<u32>();
     let track = Arc::new(
         TrackLocalStaticSample::new(
@@ -133,15 +162,36 @@ pub async fn add_video_track(pc: &Arc<dyn PeerConnection>) -> Result<Arc<TrackLo
                 RtpCodecKind::Video,
                 vec![RTCRtpEncodingParameters {
                     rtp_coding_parameters: RTCRtpCodingParameters { ssrc: Some(ssrc), ..Default::default() },
-                    codec: h264_codec(),
+                    codec: h264_codec(H264_PROFILES[0].1),
                     ..Default::default()
                 }],
             ),
         )
         .map_err(|e| e.to_string())?,
     );
-    pc.add_track(track.clone() as Arc<dyn TrackLocal>).await.map_err(|e| e.to_string())?;
-    Ok(track)
+    let sender = pc.add_track(track.clone() as Arc<dyn TrackLocal>).await.map_err(|e| e.to_string())?;
+    // The transceiver would offer only the track's own codec: offer every profile.
+    for t in pc.get_transceivers().await {
+        if t.sender().await.ok().flatten().is_some_and(|s| s.id() == sender.id()) {
+            t.set_codec_preferences(h264_codecs()).await.map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(VideoTrack { track, sender })
+}
+
+/// What the viewer accepted: the H.264 payload type (High profile first) and
+/// whether it takes the playout delay extension.
+async fn negotiated(sender: &Arc<dyn RtpSender>) -> (u8, bool) {
+    let params = sender.get_parameters().await.map(|p| p.rtp_parameters).unwrap_or_default();
+    let pt = params
+        .codecs
+        .iter()
+        .filter(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("video/H264"))
+        .min_by_key(|c| !c.rtp_codec.sdp_fmtp_line.to_ascii_lowercase().contains("profile-level-id=64"))
+        .map_or(H264_PT, |c| c.payload_type);
+    let no_delay = params.header_extensions.iter().any(|e| e.uri == PLAYOUT_DELAY_URI);
+    tracing::info!(payload_type = pt, no_delay, "RTP video negotiated");
+    (pt, no_delay)
 }
 
 pub const OPUS_PT: u8 = 111;
@@ -222,7 +272,7 @@ impl Drop for Sender {
 }
 
 pub fn spawn(
-    track: Arc<TrackLocalStaticSample>,
+    video: VideoTrack,
     mut frames: broadcast::Receiver<Arc<EncodedFrame>>,
     control: Arc<Control>,
     keys: Arc<KeyLimiter>,
@@ -231,6 +281,7 @@ pub fn spawn(
     let counters = Arc::new(Counters::default());
     let stop = Arc::new(AtomicBool::new(false));
 
+    let VideoTrack { track, sender } = video;
     // Keyframe requests and loss reports from the viewer.
     let (t, c, s, ctl, k) = (track.clone(), counters.clone(), stop.clone(), control.clone(), keys.clone());
     tokio::spawn(async move {
@@ -252,6 +303,7 @@ pub fn spawn(
     let (c, s) = (counters.clone(), stop.clone());
     tokio::spawn(async move {
         let ssrc = track.ssrcs().await.first().copied().unwrap_or(0);
+        let (pt, no_delay) = negotiated(&sender).await;
         // The RTP clock advances by each sample's duration. It must follow the
         // real time between captures: a fixed 1/fps while frames come slower
         // (a heavy 4K screen, or a still one sending a frame every 100 ms) made
@@ -281,7 +333,13 @@ pub fn spawn(
                 .clamp(Duration::from_millis(1), Duration::from_secs(1));
             last = Some(frame.captured);
             let sample = Sample { data: frame.data.clone(), duration, ..Sample::new(frame.captured) };
-            if track.sample_writer(ssrc, H264_PT).write_sample(&sample).await.is_err() {
+            // Only if the viewer accepted the extension: the sender refuses
+            // packets carrying one that was not negotiated.
+            let mut writer = track.sample_writer(ssrc, pt);
+            if no_delay {
+                writer = writer.with_extension(HeaderExtension::PlayoutDelay(PlayoutDelayExtension { min_delay: 0, max_delay: 0 }));
+            }
+            if writer.write_sample(&sample).await.is_err() {
                 break;
             }
             c.frames.fetch_add(1, Ordering::Relaxed);
@@ -289,4 +347,64 @@ pub fn spawn(
         }
     });
     Sender { counters, stop }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use webrtc::peer_connection::RTCSessionDescription;
+
+    async fn offer() -> (Arc<dyn PeerConnection>, VideoTrack, String) {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
+        let pc = super::super::peer::new_connection(&[], "teste", true, tx).await.unwrap();
+        let video = add_video_track(&pc).await.unwrap();
+        add_audio_track(&pc).await.unwrap();
+        let offer = pc.create_offer(None).await.unwrap();
+        pc.set_local_description(offer.clone()).await.unwrap();
+        (pc, video, offer.sdp)
+    }
+
+    #[tokio::test]
+    async fn oferece_high_baseline_e_atraso_zero() {
+        let (_pc, _video, sdp) = offer().await;
+        assert!(sdp.contains("m=video 9 UDP/TLS/RTP/SAVPF 102 104 108\r\n"), "{sdp}");
+        for (pt, profile) in H264_PROFILES {
+            assert!(sdp.contains(&format!("a=fmtp:{pt} level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={profile}")));
+        }
+        let video = &sdp[sdp.find("m=video").unwrap()..sdp.find("m=audio").unwrap()];
+        assert!(video.contains(PLAYOUT_DELAY_URI));
+        assert!(!sdp[sdp.find("m=audio").unwrap()..].contains(PLAYOUT_DELAY_URI));
+    }
+
+    // Headless Chrome 151 on Linux answering that offer through the site's
+    // tuneReceiver: its H.264 decoder lists 42001f, 42e01f, 4d001f and f4001f,
+    // so it takes the Constrained Baseline entry, plus the playout delay.
+    const CHROME_ANSWER: &str = "v=0\r\no=- 6183926426983307877 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 108\r\nc=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\na=ice-ufrag:zgv0\r\na=ice-pwd:Y2HmuAafpE2QhGd3RL17mPvE\r\na=ice-options:trickle\r\n\
+a=fingerprint:sha-256 8B:0F:D7:CF:1D:D4:9D:3C:FC:8F:CA:10:45:BC:DE:7E:30:5A:8C:04:D8:0F:49:9B:D8:91:E6:E8:C2:4C:A4:F5\r\na=setup:active\r\na=mid:0\r\n\
+a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\na=extmap:1 http://www.webrtc.org/experiments/rtp-hdrext/playout-delay\r\n\
+a=extmap:2 urn:ietf:params:rtp-hdrext:sdes:mid\r\na=extmap:3 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id\r\na=extmap:4 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id\r\n\
+a=recvonly\r\na=rtcp-mux\r\na=rtcp-rsize\r\na=rtpmap:108 H264/90000\r\na=rtcp-fb:108 goog-remb\r\na=rtcp-fb:108 transport-cc\r\na=rtcp-fb:108 ccm fir\r\n\
+a=rtcp-fb:108 nack\r\na=rtcp-fb:108 nack pli\r\na=fmtp:108 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\na=ice-ufrag:zgv0\r\na=ice-pwd:Y2HmuAafpE2QhGd3RL17mPvE\r\na=ice-options:trickle\r\n\
+a=fingerprint:sha-256 8B:0F:D7:CF:1D:D4:9D:3C:FC:8F:CA:10:45:BC:DE:7E:30:5A:8C:04:D8:0F:49:9B:D8:91:E6:E8:C2:4C:A4:F5\r\na=setup:active\r\na=mid:1\r\n\
+a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\na=recvonly\r\na=rtcp-mux\r\na=rtcp-rsize\r\na=rtpmap:111 opus/48000/2\r\n\
+a=rtcp-fb:111 transport-cc\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n";
+
+    async fn negotiate(answer: String) -> (u8, bool) {
+        let (pc, video, _) = offer().await;
+        pc.set_remote_description(RTCSessionDescription::answer(answer).unwrap()).await.unwrap();
+        negotiated(&video.sender).await
+    }
+
+    #[tokio::test]
+    async fn segue_o_que_o_navegador_aceitou() {
+        assert_eq!(negotiate(CHROME_ANSWER.into()).await, (108, true));
+        // A receiver that takes High (Safari lists Constrained High) gets it first.
+        let high = CHROME_ANSWER
+            .replace("SAVPF 108\r\n", "SAVPF 108 102\r\n")
+            .replace("a=rtpmap:108 H264/90000\r\n", "a=rtpmap:108 H264/90000\r\na=rtpmap:102 H264/90000\r\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f\r\n")
+            .replace("a=extmap:1 http://www.webrtc.org/experiments/rtp-hdrext/playout-delay\r\n", "");
+        assert_eq!(negotiate(high).await, (102, false));
+    }
 }
