@@ -22,7 +22,7 @@
 const MAGIC = 0x54;
 const HEADER = 20;
 const FRAG = 16000;
-const FEC_GROUP = 5;          // fragments per parity packet (20% more data at most... 50% for 2)
+const FEC_GROUP = 5;          // fragments per parity packet: 20% more data (up to 50% for two-fragment frames)
 const FEC_HOLD_MS = 30000;    // parity stays on this long after the last loss a viewer reported
 const HOLD_MS = 150;        // minimum wait for a missing frame
 const HOLD_MAX_MS = 600;    // ... and maximum (long round trip, via relay)

@@ -52,8 +52,26 @@ fn h264_codec(profile_level_id: &str) -> RTCRtpCodec {
     }
 }
 
+/// Each H.264 entry with its retransmission (RTX, RFC 4588) entry right
+/// after it, on the next payload type: resent packets go on their own SSRC,
+/// so the viewer tells them from late originals and counts them apart.
 fn h264_codecs() -> Vec<RTCRtpCodecParameters> {
-    H264_PROFILES.iter().map(|&(payload_type, p)| RTCRtpCodecParameters { rtp_codec: h264_codec(p), payload_type, ..Default::default() }).collect()
+    H264_PROFILES
+        .iter()
+        .flat_map(|&(payload_type, p)| {
+            let rtx = RTCRtpCodec {
+                mime_type: "video/rtx".into(),
+                clock_rate: 90000,
+                channels: 0,
+                sdp_fmtp_line: format!("apt={payload_type}"),
+                rtcp_feedback: vec![],
+            };
+            [
+                RTCRtpCodecParameters { rtp_codec: h264_codec(p), payload_type, ..Default::default() },
+                RTCRtpCodecParameters { rtp_codec: rtx, payload_type: payload_type + 1, ..Default::default() },
+            ]
+        })
+        .collect()
 }
 
 pub fn opus_codec() -> RTCRtpCodec {
@@ -265,7 +283,11 @@ pub async fn add_video_track(pc: &Arc<dyn PeerConnection>) -> Result<VideoTrack,
                 "Tela".into(),
                 RtpCodecKind::Video,
                 vec![RTCRtpEncodingParameters {
-                    rtp_coding_parameters: RTCRtpCodingParameters { ssrc: Some(ssrc), ..Default::default() },
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(ssrc),
+                        rtx: Some(rtc::rtp_transceiver::rtp_sender::RTCRtpRtxParameters { ssrc: rand::random::<u32>() }),
+                        ..Default::default()
+                    },
                     codec: h264_codec(H264_PROFILES[0].1),
                     ..Default::default()
                 }],
@@ -294,7 +316,8 @@ async fn negotiated(sender: &Arc<dyn RtpSender>) -> (u8, bool) {
         .min_by_key(|c| !c.rtp_codec.sdp_fmtp_line.to_ascii_lowercase().contains("profile-level-id=64"))
         .map_or(H264_PT, |c| c.payload_type);
     let no_delay = params.header_extensions.iter().any(|e| e.uri == PLAYOUT_DELAY_URI);
-    tracing::info!(payload_type = pt, no_delay, "RTP video negotiated");
+    let rtx = params.codecs.iter().any(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("video/rtx"));
+    tracing::info!(payload_type = pt, no_delay, rtx, "RTP video negotiated");
     (pt, no_delay)
 }
 
@@ -539,7 +562,11 @@ mod tests {
     #[tokio::test]
     async fn oferece_high_baseline_e_atraso_zero() {
         let (_pc, _video, sdp) = offer().await;
-        assert!(sdp.contains("m=video 9 UDP/TLS/RTP/SAVPF 102 104 108\r\n"), "{sdp}");
+        assert!(sdp.contains("m=video 9 UDP/TLS/RTP/SAVPF 102 103 104 105 108 109\r\n"), "{sdp}");
+        for (pt, _) in H264_PROFILES {
+            assert!(sdp.contains(&format!("a=rtpmap:{} rtx/90000\r\na=fmtp:{} apt={pt}", pt + 1, pt + 1)), "{sdp}");
+        }
+        assert!(sdp.contains("a=ssrc-group:FID "), "{sdp}");
         for (pt, profile) in H264_PROFILES {
             assert!(sdp.contains(&format!("a=fmtp:{pt} level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={profile}")));
         }
