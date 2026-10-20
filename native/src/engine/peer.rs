@@ -1,6 +1,7 @@
 //! WebRTC connections (webrtc-rs) in the format the site's PeerJS expects.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::BytesMut;
 use rtc::ice::mdns::MulticastDnsMode;
@@ -85,6 +86,13 @@ pub async fn new_video_connection(
     build(ice, conn, media, registry, tx).await
 }
 
+/// How long a pair whose remote end was learned from its own check (peer-reflexive)
+/// waits before it can be picked. Browsers send their first check before their
+/// candidate reaches us, so this is nearly every viewer; the library's 1 s default
+/// only gives a better pair time to show up, and on a local network (host name
+/// resolved by mDNS in tens of ms, the same address) none does.
+const PRFLX_WAIT: Duration = Duration::from_millis(250);
+
 /// Browsers hide their local address behind a "<uuid>.local" name, which the library
 /// resolves over multicast DNS. It needs UDP 5353 for itself, and when something else
 /// holds that port exclusively the whole connection fails ("Address already in use").
@@ -104,7 +112,7 @@ fn mdns_mode() -> MulticastDnsMode {
 async fn build(ice: &[RTCIceServer], conn: &str, media: MediaEngine, registry: Registry, tx: mpsc::Sender<PeerEvent>) -> Result<Arc<dyn PeerConnection>, String> {
     let registry = registry.with(rtc::interceptor::Slot::from(14_000), super::rtp::Feedback::new());
     let config = RTCConfigurationBuilder::new().with_ice_servers(ice.to_vec()).build();
-    let settings = SettingEngineBuilder::default().with_multicast_dns_mode(mdns_mode()).build();
+    let settings = SettingEngineBuilder::default().with_multicast_dns_mode(mdns_mode()).with_prflx_acceptance_min_wait(Some(PRFLX_WAIT)).build();
     let pc = PeerConnectionBuilder::new()
         .with_configuration(config)
         .with_setting_engine(settings)
