@@ -107,6 +107,10 @@ struct Ladder {
     trouble: Instant,
 }
 
+/// Ceiling while someone receives through the relay (TURN carries everyone's
+/// video), the same the site uses.
+const RELAY_BITRATE: u32 = 20_000_000;
+
 /// Each step down takes 25% off; each step up gives it back.
 const STEP: f64 = 0.75;
 /// Minimum time between two changes.
@@ -165,6 +169,8 @@ struct Session {
     inputs: Option<mpsc::Receiver<Input>>,
     /// Who receives via RTP after doing poorly on the data channel (or via relay).
     demoted: std::collections::HashSet<String>,
+    /// Of those, who receives through the relay (keeps the bitrate at RELAY_BITRATE).
+    relayed: std::collections::HashSet<String>,
     /// Discord session for the gatekeeper of the next stream.
     discord: Option<String>,
     /// Gatekeeper of the current stream (only people in the call can watch).
@@ -263,6 +269,7 @@ async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, c
         quality: Quality::default(),
         inputs: None,
         demoted: Default::default(),
+        relayed: Default::default(),
         discord: None,
         gate: None,
         heard: None,
@@ -484,6 +491,9 @@ impl Session {
         let Some(peer) = self.conns.get(conn).map(|c| c.peer.clone()) else { return };
         tracing::info!(peer, why, "switching to RTP video");
         self.demoted.insert(peer.clone());
+        if why == "relay" {
+            self.relayed.insert(peer.clone());
+        }
         self.close_conn(conn).await;
         // Their audio-only call becomes useless: the RTP one carries video and audio together.
         let audio_calls: Vec<String> = self.conns.iter().filter(|(_, c)| c.peer == peer && c.audio_only).map(|(k, _)| k.clone()).collect();
@@ -494,6 +504,7 @@ impl Session {
             if let Err(e) = self.open_media(&peer, false).await {
                 tracing::warn!("failed to open RTP video for {peer}: {e}");
             }
+            self.cap_for_relay();
         }
     }
 
@@ -843,9 +854,9 @@ impl Session {
                     return;
                 }
                 if let Some(live) = &mut self.live {
-                    let native = live.control.stats().native.unwrap_or((1920, 1080));
-                    let bitrate = quality.bitrate(native);
                     live.quality = quality;
+                }
+                if let (Some(bitrate), Some(live)) = (self.ceiling(), &self.live) {
                     live.bitrate.store(bitrate, Ordering::Relaxed);
                     live.control.reconfigure(Settings { quality, bitrate });
                 }
@@ -989,13 +1000,32 @@ impl Session {
         }
     }
 
+    /// The most the bitrate may be: the ideal for the screen, or the relay's
+    /// ceiling while someone watches through it.
+    fn ceiling(&self) -> Option<u32> {
+        let live = self.live.as_ref()?;
+        let ideal = live.quality.bitrate(live.control.stats().native.unwrap_or((1920, 1080)));
+        let relay = self.conns.values().any(|c| c.kind == Kind::Media && self.relayed.contains(&c.peer));
+        Some(if relay { ideal.min(RELAY_BITRATE) } else { ideal })
+    }
+
+    fn cap_for_relay(&mut self) {
+        let Some(ceiling) = self.ceiling() else { return };
+        let Some(live) = &mut self.live else { return };
+        if live.bitrate.load(Ordering::Relaxed) > ceiling {
+            tracing::info!(to = ceiling, "someone watches through the relay: capping the bitrate");
+            live.bitrate.store(ceiling, Ordering::Relaxed);
+            live.control.reconfigure(Settings { quality: live.quality, bitrate: ceiling });
+        }
+    }
+
     /// Adjusts the bitrate (shared by everyone) based on one connection's health.
     /// Returns `true` if the connection is still bad even at the floor.
     fn adapt(&mut self, conn: &str, bad: bool) -> bool {
+        let Some(ideal) = self.ceiling() else { return false };
         let Some(live) = &mut self.live else { return false };
         let Some(c) = self.conns.get_mut(conn) else { return false };
         c.health.bad = if bad { c.health.bad + 1 } else { 0 };
-        let ideal = live.quality.bitrate(live.control.stats().native.unwrap_or((1920, 1080)));
         let current = live.bitrate.load(Ordering::Relaxed);
         // Sharpness mode lowers the bitrate less (prefers dropping frames).
         let floor = match live.quality.priority {
@@ -1054,7 +1084,9 @@ impl Session {
             live.screen = Some(native);
             live.bitrate.store(live.quality.bitrate(native), Ordering::Relaxed);
             let _ = self.ui.send(Event::Screen { width: native.0, height: native.1 }).await;
+            self.cap_for_relay();
         }
+        let Some(live) = &mut self.live else { return };
         let dt = live.last_tick.elapsed().as_secs_f32().max(0.001);
         live.capture_fps = (st.captured - live.last_captured) as f32 / dt;
         live.last_captured = st.captured;
