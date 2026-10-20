@@ -83,11 +83,37 @@ struct Conn {
 
 #[derive(Default)]
 struct Health {
-    last: Option<(u64, u64, u64)>,
+    /// At the last report: when, bytes sent, bytes the viewer got, frames it lost.
+    last: Option<(Instant, u64, u64, u64)>,
     /// Consecutive bad reports.
     bad: u32,
+    /// What this viewer's network took while its send queue was full (bits/s
+    /// of video), raised a little on every calm report after that: the bitrate
+    /// stays under it, so it is not pushed back into the same freeze.
+    room: Option<f64>,
+    /// When this viewer's first report came.
+    since: Option<Instant>,
     /// Fragments the viewer rebuilt from parity, as of its last report.
     recovered: u64,
+    /// Totals as of the viewer's last report, and as of the last log line.
+    seen: Seen,
+    logged: Seen,
+    /// The viewer's measured capture-to-screen delay (ms).
+    glass: Option<f64>,
+}
+
+/// One data channel viewer's totals, for the log: where a stream froze, and why.
+#[derive(Default, Clone, Copy)]
+struct Seen {
+    /// Frames sent and frames the sender dropped (its queue was full).
+    sent: u64,
+    dropped: u64,
+    /// The viewer's side: frames lost on the way, skipped because the decoder
+    /// or the screen fell behind, and keyframes asked for.
+    lost: u64,
+    decode_drops: u64,
+    render_drops: u64,
+    keys: u64,
 }
 
 struct Live {
@@ -125,6 +151,18 @@ struct Ladder {
     /// Last bad report from anyone.
     trouble: Instant,
 }
+
+/// Frames dropped for one viewer in one report (about a second) that count as
+/// its send queue being full: what got through is what its network takes.
+const FULL_DROPS: u64 = 7;
+/// Share of that the video may use, and how much the limit grows per calm
+/// report (about a second): back above the rate that froze after ~10 s.
+const ROOM_SHARE: f64 = 0.85;
+const ROOM_GROWTH: f64 = 1.02;
+/// A new connection's first seconds don't measure the network: the data
+/// channel starts slow and the first keyframe fills its queue anyway (its
+/// drops don't count as congestion yet either).
+const ROOM_GRACE: Duration = Duration::from_secs(5);
 
 /// Ceiling while someone receives through the relay (TURN carries everyone's
 /// video), the same the site uses.
@@ -1082,19 +1120,44 @@ impl Session {
         let Some(counters) = c.sender.as_ref().map(|s| s.counters.clone()) else { return };
         // Parity while a viewer that can use it loses data.
         let recovered = v["recovered"].as_u64().unwrap_or(0);
-        let lost_any = c.health.last.is_some_and(|(_, _, lost)| v["lost"].as_u64().unwrap_or(0) > lost) || recovered > c.health.recovered;
+        let lost_any = c.health.last.is_some_and(|(_, _, _, lost)| v["lost"].as_u64().unwrap_or(0) > lost) || recovered > c.health.recovered;
         c.health.recovered = recovered;
         if lost_any && v["fec"].as_u64() == Some(1) {
             if let Some(s) = &c.sender {
                 *s.fec_until.lock().unwrap() = Some(Instant::now() + turbo::FEC_HOLD);
             }
         }
-        let now = (counters.bytes.load(Ordering::Relaxed), v["bytes"].as_u64().unwrap_or(0), v["lost"].as_u64().unwrap_or(0));
+        // Frames dropped here never reach the viewer, so its byte count can't
+        // show that congestion: they count on their own.
+        let n = |k: &str| v[k].as_u64().unwrap_or(0);
+        let dropped = counters.dropped.load(Ordering::Relaxed);
+        let drops = dropped.saturating_sub(c.health.seen.dropped);
+        c.health.seen = Seen {
+            sent: counters.frames.load(Ordering::Relaxed),
+            dropped,
+            lost: n("lost"),
+            decode_drops: n("decodeDrops"),
+            render_drops: n("renderDrops"),
+            keys: n("keyRequests"),
+        };
+        c.health.glass = v["glassMs"].as_f64();
+        let now = (Instant::now(), counters.bytes.load(Ordering::Relaxed), n("bytes"), n("lost"));
+        let since = *c.health.since.get_or_insert(now.0);
         let Some(prev) = c.health.last.replace(now) else { return };
-        let sent = now.0.saturating_sub(prev.0);
-        let got = now.1.saturating_sub(prev.1);
-        let lost = now.2.saturating_sub(prev.2);
-        let bad = (sent > 50_000 && got < sent * 8 / 10) || lost >= 2;
+        let secs = now.0.duration_since(prev.0).as_secs_f64().max(0.2);
+        let sent = now.1.saturating_sub(prev.1);
+        let got = now.2.saturating_sub(prev.2);
+        let lost = now.3.saturating_sub(prev.3);
+        let settled = now.0.duration_since(since) >= ROOM_GRACE;
+        let bad = (sent > 50_000 && got < sent * 8 / 10) || lost >= 2 || (settled && drops >= 3);
+        // A network slower than the bitrate fills the queue, and each keyframe
+        // fills it again: the picture froze for seconds at a time while the
+        // ladder took its 5 s steps down. Go straight to what got through.
+        if settled && drops >= FULL_DROPS {
+            c.health.room = Some(got as f64 * 8.0 / secs * ROOM_SHARE);
+        } else if drops == 0 && lost == 0 {
+            c.health.room = c.health.room.map(|r| (r * ROOM_GROWTH).min(1e9));
+        }
         if self.adapt(conn, bad) {
             self.demote(conn, "receiving poorly over the data channel").await;
         }
@@ -1123,7 +1186,13 @@ impl Session {
     /// Returns `true` if the connection is still bad even at the floor.
     fn adapt(&mut self, conn: &str, bad: bool) -> bool {
         let Some(ideal) = self.ceiling() else { return false };
+        // The tightest data channel viewer, next to the RTP viewers' estimates.
+        let room = self.conns.values().filter_map(|c| c.health.room).reduce(f64::min).map(|r| r as u32);
         let Some(live) = &mut self.live else { return false };
+        let cap = match (live.cap, room) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let Some(c) = self.conns.get_mut(conn) else { return false };
         c.health.bad = if bad { c.health.bad + 1 } else { 0 };
         let current = live.bitrate.load(Ordering::Relaxed);
@@ -1133,7 +1202,7 @@ impl Session {
             Priority::Nitidez => (ideal / 2).max(1_500_000),
         };
         let give_up = current <= floor && c.health.bad >= 4;
-        let next = live.ladder.next(Instant::now(), current, ideal, floor, c.health.bad, live.cap);
+        let next = live.ladder.next(Instant::now(), current, ideal, floor, c.health.bad, cap);
         if next != current {
             // A fresh streak is needed for the next step down.
             c.health.bad = 0;
@@ -1142,6 +1211,32 @@ impl Session {
             live.control.reconfigure(Settings { quality: live.quality, bitrate: next, codec: live.codec });
         }
         give_up && c.kind == Kind::Turbo
+    }
+
+    /// One line per viewer next to "video rates": what reached them and what didn't.
+    fn log_viewers(&mut self) {
+        for c in self.conns.values_mut() {
+            let who = self.members.iter().find(|m| m.id == c.peer).map_or(c.peer.as_str(), |m| m.name.as_str());
+            if c.sender.is_some() {
+                let (now, then) = (c.health.seen, c.health.logged);
+                c.health.logged = now;
+                tracing::info!(
+                    who,
+                    path = "data channel",
+                    sent = now.sent - then.sent,
+                    dropped_here = now.dropped - then.dropped,
+                    lost = now.lost.saturating_sub(then.lost),
+                    decode_drops = now.decode_drops.saturating_sub(then.decode_drops),
+                    render_drops = now.render_drops.saturating_sub(then.render_drops),
+                    key_requests = now.keys.saturating_sub(then.keys),
+                    delay_ms = c.health.glass.map(|g| g.round() as i64),
+                    "viewer"
+                );
+            } else if c.rtp_sender.is_some() {
+                let estimate_kbps = c.estimate.as_ref().map(|e| e.load(Ordering::Relaxed) / 1000);
+                tracing::info!(who, path = "rtp", estimate_kbps, relay = self.relayed.contains(&c.peer), "viewer");
+            }
+        }
     }
 
     async fn on_tick(&mut self) {
@@ -1206,10 +1301,12 @@ impl Session {
                 convert = video::percentiles(&mut t.convert),
                 encode = video::percentiles(&mut t.encode),
                 total = video::percentiles(&mut t.total),
+                bitrate_kbps = live.bitrate.load(Ordering::Relaxed) / 1000,
                 "video rates"
             );
             live.log_at = (Instant::now(), st.captured, st.encoded);
         }
+        let log_viewers = secs >= 10.0;
         if let Some(info) = st.encoder.clone() {
             let _ = self.ui.send(Event::Encoder(info)).await;
         }
@@ -1272,6 +1369,9 @@ impl Session {
             if let Some(ch) = &c.control {
                 peer::send_json(ch, &msg).await;
             }
+        }
+        if log_viewers {
+            self.log_viewers();
         }
     }
 }

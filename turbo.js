@@ -32,11 +32,12 @@ const PACKET_LIFETIME_MS = 150;
 const KEY_INTERVAL_MS = 1000; // keyframe requested due to full queue: at most 1 per second per viewer
 const QUEUE_FRAMES = 3;       // send queue allowed per viewer, in average frames (~50 ms)
 const VIEWER_KEY_MS = 500;    // keyframe requested by a viewer that lost a frame
-// Someone who keeps asking for keyframes waits longer each time (500 ms, 1 s,
-// 2 s), back to the start after a few calm seconds: on a link that keeps
-// losing, a keyframe as often as allowed only adds to the loss.
+// Someone who keeps asking for keyframes waits longer the second time (500 ms,
+// then 1 s), back to the start after a few calm seconds: on a link that keeps
+// losing, a keyframe as often as allowed only adds to the loss. Not longer:
+// the picture stays frozen until the keyframe.
 const KEY_BACKOFF_START_MS = 500;
-const KEY_BACKOFF_MAX_MS = 2000;
+const KEY_BACKOFF_MAX_MS = 1000;
 const KEY_CALM_MS = 4000;
 // A new viewer starts from the last keyframe if what came after it fits in
 // this share of a second of the bitrate (a still screen, or a keyframe just
@@ -476,8 +477,12 @@ export class TurboReceiver {
       decodeQueue: 0, decodeDrops: 0, renderDrops: 0, recovered: 0,
       glassMs: null, arriveMs: null, displayMs: null, clockRtt: null,
     };
-    // fec: this viewer rebuilds fragments from parity packets.
-    this.reportTimer = report ? setInterval(() => report({ bytes: this.payload, lost: this.stats.lost, recovered: this.stats.recovered, fec: 1 }), REPORT_MS) : 0;
+    // fec: this viewer rebuilds fragments from parity packets. The rest is
+    // for the streamer's log (where a stream froze, and why).
+    this.reportTimer = report ? setInterval(() => {
+      const st = this.stats;
+      report({ bytes: this.payload, lost: st.lost, recovered: st.recovered, fec: 1, decodeDrops: st.decodeDrops, renderDrops: st.renderDrops, keyRequests: st.keyRequests, glassMs: st.glassMs });
+    }, REPORT_MS) : 0;
     this.payload = 0; // video data only, to compare with what was sent
     this.onUnsupported = onUnsupported;
     this.hold = HOLD_MS;

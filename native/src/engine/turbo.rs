@@ -75,6 +75,7 @@ pub fn packets(seq: u32, frame: &EncodedFrame, ts_us: f64, parity: bool) -> Vec<
 pub struct Counters {
     pub frames: AtomicU64,
     pub bytes: AtomicU64,
+    /// Frames this viewer did not get: queue full, or waiting for a keyframe.
     pub dropped: AtomicU64,
 }
 
@@ -82,10 +83,11 @@ pub struct Counters {
 /// one asking does not hold back another who just joined; requests that
 /// land in the same frame still make a single keyframe (one encoder).
 ///
-/// A viewer that keeps asking backs off: 500 ms, then 1 s, then 2 s between
-/// keyframes, back to the start after a few calm seconds. A keyframe is many
-/// frames' worth of bytes for everyone; on a link that keeps losing, asking
-/// as fast as allowed only makes the loss worse.
+/// A viewer that keeps asking backs off: 500 ms, then 1 s between keyframes
+/// (never longer: the picture stays frozen until one comes), back to the
+/// start after a few calm seconds. A keyframe is many frames' worth of bytes
+/// for everyone; on a link that keeps losing, asking as fast as allowed only
+/// makes the loss worse.
 pub struct KeyLimiter {
     state: std::sync::Mutex<KeyState>,
 }
@@ -97,7 +99,7 @@ struct KeyState {
 }
 
 const KEY_BACKOFF_START: Duration = Duration::from_millis(500);
-const KEY_BACKOFF_MAX: Duration = Duration::from_secs(2);
+const KEY_BACKOFF_MAX: Duration = Duration::from_secs(1);
 /// No request for this long: the backoff starts over.
 const KEY_CALM: Duration = Duration::from_secs(4);
 
@@ -230,6 +232,8 @@ pub fn spawn(
             let budget = budget(bitrate.load(Ordering::Relaxed), fps, last_key, Instant::now());
             let queued = channel.outstanding_bytes().await.unwrap_or(0);
             if need_key && !frame.key {
+                // Not delivered either: the viewer's picture is frozen meanwhile.
+                c.dropped.fetch_add(1, Ordering::Relaxed);
                 // Only request the keyframe once the queue drained, otherwise it won't fit either.
                 if queued < budget / 2 {
                     keys.request(&control, Duration::from_secs(1));
@@ -278,14 +282,14 @@ mod tests {
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         let min = Duration::from_millis(300);
         assert!(k.allow(at(0), min));
-        // Next ones wait 500 ms, then 1 s, then 2 s at most.
+        // Next ones wait 500 ms, then 1 s at most.
         assert!(!k.allow(at(400), min));
         assert!(k.allow(at(500), min));
         assert!(!k.allow(at(1400), min));
         assert!(k.allow(at(1500), min));
-        assert!(!k.allow(at(3400), min));
+        assert!(!k.allow(at(2400), min));
+        assert!(k.allow(at(2500), min));
         assert!(k.allow(at(3500), min));
-        assert!(k.allow(at(5500), min));
         // Calm for a while: back to the short wait.
         assert!(k.allow(at(10_000), min));
         assert!(k.allow(at(10_500), min));
