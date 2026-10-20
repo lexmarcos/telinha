@@ -3,12 +3,13 @@
 use std::sync::Arc;
 
 use bytes::BytesMut;
+use rtc::ice::mdns::MulticastDnsMode;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
 use webrtc::peer_connection::{
     MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceCandidateInit,
-    RTCIceServer, RTCPeerConnectionIceEvent, RTCPeerConnectionState, Registry, register_default_interceptors,
+    RTCIceServer, RTCPeerConnectionIceEvent, RTCPeerConnectionState, Registry, SettingEngineBuilder, register_default_interceptors,
 };
 
 /// Minimum-latency video channel: negotiated on both sides with the same id,
@@ -84,11 +85,29 @@ pub async fn new_video_connection(
     build(ice, conn, media, registry, tx).await
 }
 
+/// Browsers hide their local address behind a "<uuid>.local" name, which the library
+/// resolves over multicast DNS. It needs UDP 5353 for itself, and when something else
+/// holds that port exclusively the whole connection fails ("Address already in use").
+/// Better to go without the names (the browser's own checks still reach our plain
+/// host addresses) than to not connect.
+fn mdns_mode() -> MulticastDnsMode {
+    match rtc::mdns::MulticastSocket::new().into_std() {
+        Ok(_) => MulticastDnsMode::QueryOnly,
+        Err(e) => {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| tracing::warn!("multicast DNS unavailable ({e}); browsers' local names will not be resolved"));
+            MulticastDnsMode::Disabled
+        }
+    }
+}
+
 async fn build(ice: &[RTCIceServer], conn: &str, media: MediaEngine, registry: Registry, tx: mpsc::Sender<PeerEvent>) -> Result<Arc<dyn PeerConnection>, String> {
     let registry = registry.with(rtc::interceptor::Slot::from(14_000), super::rtp::Feedback::new());
     let config = RTCConfigurationBuilder::new().with_ice_servers(ice.to_vec()).build();
+    let settings = SettingEngineBuilder::default().with_multicast_dns_mode(mdns_mode()).build();
     let pc = PeerConnectionBuilder::new()
         .with_configuration(config)
+        .with_setting_engine(settings)
         .with_media_engine(media)
         .with_interceptor_registry(registry)
         .with_handler(Arc::new(Handler { conn: conn.to_owned(), tx }))
