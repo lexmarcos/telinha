@@ -6,8 +6,8 @@
 // Serves what both clients use: the WebSocket at /peer/peerjs (OPEN, ID-TAKEN,
 // relaying OFFER/ANSWER/CANDIDATE/LEAVE with `src`, EXPIRE for an unknown
 // destination), GET /peer/peerjs/id, and GET /api/ice (no STUN/TURN: loopback
-// only needs host candidates). Plain HTTP and WS: the site and the app use them
-// only for localhost/127.0.0.1 servers.
+// only needs host candidates; ICE_SERVERS, a JSON list, adds some for lan-netns.sh).
+// Plain HTTP and WS: the site and the app use them only for localhost/127.0.0.1 servers.
 
 import http from "node:http";
 import { WebSocketServer } from "ws";
@@ -18,7 +18,7 @@ export function startSignaling(port = 0) {
     const url = new URL(req.url, "http://x");
     const headers = { "access-control-allow-origin": "*", "cache-control": "no-store" };
     if (url.pathname === "/api/ice") {
-      res.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ iceServers: [] }));
+      res.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ iceServers: JSON.parse(process.env.ICE_SERVERS ?? "[]") }));
     } else if (url.pathname === "/peer/peerjs/id") {
       res.writeHead(200, { ...headers, "content-type": "text/plain" }).end(crypto.randomUUID());
     } else if (url.pathname === "/peer" || url.pathname === "/peer/") {
