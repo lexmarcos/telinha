@@ -13,7 +13,7 @@
 Ideas from Sunshine and Moonlight:
 
 * The streamer picks the codec the graphics card encodes best (H.264, VP9 or AV1) and viewers prefer it.
-* The bitrate follows the chosen resolution and frame rate (about 0.08 bits per pixel).
+* The bitrate follows the chosen resolution and frame rate: about 0.08 bits per pixel (0.1 when sharpness comes first), up to 45 Mb/s, or 20 for whoever receives through the relay.
 * The quality button sets resolution, frame rate and priority (smoothness or sharpness).
 * The **I** key opens a panel with delay, codec, buffer and whether the path is direct or relayed.
 
