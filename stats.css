@@ -71,7 +71,7 @@
 .stats-hero-value[data-empty] { color: var(--muted); font-weight: 400; }
 .stats-hero-unit { margin-left: 0.2em; font-size: 0.875rem; font-weight: 500; letter-spacing: 0; color: var(--muted); }
 
-/* Path: direct or via relay (TURN). Relay gets an amber tint, not an alarm. */
+/* Path: same network, direct or via relay (TURN). Relay gets an amber tint, not an alarm. */
 .stats-path {
   display: inline-flex; align-items: center; gap: 0.375rem; flex: none;
   max-width: 60%; padding: 0.2rem 0.6rem; border-radius: 999px;
@@ -85,6 +85,7 @@
   background: currentColor; opacity: 0.8;
 }
 .stats-path[data-kind="direct"] { color: #b8f0d2; background: rgba(110, 220, 160, 0.12); box-shadow: inset 0 0 0 1px rgba(110, 220, 160, 0.22); }
+.stats-path[data-kind="lan"]    { color: #a6efe6; background: rgba(90, 220, 205, 0.14); box-shadow: inset 0 0 0 1px rgba(90, 220, 205, 0.3); }
 .stats-path[data-kind="relay"]  { color: #ffd9a6; background: rgba(255, 190, 110, 0.14); box-shadow: inset 0 0 0 1px rgba(255, 190, 110, 0.3); }
 .stats-path[data-kind="unknown"] { background: none; box-shadow: none; }
 .stats-path[data-kind="unknown"]::before, .stats-path[data-kind="off"]::before { display: none; }
