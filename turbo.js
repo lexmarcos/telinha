@@ -36,8 +36,10 @@ const CHANNEL = { negotiated: true, id: 100, ordered: false, maxPacketLifeTime: 
 // track (MediaStreamTrackGenerator, or the standard VideoTrackGenerator where
 // a browser exposes it on the page); Safari 16.4+ and Firefox 130+ have
 // VideoDecoder but neither, so they paint the newest frame on a canvas once
-// per display refresh. ?render=canvas forces the canvas (for testing).
+// per display refresh. ?render=canvas forces the canvas and ?render=rtp turns
+// the mode off for this viewer (for testing).
 function renderMode() {
+  if (/[?&]render=rtp\b/.test(globalThis.location?.search ?? "")) return null;
   const forced = /[?&]render=canvas\b/.test(globalThis.location?.search ?? "");
   if (!forced && typeof MediaStreamTrackGenerator === "function") return "track";
   if (!forced && typeof VideoTrackGenerator === "function") return "generator";

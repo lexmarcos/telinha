@@ -11,6 +11,10 @@
 // Safari/Firefox path of the minimum delay mode) instead of feeding a video
 // track; the probe then reads each frame as it is painted. Use with --turbo.
 //
+// --sinal-local runs sinal.mjs (a PeerJS-compatible signaling server) on a free port
+// and uses it as --server, so --nativo works without the real server. --query adds
+// parameters to the viewer's URL (render=rtp keeps it off the data channel video).
+//
 // --server points the app at the signaling/TURN server (deploy/). Without it,
 // the app served on localhost uses public PeerJS, STUN only, and --relay does not connect.
 //
@@ -65,6 +69,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--turbo") opt.turbo = true; // the app's "minimum delay" mode (WebCodecs)
   else if (a === "--headed") opt.headed = true;
   else if (a === "--canvas") opt.canvas = true;
+  else if (a === "--sinal-local") opt.localSignal = true; // starts sinal.mjs and uses it as --server
   else if (a === "--query") opt.query = argv[++i]; // extra viewer URL parameters, e.g. avc=avcc
   else if (a === "--retries") opt.retries = Number(argv[++i]);
   else if (a === "--foto") opt.photo = argv[++i]; // saves the last received frame (PNG, full size)
@@ -448,6 +453,12 @@ const pickVideo = (list, key) => list.slice().sort((a, b) => (b[key] || 0) - (a[
 
 /* ---------------- main ---------------- */
 
+let signaling = null;
+if (opt.localSignal) {
+  const { startSignaling } = await import("./sinal.mjs");
+  signaling = await startSignaling();
+  opt.server = `localhost:${signaling.port}`;
+}
 const server = await serve(opt.app);
 const URL_ = `http://localhost:${server.address().port}/${opt.server ? `?servidor=${encodeURIComponent(opt.server)}` : ""}`;
 log(`serving ${opt.app} at ${URL_} relay=${opt.relay}`);
@@ -471,6 +482,7 @@ async function cleanup() {
   try { nativeProc?.kill("SIGINT"); } catch {}
   try { await browser.close(); } catch {}
   try { server.close(); } catch {}
+  try { signaling?.close(); } catch {}
 }
 
 // The app silently falls back to the public PeerJS server (STUN only) when

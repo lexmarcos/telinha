@@ -30,7 +30,8 @@ impl Signaling {
     /// Connects and forwards each message to `events`.
     pub async fn connect(server: &str, id: &str, events: mpsc::Sender<Signal>) -> Result<Self, String> {
         let token: String = (0..10).map(|_| char::from(b'a' + rand::random_range(0..26u8))).collect();
-        let url = format!("wss://{server}/peer/peerjs?key=peerjs&id={id}&token={token}&version=1.5.5");
+        let ws = if is_local(server) { "ws" } else { "wss" };
+        let url = format!("{ws}://{server}/peer/peerjs?key=peerjs&id={id}&token={token}&version=1.5.5");
         let (ws, _) = tokio_tungstenite::connect_async(&url).await.map_err(|e| format!("sinalização: {e}"))?;
         let (mut write, mut read) = ws.split();
         let (out, mut rx) = mpsc::unbounded_channel::<String>();
@@ -81,9 +82,16 @@ impl Signaling {
     }
 }
 
+/// A signaling server on this machine (tools/latency/sinal.mjs, for tests)
+/// speaks plain HTTP and WebSocket; every real one is TLS.
+fn is_local(server: &str) -> bool {
+    let host = server.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(server, |(h, _)| h);
+    host == "localhost" || host == "127.0.0.1"
+}
+
 /// ICE servers (STUN and TURN with temporary credentials) from our own server.
 pub async fn ice_servers(server: &str) -> Result<Vec<webrtc::peer_connection::RTCIceServer>, String> {
-    let url = format!("https://{server}/api/ice");
+    let url = format!("{}://{server}/api/ice", if is_local(server) { "http" } else { "https" });
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8)).build().map_err(|e| e.to_string())?;
     let mut last = String::new();
     for _ in 0..2 {

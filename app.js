@@ -16,6 +16,8 @@ import { turboSupport, openVideoChannel, TurboSender, TurboReceiver } from "./tu
 
 const SERVER = new URLSearchParams(location.search).get("servidor")
   ?? (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) ? null : location.host);
+// A signaling server on this machine (tools/latency/sinal.mjs) speaks plain HTTP.
+const LOCAL_SERVER = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(SERVER ?? "");
 const TURBO = turboSupport();
 const PREFIX = "telinha-canal-v1-";
 const MAX_BITRATE = 8_000_000;
@@ -250,10 +252,13 @@ async function peerOptions() {
   // so only give up after two generous attempts.
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const res = await fetch(`https://${SERVER}/api/ice`, { signal: AbortSignal.timeout(8000) });
+      const res = await fetch(`${LOCAL_SERVER ? "http" : "https"}://${SERVER}/api/ice`, { signal: AbortSignal.timeout(8000) });
       if (!res.ok) throw new Error(res.status);
       const { iceServers } = await res.json();
-      const options = { host: SERVER, port: 443, path: "/peer", secure: true, config: { iceServers } };
+      const [host, port] = SERVER.split(":");
+      const options = LOCAL_SERVER
+        ? { host, port: Number(port) || 80, path: "/peer", secure: false, config: { iceServers } }
+        : { host: SERVER, port: 443, path: "/peer", secure: true, config: { iceServers } };
       ownServer = { options, expires: Date.now() + 12 * 3600_000 };
       state.fallback = false;
       return options;
