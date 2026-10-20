@@ -65,16 +65,17 @@ printf '#!/bin/sh\nexec "%s" --no-sandbox "$@"\n' "$CHROME_BIN" > $tmp/chrome
 printf '#!/bin/sh\nexec nsenter -t %s -n "%s" --no-sandbox "$@"\n' $SENDER "$CHROME_BIN" > $tmp/chrome-sender
 chmod +x $tmp/native $tmp/chrome $tmp/chrome-sender
 # STUN on the internet side; the signaling server hands it out in /api/ice
-ns $INET node "$here/stun.mjs" 0.0.0.0 3478 2>/dev/null & PIDS="$!"
+nsenter -t $INET -n node "$here/stun.mjs" 0.0.0.0 3478 2>/dev/null & PIDS="$!"
 export ICE_SERVERS='[{"urls":"stun:198.51.100.10:3478"}]'
 node "$here/sinal.mjs" 9000 >/dev/null 2>&1 & PIDS="$PIDS $!"
 # the sender's localhost:9000 and :9001 are the viewer's
 for port in 9000 9001; do
-  ns $SENDER socat TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr EXEC:"nsenter -t $$ -n socat - TCP\:127.0.0.1\:$port" & PIDS="$PIDS $!"
+  nsenter -t $SENDER -n socat TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr EXEC:"nsenter -t $$ -n socat - TCP\:127.0.0.1\:$port" & PIDS="$PIDS $!"
 done
 sleep 0.5
 LAN_NATIVE=$tmp/native LAN_CHROME=$tmp/chrome LAN_SENDER_CHROME=$tmp/chrome-sender "$@"
 rc=$?
 kill $PIDS $SENDER $ROUTER $INET 2>/dev/null
+pkill -P $$ 2>/dev/null
 rm -rf "$tmp"
 exit $rc
