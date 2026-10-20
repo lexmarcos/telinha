@@ -324,6 +324,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   background: rgba(7, 11, 29, 0.72); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.thumb-name > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .thumb-name .tally { width: 0.45rem; height: 0.45rem; box-shadow: 0 0 6px var(--tally); }
 @keyframes materialize {
   from { opacity: 0; transform: scale(0.94); filter: blur(8px); }
