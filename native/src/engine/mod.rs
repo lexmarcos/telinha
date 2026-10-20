@@ -3,6 +3,7 @@
 
 pub mod gate;
 pub mod mock;
+pub mod path;
 pub mod peer;
 pub mod rtp;
 pub mod session;
