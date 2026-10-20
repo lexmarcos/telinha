@@ -91,9 +91,34 @@ fn openh264_opts(_: &Ctx) -> Vec<(&'static str, String)> {
     vec![o("allow_skip_frames", "0"), o("rc_mode", "bitrate"), o("profile", "constrained_baseline")]
 }
 
-fn cpu_scale(c: &Ctx) -> String {
-    if c.scaled() { format!("scale={}:{}:flags=fast_bilinear", c.out.0, c.out.1) } else { String::new() }
+/// Threads for swscale on the CPU paths: a 4K RGB to YUV conversion takes
+/// ~30 ms on one core, ~12 on four.
+fn sws_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).clamp(1, 4))
 }
+
+/// Scaling on the CPU, staying in RGB (NVENC converts to YUV itself).
+/// Bicubic is sharper than bilinear on downscaled text and, with threads,
+/// faster than the old single-threaded fast_bilinear (4K to 1440p: ~13 ms
+/// against ~14 per frame).
+fn cpu_scale(c: &Ctx) -> String {
+    if c.scaled() { format!("scale={}:{}:flags=bicubic:threads={}", c.out.0, c.out.1, sws_threads()) } else { String::new() }
+}
+
+/// CPU scaling (if needed) and conversion to `format`, in BT.709 limited range
+/// as the stream is tagged (ffi.rs). With no matrix given, swscale converts RGB
+/// with BT.601 and the colours come out wrong at the viewer.
+fn cpu_convert(c: &Ctx, format: &str) -> String {
+    let size = if c.scaled() { format!("{}:{}:", c.out.0, c.out.1) } else { String::new() };
+    format!("scale={size}flags=bicubic:threads={}:out_color_matrix=bt709:out_range=tv,format={format}", sws_threads())
+}
+
+/// The output colour of VAAPI's converter. All three are needed: with the
+/// matrix alone FFmpeg maps to another VA standard and Intel's driver converts
+/// with BT.601 (pure green came out as 215 instead of 255; now within 3).
+/// The scaling mode is already "hq" by default in FFmpeg 9.
+#[cfg(target_os = "linux")]
+const VAAPI_BT709: &str = "out_color_matrix=bt709:out_color_primaries=bt709:out_color_transfer=bt709:out_range=tv";
 
 fn join(parts: &[String]) -> String {
     parts.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join(",")
@@ -105,6 +130,9 @@ fn desktop(c: &Ctx) -> String {
 }
 
 #[cfg(target_os = "windows")]
+// scale_d3d11 (FFmpeg 9) has no colour options and leaves the D3D11 video
+// processor at its default output colour space, which is likely BT.601 while
+// the stream says BT.709: not measured on Windows yet.
 fn d3d11_scale(c: &Ctx, nv12: bool) -> String {
     match (c.scaled(), nv12) {
         (true, _) => format!("scale_d3d11=width={}:height={}:format=nv12", c.out.0, c.out.1),
@@ -169,7 +197,7 @@ pub fn candidates() -> Vec<Candidate> {
                 hardware: true,
                 device: None,
                 source: SourceKind::Desktop,
-                chain: |c| join(&[desktop(c), "hwdownload".into(), "format=bgra".into(), cpu_scale(c), "format=nv12".into()]),
+                chain: |c| join(&[desktop(c), "hwdownload".into(), "format=bgra".into(), cpu_convert(c, "nv12")]),
                 options,
             });
         }
@@ -179,7 +207,7 @@ pub fn candidates() -> Vec<Candidate> {
             hardware: false,
             device: None,
             source: SourceKind::Desktop,
-            chain: |c| join(&[desktop(c), "hwdownload".into(), "format=bgra".into(), cpu_scale(c), "format=yuv420p".into()]),
+            chain: |c| join(&[desktop(c), "hwdownload".into(), "format=bgra".into(), cpu_convert(c, "yuv420p")]),
             options: openh264_opts,
         });
     }
@@ -193,7 +221,7 @@ pub fn candidates() -> Vec<Candidate> {
             hardware: true,
             device: Some((AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI, None)),
             source: SourceKind::Cpu,
-            chain: |c| format!("hwupload,scale_vaapi=w={}:h={}:format=nv12", c.out.0, c.out.1),
+            chain: |c| format!("hwupload,scale_vaapi=w={}:h={}:format=nv12:{VAAPI_BT709}", c.out.0, c.out.1),
             options: vaapi_opts,
         });
         v.push(Candidate {
@@ -202,7 +230,7 @@ pub fn candidates() -> Vec<Candidate> {
             hardware: true,
             device: Some((AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI, None)),
             source: SourceKind::Cpu,
-            chain: |c| join(&[cpu_scale(c), "format=nv12".into(), "hwupload".into()]),
+            chain: |c| join(&[cpu_convert(c, "nv12"), "hwupload".into()]),
             options: vaapi_opts_full_power,
         });
     }
@@ -218,7 +246,7 @@ pub fn candidates() -> Vec<Candidate> {
                 hardware: true,
                 device: None,
                 source: SourceKind::Prime,
-                chain: |c| format!("hwmap=derive_device=vaapi,scale_vaapi=w={}:h={}:format=nv12", c.out.0, c.out.1),
+                chain: |c| format!("hwmap=derive_device=vaapi,scale_vaapi=w={}:h={}:format=nv12:{VAAPI_BT709}", c.out.0, c.out.1),
                 options: opts,
             });
         }
@@ -238,12 +266,13 @@ pub fn candidates() -> Vec<Candidate> {
             hardware: false,
             device: None,
             source: SourceKind::Prime,
-            chain: |c| join(&["hwdownload".into(), "format=bgr0".into(), cpu_scale(c), "format=yuv420p".into()]),
+            chain: |c| join(&["hwdownload".into(), "format=bgr0".into(), cpu_convert(c, "yuv420p")]),
             options: openh264_opts,
         });
     }
 
-    // NVIDIA cards accept BGRX straight from the CPU and convert on the GPU.
+    // NVIDIA cards accept BGRX straight from the CPU and convert on the GPU
+    // (which matrix NVENC uses for RGB input is not measured yet).
     v.push(Candidate {
         label: "NVENC",
         encoder: "h264_nvenc",
@@ -259,7 +288,7 @@ pub fn candidates() -> Vec<Candidate> {
         hardware: false,
         device: None,
         source: SourceKind::Cpu,
-        chain: |c| join(&[cpu_scale(c), "format=yuv420p".into()]),
+        chain: |c| cpu_convert(c, "yuv420p"),
         options: openh264_opts,
     });
     v
