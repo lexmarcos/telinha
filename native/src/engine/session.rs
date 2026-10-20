@@ -12,6 +12,7 @@ use tokio::sync::{broadcast, mpsc};
 use webrtc::data_channel::DataChannel;
 use webrtc::peer_connection::{PeerConnection, RTCIceCandidateInit, RTCIceServer, RTCPeerConnectionState, RTCSessionDescription};
 
+use super::path::{self, Path};
 use super::peer::{self, PeerEvent, Which};
 use super::signaling::{self, Signal, Signaling};
 use super::rtp;
@@ -79,6 +80,8 @@ struct Conn {
     /// RTP video: the congestion controller's estimate for this viewer (bits/s, 0 = none yet).
     estimate: Option<Arc<AtomicU32>>,
     health: Health,
+    /// Kind of network the selected ICE pair runs over (same LAN, direct, relay).
+    path: Option<Path>,
 }
 
 #[derive(Default)]
@@ -514,6 +517,7 @@ impl Session {
                 audio_only: false,
                 estimate: None,
                 health: Health::default(),
+                path: None,
             },
         );
         Ok(conn)
@@ -567,6 +571,7 @@ impl Session {
                 audio_only,
                 estimate,
                 health: Health::default(),
+                path: None,
             },
         );
         Ok(conn)
@@ -720,6 +725,7 @@ impl Session {
                 audio_only: false,
                 estimate: None,
                 health: Health::default(),
+                path: None,
             },
         );
         if pass {
@@ -757,6 +763,7 @@ impl Session {
                 if matches!(state, RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed) {
                     self.on_conn_closed(&conn).await;
                 } else if state == RTCPeerConnectionState::Connected {
+                    self.note_path(&conn).await;
                     // RTP video connected: start sending from a keyframe.
                     if let (Some(live), Some(c)) = (&self.live, self.conns.get_mut(&conn)) {
                         if c.kind == Kind::Media && !c.open {
@@ -1222,6 +1229,17 @@ impl Session {
         give_up && c.kind == Kind::Turbo
     }
 
+    /// Looks at the pair ICE settled on: logs it the first time and keeps it for the viewer lines.
+    async fn note_path(&mut self, conn: &str) {
+        let Some(c) = self.conns.get_mut(conn) else { return };
+        let Some(sel) = path::of_connection(&c.pc).await else { return };
+        if c.path != Some(sel.path) {
+            let who = self.members.iter().find(|m| m.id == c.peer).map_or(c.peer.as_str(), |m| m.name.as_str());
+            tracing::info!(who, network = sel.path.as_str(), pair = sel.types, rtt_ms = sel.rtt_ms.map(|r| (r * 10.0).round() / 10.0), "connection path");
+            c.path = Some(sel.path);
+        }
+    }
+
     /// One line per viewer next to "video rates": what reached them and what didn't.
     fn log_viewers(&mut self) {
         for c in self.conns.values_mut() {
@@ -1232,6 +1250,7 @@ impl Session {
                 tracing::info!(
                     who,
                     path = "data channel",
+                    network = c.path.map(Path::as_str),
                     sent = now.sent - then.sent,
                     dropped_here = now.dropped - then.dropped,
                     lost = now.lost.saturating_sub(then.lost),
@@ -1243,7 +1262,7 @@ impl Session {
                 );
             } else if c.rtp_sender.is_some() {
                 let estimate_kbps = c.estimate.as_ref().map(|e| e.load(Ordering::Relaxed) / 1000);
-                tracing::info!(who, path = "rtp", estimate_kbps, relay = self.relayed.contains(&c.peer), "viewer");
+                tracing::info!(who, path = "rtp", network = c.path.map(Path::as_str), estimate_kbps, relay = self.relayed.contains(&c.peer), "viewer");
             }
         }
     }
@@ -1380,6 +1399,10 @@ impl Session {
             }
         }
         if log_viewers {
+            let open: Vec<String> = self.conns.iter().filter(|(_, c)| c.open && matches!(c.kind, Kind::Turbo | Kind::Media)).map(|(k, _)| k.clone()).collect();
+            for conn in open {
+                self.note_path(&conn).await;
+            }
             self.log_viewers();
         }
     }

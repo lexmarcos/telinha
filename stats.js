@@ -236,7 +236,7 @@ function render(b, report) {
     const t = safe(b.turbo);
     if (t) renderTurbo(b, t, rtt);
   }
-  renderPath(f.path, state, local, remote);
+  renderPath(f.path, state, local, remote, rtt);
 }
 
 // Where this viewer sheds frames to keep the delay flat: the decoder queue
@@ -349,19 +349,56 @@ function renderTurbo(b, t, rtt) {
   }
 }
 
-function renderPath(el, state, local, remote) {
+// What the selected candidate pair is: "relay" (TURN), "lan" (both ends on the same
+// local network) or "direct" (any other direct path); null when nothing is known.
+// Same network = both candidates are host (or peer-reflexive: a host address learned
+// from the other side's check) on private addresses, with a round trip a LAN can have
+// (a private address can also be a VPN across the world). Chrome hides its own address
+// behind a ".local" name, so an address that is not an IP does not count against it.
+// Without a private address to go by (public IPv6 on one link), only a round trip of
+// a few ms says "same network". Not decided by comparing public IPs, which says
+// nothing about the path actually taken. Mirrors native/src/engine/path.rs.
+const LAN_MAX_RTT_MS = 25;
+const BARE_MAX_RTT_MS = 5;
+export function pathKind(local, remote, rttMs) {
+  const types = [local?.candidateType, remote?.candidateType];
+  if (types.includes("relay")) return "relay";
+  if (!types.some(Boolean)) return null;
+  if (!types.every((t) => t === "host" || t === "prflx")) return "direct";
+  const addrs = [local, remote].map((c) => c?.address ?? c?.ip).filter((a) => typeof a === "string" && !a.endsWith(".local"));
+  const lan = addrs.length && addrs.every(isPrivateAddress)
+    ? !isNum(rttMs) || rttMs <= LAN_MAX_RTT_MS
+    : isNum(rttMs) && rttMs <= BARE_MAX_RTT_MS;
+  return lan ? "lan" : "direct";
+}
+
+// RFC 1918 and link-local IPv4, unique-local and link-local IPv6 (IPv4-mapped counts as IPv4).
+export function isPrivateAddress(ip) {
+  const v4 = ip.replace(/^::ffff:/i, "");
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(v4)) {
+    const [a, b] = v4.split(".").map(Number);
+    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+  return /^f[cd][0-9a-f]{2}:/i.test(ip) || /^fe[89ab][0-9a-f]:/i.test(ip);
+}
+
+function renderPath(el, state, local, remote, rtt) {
   let kind = "unknown", text = DASH, title = "";
   if (state === "closed" || state === "failed") {
     kind = "off"; text = "Encerrada";
   } else if (local || remote) {
     const lt = local?.candidateType, rt = remote?.candidateType;
     title = `Daqui: ${lt ?? "?"}${local?.protocol ? ` (${local.protocol})` : ""} · De lá: ${rt ?? "?"}`;
-    if (lt === "relay" || rt === "relay") {
+    const path = pathKind(local, remote, rtt);
+    if (path === "relay") {
       kind = "relay";
       const proto = lt === "relay" ? local?.relayProtocol : null;
       text = `Repasse (TURN${proto ? ` ${proto}` : ""})`;
       title += lt === "relay" ? "" : " · o repasse está do lado de lá";
-    } else if (lt || rt) {
+    } else if (path === "lan") {
+      kind = "lan"; text = "Rede local";
+      title += " · os dois estão na mesma rede, sem passar pela internet";
+    } else if (path) {
       kind = "direct"; text = "Direta";
     }
   } else if (state === "new" || state === "connecting") {
