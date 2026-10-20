@@ -777,12 +777,29 @@ function targetSize() {
   return { width: Math.round((h * width) / height / 2) * 2, height: h };
 }
 
-// Per-person budget, proportional to pixels per second (~0.08 bit per pixel).
+// Per-person budget, proportional to pixels per second: ~0.08 bit per pixel
+// (0.1 in sharpness mode, where text needs it most), like the native app.
 // Measured: a cap sized to the video reduces loss and queuing on the relay;
-// below ~0.07 the encoder starts lowering resolution on its own.
-function targetBitrate() {
+// below ~0.07 the encoder starts lowering resolution on its own. The ceiling
+// (45 Mb/s, 50 for sharpness: ~0.08 bpp at 4K60) stays at the old 20 Mb/s
+// for whoever receives through the relay (TURN), which carries everyone.
+const RELAY_BITRATE = 20e6;
+function targetBitrate(relay = false) {
   const { width, height } = targetSize();
-  return Math.min(20e6, Math.max(2.5e6, width * height * state.quality.fps * 0.08));
+  const sharp = state.quality.priority === "nitidez";
+  const cap = relay ? RELAY_BITRATE : sharp ? 50e6 : 45e6;
+  return Math.min(cap, Math.max(2.5e6, width * height * state.quality.fps * (sharp ? 0.1 : 0.08)));
+}
+
+// Whether this connection's chosen path goes through the relay.
+async function viaRelay(pc) {
+  const stats = await pc.getStats().catch(() => null);
+  let relay = false;
+  stats?.forEach((r) => {
+    if (r.type !== "candidate-pair" || !r.nominated || r.state !== "succeeded") return;
+    relay ||= [r.localCandidateId, r.remoteCandidateId].some((id) => stats.get(id)?.candidateType === "relay");
+  });
+  return relay;
 }
 
 async function applyQuality() {
@@ -799,14 +816,15 @@ async function applyQuality() {
   renderQuality();
 }
 
-function applySenderParams(pc) {
+async function applySenderParams(pc) {
+  const relay = await viaRelay(pc);
   const { height } = targetSize();
   for (const sender of pc.getSenders()) {
     if (sender.track?.kind !== "video") continue;
     const p = sender.getParameters();
     if (!p.encodings?.length) p.encodings = [{}];
     const captured = sender.track.getSettings().height || height;
-    p.encodings[0].maxBitrate = Math.round(targetBitrate());
+    p.encodings[0].maxBitrate = Math.round(targetBitrate(relay));
     p.encodings[0].maxFramerate = state.quality.fps;
     p.encodings[0].scaleResolutionDownBy = Math.max(1, captured / height); // if the capture did not accept downscaling
     p.degradationPreference = PRIORITIES[state.quality.priority].degradation;

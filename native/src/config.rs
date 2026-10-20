@@ -58,15 +58,21 @@ impl Quality {
         (tw, target & !1)
     }
 
-    /// Same formula as the site: ~0.08 bits per pixel, between 2.5 and 20 Mb/s.
+    /// Same formula as the site: ~0.08 bits per pixel (0.1 in Nitidez, where
+    /// text needs it most), from 2.5 up to 45 Mb/s (50 in Nitidez). The old
+    /// 20 Mb/s ceiling left 4K60 at ~0.04 bits per pixel; now it gets ~40.
     pub fn bitrate(&self, native: (u32, u32)) -> u32 {
         // Network testing only: forces a fixed bitrate.
         if let Some(b) = std::env::var("TELINHA_TAXA").ok().and_then(|v| v.parse().ok()) {
             return b;
         }
         let (w, h) = self.output_size(native);
-        let bps = w as f64 * h as f64 * self.fps as f64 * 0.08;
-        bps.clamp(2.5e6, 20e6) as u32
+        let (bpp, cap) = match self.priority {
+            Priority::Fluidez => (0.08, 45e6),
+            Priority::Nitidez => (0.1, 50e6),
+        };
+        let bps = w as f64 * h as f64 * self.fps as f64 * bpp;
+        bps.clamp(2.5e6, cap) as u32
     }
 }
 
@@ -156,4 +162,20 @@ fn whoami() -> String {
     let raw = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default();
     let mut c = raw.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_else(|| "Alguém".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn taxa_cresce_com_a_resolucao() {
+        let q = |fps, priority| Quality { resolution: Resolution::Original, fps, priority, system_audio: false };
+        let mb = |q: Quality, size| (q.bitrate(size) as f64 / 1e5).round() / 10.0;
+        assert_eq!(mb(q(60, Priority::Fluidez), (1920, 1080)), 10.0);
+        assert_eq!(mb(q(60, Priority::Fluidez), (3840, 2160)), 39.8);
+        assert_eq!(mb(q(60, Priority::Nitidez), (3840, 2160)), 49.8);
+        assert_eq!(mb(q(60, Priority::Fluidez), (5120, 2880)), 45.0);
+        assert_eq!(mb(q(30, Priority::Fluidez), (1280, 720)), 2.5);
+    }
 }
