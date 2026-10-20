@@ -182,7 +182,11 @@ function setBusy(btn, text) {
   }
 }
 
-function showLobbyError(msg) { ui.lobbyError.textContent = msg; ui.lobbyError.hidden = false; }
+function showLobbyError(msg) {
+  ui.lobbyError.textContent = msg;
+  ui.lobbyError.hidden = false;
+  ui.lobbyError.scrollIntoView({ block: "nearest", behavior: reducedMotion.matches ? "auto" : "smooth" }); // short screens
+}
 function hideLobbyError() { ui.lobbyError.hidden = true; }
 
 /* ---------------- Open channel (host) ---------------- */
