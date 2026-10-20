@@ -620,6 +620,12 @@ try {
   const vs1 = await viewer.evaluate(snapshotStats);
   const ss1 = await sender.evaluate(snapshotStats);
   const drawn = await sender.evaluate(() => window.__sender);
+  // The viewer's connection panel (the I key), as text: turbo counters live only there.
+  const panel = await viewer.evaluate(async () => {
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "i", bubbles: true }));
+    await new Promise((r) => setTimeout(r, 2500));
+    return document.querySelector(".stats-panel")?.innerText.replace(/\s*\n\s*/g, " | ") ?? null;
+  }).catch(() => null);
   if (opt.photo) {
     const png = await viewer.evaluate(() => {
       const v = document.getElementById("feature");
@@ -687,6 +693,7 @@ try {
       ambiguousCellsMax: S.reduce((m, s) => Math.max(m, s.ambiguous), 0),
       senderCanvasFps: drawn ? r1(drawn.drawn / ((Date.now() - drawn.startedAt) / 1000)) : null,
       seconds: r1(elapsed),
+      panel,
     },
   };
   console.log(JSON.stringify(result));

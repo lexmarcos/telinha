@@ -239,6 +239,25 @@ function render(b, report) {
   renderPath(f.path, state, local, remote);
 }
 
+// Where this viewer sheds frames to keep the delay flat: the decoder queue
+// (delta frames skipped until a keyframe) and the screen (a newer frame
+// replaced one before it was shown).
+function renderLocalTurbo(b, t) {
+  if (!b.localRows) {
+    const grid = b.el.querySelector(".stats-grid");
+    grid.insertAdjacentHTML("beforeend", `<dt>Fila do decodificador</dt><dd data-f="tqueue">${DASH}</dd><dt>Descartados aqui</dt><dd data-f="tdrop">${DASH}</dd>`);
+    for (const node of grid.querySelectorAll("[data-f^=t]")) b.f[node.dataset.f] = node;
+    b.localRows = true;
+  }
+  const { f } = b;
+  setText(f.tqueue, isNum(t.decodeQueue) ? `${n0.format(t.decodeQueue)} ${t.decodeQueue === 1 ? "quadro" : "quadros"}` : DASH);
+  const parts = [];
+  if (isNum(t.decodeDrops)) parts.push(`${n0.format(t.decodeDrops)} na decodificação`);
+  if (isNum(t.renderDrops)) parts.push(`${n0.format(t.renderDrops)} na tela`);
+  setText(f.tdrop, parts.join(" · ") || DASH);
+  f.tdrop.title = "Decodificação: quadros pulados até a próxima keyframe porque o decodificador ficou para trás. Tela: quadros substituídos por um mais novo antes de aparecer.";
+}
+
 // Numbers the streamer sends (minimum delay mode): they show whether the bottleneck
 // is capture, the encoder, or Chrome throttled with the tab hidden.
 function renderRemote(b, r) {
@@ -296,6 +315,7 @@ function renderTurbo(b, t, rtt) {
     setText(f.rtt, ms(rtt));
     setText(f.lost, isNum(t.lost) ? n0.format(t.lost) : DASH);
     setText(f.freeze, isNum(t.keyRequests) ? n0.format(t.keyRequests) : DASH);
+    renderLocalTurbo(b, t);
     renderRemote(b, t.remote);
     const est = isNum(rtt) && isNum(t.assemblyMs) && isNum(t.decodeMs) ? rtt / 2 + t.assemblyMs + t.decodeMs : null;
     hero(f.hero, est);

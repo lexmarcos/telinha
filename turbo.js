@@ -22,6 +22,10 @@ const PACKET_LIFETIME_MS = 150;
 const KEY_INTERVAL_MS = 1000; // keyframe requested due to full queue: at most 1 per second per viewer
 const QUEUE_FRAMES = 3;       // send queue allowed per viewer, in average frames (~50 ms)
 const VIEWER_KEY_MS = 500;    // keyframe requested by a viewer that lost a frame
+// Frames waiting in the viewer's decoder. Past this, decoding is slower than
+// the stream: delta frames are dropped until a keyframe (each one queued
+// would add a frame of delay that never goes away).
+const MAX_DECODE_QUEUE = 2;
 const REPORT_MS = 1000;       // report from viewer to streamer
 // Hardware encoders (NVENC/QuickSync via Media Foundation, VAAPI)
 // keep a few frames in flight; only drop if the queue goes past that.
@@ -301,6 +305,7 @@ export class TurboReceiver {
     // description instead (?avc=avcc forces that, for testing).
     this.avcc = /[?&]avc=avcc\b/.test(globalThis.location?.search ?? "");
     this.decodedAny = false;
+    this.sinkSkips = 0;
     this.frames = new Map(); // seq -> frame being assembled
     this.expected = null;
     this.waitingKey = true;
@@ -310,7 +315,10 @@ export class TurboReceiver {
     this.timer = 0;
     this.closed = false;
     this.pending = new Map(); // timestamp -> time of decode()
-    this.stats = { codec: null, width: 0, height: 0, frames: 0, bytes: 0, lost: 0, keyRequests: 0, assemblyMs: null, decodeMs: null };
+    this.stats = {
+      codec: null, width: 0, height: 0, frames: 0, bytes: 0, lost: 0, keyRequests: 0, assemblyMs: null, decodeMs: null,
+      decodeQueue: 0, decodeDrops: 0, renderDrops: 0,
+    };
     this.reportTimer = report ? setInterval(() => report({ bytes: this.payload, lost: this.stats.lost }), REPORT_MS) : 0;
     this.payload = 0; // video data only, to compare with what was sent
     this.onUnsupported = onUnsupported;
@@ -400,6 +408,16 @@ export class TurboReceiver {
       }
       this.frames.delete(this.expected);
       this.expected++;
+      const queue = this.decoder?.decodeQueueSize ?? 0;
+      this.stats.decodeQueue = queue;
+      if (!f.key && queue > MAX_DECODE_QUEUE) {
+        // The decoder is behind: skip ahead to a keyframe instead of queueing.
+        this.stats.decodeDrops++;
+        this.waitingKey = true;
+        for (const [seq, g] of this.frames) if (!g.key) this.frames.delete(seq);
+        this.requestKey();
+        continue;
+      }
       this.#decode(f);
     }
     this.#arm();
@@ -479,7 +497,22 @@ export class TurboReceiver {
     this.errors = 0;
     this.decodedAny = true;
     if (this.closed) { frame.close(); return; }
-    if (this.canvas) { this.canvas.push(frame); return; }
+    if (this.canvas) {
+      this.canvas.push(frame);
+      this.stats.renderDrops = this.canvas.superseded;
+      return;
+    }
+    // The track has not taken the previous frame yet: this one would only
+    // wait behind it, so it goes (the next one carries the newer picture).
+    // (Never more than a few in a row, in case a browser reports a full sink
+    // until something renders: a still picture beats a black one.)
+    if (this.writer.desiredSize !== null && this.writer.desiredSize <= 0 && this.sinkSkips < 3) {
+      frame.close();
+      this.stats.renderDrops++;
+      this.sinkSkips++;
+      return;
+    }
+    this.sinkSkips = 0;
     this.writer.write(frame).catch(() => { try { frame.close(); } catch {} });
   }
 
