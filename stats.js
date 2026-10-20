@@ -245,13 +245,16 @@ function render(b, report) {
 function renderLocalTurbo(b, t) {
   if (!b.localRows) {
     const grid = b.el.querySelector(".stats-grid");
-    grid.insertAdjacentHTML("beforeend", `<dt>Etapas</dt><dd data-f="tstages">${DASH}</dd><dt>Fila do decodificador</dt><dd data-f="tqueue">${DASH}</dd><dt>Descartados aqui</dt><dd data-f="tdrop">${DASH}</dd>`);
+    grid.insertAdjacentHTML("beforeend", `<dt>Etapas</dt><dd data-f="tstages">${DASH}</dd><dt>Som × imagem</dt><dd data-f="tav">${DASH}</dd><dt>Fila do decodificador</dt><dd data-f="tqueue">${DASH}</dd><dt>Descartados aqui</dt><dd data-f="tdrop">${DASH}</dd>`);
     for (const node of grid.querySelectorAll("[data-f^=t]")) b.f[node.dataset.f] = node;
     b.localRows = true;
   }
   const { f } = b;
   // Capture to first packet in, then decoder output to screen (ms each).
   setText(f.tstages, isNum(t.arriveMs) && isNum(t.displayMs) ? `chegada ${fmtMs(t.arriveMs)} · tela ${fmtMs(t.displayMs)} ms` : DASH);
+  // Positive: the sound would play ahead of the picture by that much.
+  setText(f.tav, isNum(t.avGap) ? `${t.avGap > 0 ? "+" : ""}${n0.format(t.avGap)} ms${t.audioHold ? ` · som segurado ${n0.format(t.audioHold)} ms` : ""}` : DASH);
+  f.tav.title = "Quanto o som chega antes (+) ou depois (−) da imagem. Acima de 30 ms o som espera um pouco para acompanhar; a imagem nunca espera.";
   f.tstages.title = "Chegada: da captura ao primeiro pedaço do quadro aqui (captura, codificação, envio e rede). Tela: da saída do decodificador até aparecer.";
   setText(f.tqueue, isNum(t.decodeQueue) ? `${n0.format(t.decodeQueue)} ${t.decodeQueue === 1 ? "quadro" : "quadros"}` : DASH);
   const parts = [];

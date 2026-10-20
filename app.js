@@ -54,6 +54,7 @@ const state = {
   turboOut: null,              // TurboSender when sharing in minimum-latency mode
   turboIn: new Map(),          // peerId -> { conn, rx } (their video arriving via WebCodecs)
   audioIn: new Map(),          // peerId -> MediaStream with only their audio (minimum-latency mode)
+  audioPc: new Map(),          // peerId -> the connection that audio comes on (for lip sync)
   demoted: new Set(),          // peers moved back to WebRTC due to congestion
   featured: null,
   canvasView: null,            // CanvasView painting on the stage (Safari, Firefox), if any
@@ -384,10 +385,11 @@ function acceptTurboAudio(call) {
   const id = call.peer;
   call.answer(undefined, { sdpTransform: hiFiAudio });
   tuneReceiver(call.peerConnection);
-  call.on("stream", (stream) => { state.audioIn.set(id, stream); showTurbo(id); });
+  call.on("stream", (stream) => { state.audioIn.set(id, stream); state.audioPc.set(id, call.peerConnection); showTurbo(id); });
   const end = () => {
     if (state.audioIn.get(id)?.id !== call.remoteStream?.id) return;
     state.audioIn.delete(id);
+    state.audioPc.delete(id);
     showTurbo(id);
   };
   call.on("close", end);
@@ -406,10 +408,56 @@ function showTurbo(id) {
   else addStream(id, new MediaStream(audio), name, false, entry.rx.view);
 }
 
+/* Lip sync on the minimum delay path. The video is shown the moment it is
+ * decoded; the audio comes over WebRTC with its own jitter buffer. Once a
+ * second, compare how late each one is: the video's measured capture-to-
+ * screen delay against the audio's, taken from the playout time Chrome
+ * estimates in the streamer's NTP time when it gives one, otherwise half the
+ * round trip plus the jitter buffer's average delay plus ~20 ms for capture,
+ * Opus framing and the sound card. Past ±30 ms, the audio's buffer target
+ * moves toward the difference (up to 200 ms, 40 ms per step). Only the audio
+ * ever waits: the video stays as fast as it is. */
+const AV_TOLERANCE_MS = 30;
+const AV_MAX_HOLD_MS = 200;
+const AV_STEP_MS = 40;
+const AUDIO_EDGES_MS = 20;
+const NTP_UNIX_MS = 2208988800000;
+setInterval(syncAudio, 1000);
+async function syncAudio() {
+  for (const [id, entry] of state.turboIn) {
+    const pc = state.audioPc.get(id);
+    const receiver = pc?.getReceivers().find((r) => r.track?.kind === "audio");
+    const offset = entry.rx.clock?.best?.offset;
+    const video = entry.rx.stats.glassMs;
+    if (!receiver || !("jitterBufferTarget" in receiver) || typeof offset !== "number" || typeof video !== "number") continue;
+    const stats = await receiver.getStats().catch(() => null);
+    let inbound = null;
+    stats?.forEach((r) => { if (r.type === "inbound-rtp" && r.kind === "audio") inbound = r; });
+    if (!inbound) continue;
+    // Jitter buffer delay over the last second, per sample played.
+    const prev = entry.audioJb;
+    entry.audioJb = { delay: inbound.jitterBufferDelay, count: inbound.jitterBufferEmittedCount };
+    const jb = prev && entry.audioJb.count > prev.count ? ((entry.audioJb.delay - prev.delay) / (entry.audioJb.count - prev.count)) * 1000 : null;
+    const audio = inbound.estimatedPlayoutTimestamp
+      ? Date.now() + offset - (inbound.estimatedPlayoutTimestamp - NTP_UNIX_MS)
+      : typeof jb === "number" ? (entry.rx.clock.rtt ?? 0) / 2 + jb + AUDIO_EDGES_MS : null;
+    if (audio === null || audio < 0 || audio > 5000) continue; // no estimate yet, or clocks not settled
+    const gap = video - audio; // > 0: the audio plays ahead of the picture
+    entry.rx.stats.avGap = gap;
+    const hold = receiver.jitterBufferTarget ?? 0;
+    let next = hold;
+    if (gap > AV_TOLERANCE_MS) next = Math.min(AV_MAX_HOLD_MS, hold + Math.min(AV_STEP_MS, gap - AV_TOLERANCE_MS / 2));
+    else if (gap < -AV_TOLERANCE_MS && hold > 0) next = Math.max(0, hold - Math.min(AV_STEP_MS, -gap - AV_TOLERANCE_MS / 2));
+    if (next !== hold) { try { receiver.jitterBufferTarget = Math.round(next); } catch {} }
+    entry.rx.stats.audioHold = receiver.jitterBufferTarget ?? 0;
+  }
+}
+
 function closeIncoming(id) {
   state.turboIn.get(id)?.close();
   state.turboIn.delete(id);
   state.audioIn.delete(id);
+  state.audioPc.delete(id);
   removeStream(id);
 }
 
