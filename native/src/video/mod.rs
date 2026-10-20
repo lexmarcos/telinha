@@ -100,6 +100,8 @@ pub fn start(source: Source, quality: Quality, out: broadcast::Sender<Arc<Encode
     std::thread::Builder::new()
         .name("telinha-video".into())
         .spawn(move || {
+            let _streaming = crate::realtime::streaming();
+            let _boost = crate::realtime::boost(crate::realtime::Task::Video);
             if let Err(e) = run(source, quality, &c, &out) {
                 tracing::error!("video stopped: {e}");
                 c.stats.lock().unwrap().error = Some(e.0);

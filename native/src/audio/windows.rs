@@ -70,6 +70,7 @@ pub fn start(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<String, 
 const RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<(), String> {
+    let _boost = crate::realtime::boost(crate::realtime::Task::Audio);
     initialize_mta().ok().map_err(|e| format!("COM: {e:?}"))?;
     while !stop.load(Ordering::Relaxed) {
         let discord = discord_pid();

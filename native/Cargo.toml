@@ -68,6 +68,8 @@ wasapi = "0.25"
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 # Self-update: unpacks the new version's zip (update.rs).
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# Streaming priority: MMCSS, timer resolution, process priority (realtime.rs).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media", "Win32_System_Threading"] }
 
 [build-dependencies]
 slint-build = "1.18"

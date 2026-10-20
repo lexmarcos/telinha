@@ -8,6 +8,7 @@ mod audio;
 mod capture;
 mod config;
 mod engine;
+mod realtime;
 mod tray;
 mod ui;
 mod update;

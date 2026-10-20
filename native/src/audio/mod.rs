@@ -66,6 +66,7 @@ pub fn start() -> Result<Audio, String> {
     std::thread::Builder::new()
         .name("telinha-opus".into())
         .spawn(move || {
+            let _boost = crate::realtime::boost(crate::realtime::Task::Audio);
             while !s.load(Ordering::Relaxed) {
                 match rx.recv_timeout(Duration::from_millis(200)) {
                     Ok(samples) => {
