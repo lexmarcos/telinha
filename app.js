@@ -25,7 +25,7 @@ const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const ui = {
   lobby: $("lobby"), tv: $("tv"), code: $("code"), name: $("name"), tune: $("tune"),
   create: $("create"), controls: $("controls"), lobbyError: $("lobbyError"), tvHint: $("tvHint"),
-  room: $("room"), stage: $("stage"), feature: $("feature"), strip: $("strip"),
+  room: $("room"), stage: $("stage"), feature: $("feature"), featureCanvas: $("featureCanvas"), strip: $("strip"),
   stageBar: $("stageBar"), featureName: $("featureName"), unmute: $("unmute"),
   volume: $("volume"), muteBtn: $("muteBtn"), pipBtn: $("pipBtn"), fullBtn: $("fullBtn"),
   channelDigits: $("channelDigits"), emptyDigits: $("emptyDigits"),
@@ -54,6 +54,7 @@ const state = {
   audioIn: new Map(),          // peerId -> MediaStream with only their audio (minimum-latency mode)
   demoted: new Set(),          // peers moved back to WebRTC due to congestion
   featured: null,
+  canvasView: null,            // CanvasView painting on the stage (Safari, Firefox), if any
   inRoom: false,
 };
 
@@ -384,12 +385,16 @@ function acceptTurboAudio(call) {
   call.on("error", end);
 }
 
-// Combines the decoded video with the audio (which comes over WebRTC) into one stream.
+// Combines the decoded video with the audio (which comes over WebRTC) into one
+// stream. Where frames are painted on a canvas, the stream carries only the
+// audio and the canvas shows the picture.
 function showTurbo(id) {
   const entry = state.turboIn.get(id);
   if (!entry) return;
-  const tracks = [entry.rx.track, ...(state.audioIn.get(id)?.getAudioTracks() ?? [])];
-  addStream(id, new MediaStream(tracks), state.members.get(id)?.name || "Alguém", false);
+  const audio = state.audioIn.get(id)?.getAudioTracks() ?? [];
+  const name = state.members.get(id)?.name || "Alguém";
+  if (entry.rx.track) addStream(id, new MediaStream([entry.rx.track, ...audio]), name, false);
+  else addStream(id, new MediaStream(audio), name, false, entry.rx.view);
 }
 
 function closeIncoming(id) {
@@ -967,20 +972,24 @@ function renderShareButton() {
 
 /* ---------------- Screens in the room ---------------- */
 
-function addStream(id, stream, name, local) {
+// `view`: the CanvasView with the picture, when it does not come as a video track.
+function addStream(id, stream, name, local, view = null) {
   const existing = state.streams.get(id);
   if (existing?.stream === stream) return;
-  if (existing) existing.thumb.remove();
+  if (existing) dropThumb(existing);
 
   const thumb = document.createElement("li");
-  thumb.innerHTML = `<button class="thumb" type="button"><video autoplay playsinline muted></video><span class="thumb-name"><i class="tally"></i><span></span></span></button>`;
-  const v = thumb.querySelector("video");
-  v.srcObject = stream;
-  v.play().catch(() => {});
+  thumb.innerHTML = `<button class="thumb" type="button">${view ? "<canvas></canvas>" : "<video autoplay playsinline muted></video>"}<span class="thumb-name"><i class="tally"></i><span></span></span></button>`;
+  if (view) view.attach(thumb.querySelector("canvas"), { thumb: true });
+  else {
+    const v = thumb.querySelector("video");
+    v.srcObject = stream;
+    v.play().catch(() => {});
+  }
   thumb.querySelector("button").addEventListener("click", () => feature(id));
 
-  state.streams.set(id, { stream, name, local, thumb });
-  stream.addEventListener("removetrack", () => { if (!stream.getVideoTracks().length) removeStream(id); });
+  state.streams.set(id, { stream, name, local, thumb, view });
+  if (!view) stream.addEventListener("removetrack", () => { if (!stream.getVideoTracks().length) removeStream(id); });
 
   // Someone else's screen takes priority over our own preview.
   const cur = state.streams.get(state.featured);
@@ -1009,10 +1018,16 @@ function renderEmpty() {
     : "Entre na call do Discord e clique em Assistir no chat dela.";
 }
 
+function dropThumb(s) {
+  const canvas = s.thumb.querySelector("canvas");
+  if (canvas) s.view?.detach(canvas);
+  s.thumb.remove();
+}
+
 function removeStream(id) {
   const s = state.streams.get(id);
   if (!s) return;
-  s.thumb.remove();
+  dropThumb(s);
   state.streams.delete(id);
   if (state.featured === id) {
     const others = [...state.streams].sort((a, b) => a[1].local - b[1].local);
@@ -1033,6 +1048,7 @@ function renderStreams() {
   ui.stageBar.hidden = !s;
   renderEmpty();
 
+  showCanvas(s?.view ?? null);
   if (!s) {
     ui.feature.srcObject = null;
     ui.unmute.hidden = true;
@@ -1051,7 +1067,9 @@ function renderStreams() {
     ui.featureName.textContent = s.local ? "Sua tela" : s.name;
     const hasAudio = !s.local && s.stream.getAudioTracks().length > 0;
     $("volumeWrap").hidden = !hasAudio;
-    ui.pipBtn.hidden = !document.pictureInPictureEnabled;
+    // On a canvas, picture in picture goes through a captured copy of it.
+    ui.pipBtn.hidden = !document.pictureInPictureEnabled || (!!s.view && !ui.featureCanvas.captureStream);
+    ui.fullBtn.hidden = !!s.view && !fullscreenApi().request;
   }
 
   const showStrip = state.streams.size > 1;
@@ -1065,6 +1083,17 @@ function renderStreams() {
     }
   }
   if (!showStrip) for (const item of state.streams.values()) item.thumb.remove();
+}
+
+// The stage canvas follows the featured screen's CanvasView; the video
+// element underneath keeps playing that screen's audio.
+function showCanvas(view) {
+  if (state.canvasView === view) return;
+  state.canvasView?.detach(ui.featureCanvas);
+  state.canvasView = view;
+  ui.featureCanvas.hidden = !view;
+  ui.feature.classList.toggle("audio-only", !!view);
+  view?.attach(ui.featureCanvas);
 }
 
 /* Volume, fullscreen, picture-in-picture */
@@ -1103,7 +1132,7 @@ const stats = createStatsPanel({
   container: ui.stage,
   getConnections: () => [
     ...[...state.incoming].map(([peerId, call]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "in", pc: call.peerConnection })),
-    ...[...state.turboIn].map(([peerId, e]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "in", pc: e.conn.peerConnection, turbo: () => ({ ...e.rx.stats, remote: e.remote }) })),
+    ...[...state.turboIn].map(([peerId, e]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "in", pc: e.conn.peerConnection, turbo: () => ({ ...e.rx.stats, render: e.rx.view ? "canvas" : "track", remote: e.remote }) })),
     ...[...state.outgoing].map(([peerId, call]) => ({ peerId, name: state.members.get(peerId)?.name || "Alguém", direction: "out", pc: call.peerConnection, turbo: call.turbo })),
   ].filter((c) => c.pc),
 });
@@ -1112,16 +1141,48 @@ ui.stage.addEventListener("statstoggle", (e) => statsBtn.setAttribute("aria-pres
 
 ui.fullBtn.addEventListener("click", toggleFullscreen);
 ui.feature.addEventListener("dblclick", toggleFullscreen);
+ui.featureCanvas.addEventListener("dblclick", toggleFullscreen);
+// Older iPadOS Safari only has the prefixed API; iPhone has none for elements
+// (only the video's own player, which cannot show a canvas).
+function fullscreenApi() {
+  const st = ui.stage, d = document;
+  return {
+    element: d.fullscreenElement ?? d.webkitFullscreenElement,
+    request: st.requestFullscreen?.bind(st) ?? st.webkitRequestFullscreen?.bind(st),
+    exit: d.exitFullscreen?.bind(d) ?? d.webkitExitFullscreen?.bind(d),
+  };
+}
 function toggleFullscreen() {
-  if (document.fullscreenElement) document.exitFullscreen();
-  else (ui.stage.requestFullscreen?.() ?? ui.feature.webkitEnterFullscreen?.());
+  const fs = fullscreenApi();
+  if (fs.element) fs.exit?.();
+  else if (fs.request) fs.request()?.catch?.(() => {});
+  else if (!state.canvasView) ui.feature.webkitEnterFullscreen?.();
 }
 ui.pipBtn.addEventListener("click", async () => {
   try {
     if (document.pictureInPictureElement) await document.exitPictureInPicture();
+    else if (state.canvasView) await canvasPictureInPicture();
     else await ui.feature.requestPictureInPicture();
   } catch {}
 });
+// The floating window needs a video: a captured copy of the stage canvas,
+// only while it is open (it costs a copy per frame; the canvas keeps painting
+// with the tab hidden, see CanvasView.push).
+async function canvasPictureInPicture() {
+  const track = ui.featureCanvas.captureStream().getVideoTracks()[0];
+  const v = Object.assign(document.createElement("video"), { muted: true, playsInline: true, className: "pip-source" });
+  v.srcObject = new MediaStream([track]);
+  ui.stage.append(v);
+  const done = () => { track.stop(); v.srcObject = null; v.remove(); };
+  v.addEventListener("leavepictureinpicture", done, { once: true });
+  try {
+    await v.play();
+    await v.requestPictureInPicture();
+  } catch (err) {
+    done();
+    throw err;
+  }
+}
 document.addEventListener("keydown", (e) => {
   if (!state.inRoom || e.target.matches("input") || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === "f" || e.key === "F") toggleFullscreen();

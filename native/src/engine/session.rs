@@ -28,7 +28,8 @@ struct Member {
     id: String,
     name: String,
     sharing: bool,
-    /// Receives video via WebCodecs (Chrome/Edge). Only these receive from the app.
+    /// Receives video via WebCodecs (Chrome/Edge; Safari and Firefox paint it
+    /// on a canvas). These get the data channel; the rest get RTP.
     wc: bool,
     /// Streams only to people in the Discord call (requires a pass).
     discord: bool,
@@ -44,7 +45,7 @@ enum Kind {
     Guest,
     /// I stream: video over the data channel (WebCodecs, minimal latency).
     Turbo,
-    /// I stream: plain RTP video (relay, bad connection, Firefox/Safari).
+    /// I stream: plain RTP video (relay, bad connection, no WebCodecs).
     Media,
     /// I stream: someone came to hand over the Discord pass.
     Pass,
@@ -787,13 +788,10 @@ impl Session {
             }
             (Kind::Turbo, "rx") => self.on_report(&conn, &v).await,
             (Kind::Turbo, "unsupported") => {
-                // The browser cannot decode this video: stop sending.
-                let peer = self.conns.get(&conn).map(|c| c.peer.clone()).unwrap_or_default();
-                self.close_conn(&conn).await;
-                if let Some(m) = self.members.iter_mut().find(|m| m.id == peer) {
-                    m.wc = false;
-                }
-                self.publish_viewers().await;
+                // The browser has WebCodecs but cannot decode this video (Firefox
+                // without an H.264 decoder, say): it gets RTP instead, video and
+                // audio in one call (demote closes the audio-only one).
+                self.demote(&conn, "cannot decode over the data channel").await;
             }
             _ => {}
         }

@@ -28,10 +28,26 @@ const REPORT_MS = 1000;       // report from viewer to streamer
 const MAX_ENCODE_QUEUE = 3;
 const CHANNEL = { negotiated: true, id: 100, ordered: false, maxPacketLifeTime: PACKET_LIFETIME_MS };
 
+// How decoded frames reach the screen. Chrome and Edge feed a regular video
+// track (MediaStreamTrackGenerator, or the standard VideoTrackGenerator where
+// a browser exposes it on the page); Safari 16.4+ and Firefox 130+ have
+// VideoDecoder but neither, so they paint the newest frame on a canvas once
+// per display refresh. ?render=canvas forces the canvas (for testing).
+function renderMode() {
+  const forced = /[?&]render=canvas\b/.test(globalThis.location?.search ?? "");
+  if (!forced && typeof MediaStreamTrackGenerator === "function") return "track";
+  if (!forced && typeof VideoTrackGenerator === "function") return "generator";
+  const canvas = typeof HTMLCanvasElement === "function" && typeof VideoFrame === "function"
+    && typeof CanvasRenderingContext2D === "function";
+  return canvas ? "canvas" : null;
+}
+
 export function turboSupport() {
+  const render = typeof VideoDecoder === "function" ? renderMode() : null;
   return {
     send: typeof MediaStreamTrackProcessor === "function" && typeof VideoEncoder === "function",
-    receive: typeof MediaStreamTrackGenerator === "function" && typeof VideoDecoder === "function",
+    receive: !!render,
+    render,
   };
 }
 
@@ -266,9 +282,25 @@ export class TurboSender {
 /* ---------------- Viewer ---------------- */
 
 export class TurboReceiver {
-  constructor(channel, { requestKey, onUnsupported, report }) {
-    this.generator = new MediaStreamTrackGenerator({ kind: "video" });
-    this.writer = this.generator.writable.getWriter();
+  constructor(channel, { requestKey, onUnsupported, report, render = turboSupport().render }) {
+    this.generator = null;
+    this.writer = null;
+    this.canvas = null;
+    if (render === "track" || render === "generator") {
+      try {
+        this.generator = render === "track" ? new MediaStreamTrackGenerator({ kind: "video" }) : new VideoTrackGenerator();
+        this.writer = this.generator.writable.getWriter();
+      } catch (err) {
+        console.warn("[turbo] video track unavailable, painting on a canvas", err);
+        this.generator = null;
+      }
+    }
+    if (!this.writer) this.canvas = new CanvasView();
+    // H.264 goes to the decoder as it travels (Annex B); a decoder that refuses
+    // it before decoding anything gets length-prefixed NAL units and an avcC
+    // description instead (?avc=avcc forces that, for testing).
+    this.avcc = /[?&]avc=avcc\b/.test(globalThis.location?.search ?? "");
+    this.decodedAny = false;
     this.frames = new Map(); // seq -> frame being assembled
     this.expected = null;
     this.waitingKey = true;
@@ -295,7 +327,10 @@ export class TurboReceiver {
     channel.addEventListener("message", (e) => this.#onPacket(e.data));
   }
 
-  get track() { return this.generator; }
+  /** The video track (Chrome, Edge), or null when frames go to `view`. */
+  get track() { return this.generator ? (this.generator.track ?? this.generator) : null; }
+  /** Canvas painter (Safari, Firefox), or null when frames go to `track`. */
+  get view() { return this.canvas; }
 
   /// A retransmission takes one round trip: the wait for a missing frame tracks the connection.
   setRtt(ms) {
@@ -307,8 +342,9 @@ export class TurboReceiver {
     clearTimeout(this.timer);
     clearInterval(this.reportTimer);
     try { this.decoder?.close(); } catch {}
-    this.writer.close().catch(() => {});
-    this.generator.stop();
+    this.writer?.close().catch(() => {});
+    try { (this.generator?.track ?? this.generator)?.stop(); } catch {}
+    this.canvas?.close();
     this.frames.clear();
   }
 
@@ -398,7 +434,7 @@ export class TurboReceiver {
     try {
       const c = f.config;
       if (c && (!this.config || c.codec !== this.config.codec || c.w !== this.config.w || c.h !== this.config.h || this.decoder?.state !== "configured")) {
-        this.#configure(c);
+        this.#configure(c, f);
       }
       if (!this.decoder || this.decoder.state !== "configured") { this.waitingKey = true; return; }
       let data = f.parts[0];
@@ -407,6 +443,8 @@ export class TurboReceiver {
         let off = 0;
         for (const p of f.parts) { data.set(p, off); off += p.byteLength; }
       }
+      // avcC: parameter sets travel in the description, not in the frames.
+      if (this.avccMode) data = toAvcc(splitAnnexB(data).filter((n) => ![7, 8, 9].includes(n[0] & 0x1f)));
       if (this.pending.size > 120) this.pending.clear();
       this.pending.set(f.ts, performance.now());
       this.decoder.decode(new EncodedVideoChunk({ type: f.key ? "key" : "delta", timestamp: f.ts, data }));
@@ -415,11 +453,18 @@ export class TurboReceiver {
     }
   }
 
-  #configure(c) {
+  // `f` is the keyframe carrying the config (its SPS/PPS make the avcC description).
+  #configure(c, f) {
     if (!this.decoder || this.decoder.state === "closed") {
       this.decoder = new VideoDecoder({ output: (frame) => this.#output(frame), error: (err) => this.#fail(err) });
     }
-    this.decoder.configure({ codec: c.codec, codedWidth: c.w, codedHeight: c.h, optimizeForLatency: true });
+    const config = { codec: c.codec, codedWidth: c.w, codedHeight: c.h, optimizeForLatency: true };
+    this.avccMode = false;
+    if (this.avcc && /^avc[13]\./.test(c.codec)) {
+      const description = avcDescription(splitAnnexB(f.parts[0]));
+      if (description) { config.description = description; this.avccMode = true; }
+    }
+    this.decoder.configure(config);
     this.config = c;
     this.stats.codec = c.codec;
   }
@@ -432,7 +477,9 @@ export class TurboReceiver {
     this.stats.width = frame.displayWidth;
     this.stats.height = frame.displayHeight;
     this.errors = 0;
+    this.decodedAny = true;
     if (this.closed) { frame.close(); return; }
+    if (this.canvas) { this.canvas.push(frame); return; }
     this.writer.write(frame).catch(() => { try { frame.close(); } catch {} });
   }
 
@@ -443,9 +490,136 @@ export class TurboReceiver {
     this.decoder = null;
     this.config = null;
     this.waitingKey = true;
+    // Safari's and Firefox's H.264 support differs in which bitstream format
+    // they take: before giving up, try the other one once.
+    if (!this.decodedAny && !this.avcc && this.stats.codec?.startsWith("avc")) {
+      console.warn("[turbo] retrying H.264 as avcC");
+      this.avcc = true;
+      this.errors = 0;
+      this.requestKey();
+      return;
+    }
     if (err?.name === "NotSupportedError" || ++this.errors > 5) { this.onUnsupported?.(); return; }
     this.requestKey();
   }
+}
+
+/* ---------------- Canvas painting (Safari, Firefox) ---------------- */
+
+// Paints the newest decoded frame on every attached canvas, once per display
+// refresh: a frame replaced before its turn is closed unseen, so a slow
+// display never builds a queue. The last painted frame stays open so a canvas
+// attached later (switching the featured screen) shows it right away.
+// Thumbnails are small and repainted at a fraction of the rate.
+const THUMB_EVERY = 4;
+const THUMB_WIDTH = 320;
+
+export class CanvasView {
+  constructor() {
+    this.pending = null;
+    this.shown = null;
+    this.targets = new Map(); // canvas -> { ctx, thumb }
+    this.raf = 0;
+    this.painted = 0;
+    this.superseded = 0;
+    this.closed = false;
+    this.onPaint = null;
+  }
+
+  get width() { return this.shown?.displayWidth ?? 0; }
+  get height() { return this.shown?.displayHeight ?? 0; }
+
+  attach(canvas, { thumb = false } = {}) {
+    if (this.closed || this.targets.has(canvas)) return;
+    // desynchronized: Chrome may skip the compositor's extra frame of delay;
+    // others ignore it. No alpha: the video is opaque.
+    let ctx = null;
+    try { ctx = canvas.getContext("2d", { alpha: false, desynchronized: !thumb }); } catch {}
+    if (!ctx) return;
+    this.targets.set(canvas, { ctx, thumb });
+    if (this.shown) this.#draw(canvas, this.targets.get(canvas), this.shown);
+  }
+
+  detach(canvas) { this.targets.delete(canvas); }
+
+  push(frame) {
+    if (this.closed) { frame.close(); return; }
+    if (this.pending) { this.pending.close(); this.superseded++; }
+    this.pending = frame;
+    // A hidden page gets no animation frames: paint right away (picture in
+    // picture and a later return to the tab still see the newest image).
+    if (document.hidden) { this.#paint(); return; }
+    if (!this.raf) this.raf = requestAnimationFrame(() => { this.raf = 0; this.#paint(); });
+  }
+
+  #paint() {
+    const frame = this.pending;
+    if (!frame) return;
+    this.pending = null;
+    this.painted++;
+    for (const [canvas, t] of this.targets) {
+      if (!t.thumb || this.painted % THUMB_EVERY === 1) this.#draw(canvas, t, frame);
+    }
+    this.shown?.close();
+    this.shown = frame;
+    this.onPaint?.(frame);
+  }
+
+  #draw(canvas, t, frame) {
+    const w = frame.displayWidth, h = frame.displayHeight;
+    const scale = t.thumb ? Math.min(1, THUMB_WIDTH / w) : 1;
+    const cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
+    if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+    try { t.ctx.drawImage(frame, 0, 0, cw, ch); } catch (err) { console.warn("[turbo] painting", err); }
+  }
+
+  close() {
+    this.closed = true;
+    cancelAnimationFrame(this.raf);
+    this.pending?.close();
+    this.shown?.close();
+    this.pending = this.shown = null;
+    this.targets.clear();
+  }
+}
+
+/* ---------------- H.264 bitstream formats ---------------- */
+
+// NAL units of an Annex B access unit (start codes 00 00 01 / 00 00 00 01).
+export function splitAnnexB(data) {
+  const nals = [];
+  let start = -1;
+  for (let i = 0; i + 2 < data.length; i++) {
+    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) {
+      if (start >= 0) nals.push(data.subarray(start, i > 0 && data[i - 1] === 0 ? i - 1 : i));
+      start = i + 3;
+      i += 2;
+    }
+  }
+  if (start >= 0 && start < data.length) nals.push(data.subarray(start));
+  return nals.filter((n) => n.length);
+}
+
+// The same NAL units, each prefixed with its 4-byte length (the MP4 format).
+export function toAvcc(nals) {
+  const out = new Uint8Array(nals.reduce((n, x) => n + 4 + x.length, 0));
+  const dv = new DataView(out.buffer);
+  let off = 0;
+  for (const n of nals) { dv.setUint32(off, n.length); out.set(n, off + 4); off += 4 + n.length; }
+  return out;
+}
+
+// avcC record (ISO 14496-15) from a keyframe's SPS and PPS.
+export function avcDescription(nals) {
+  const sps = nals.find((n) => (n[0] & 0x1f) === 7), pps = nals.find((n) => (n[0] & 0x1f) === 8);
+  if (!sps || !pps || sps.length < 4) return null;
+  const out = new Uint8Array(11 + sps.length + pps.length);
+  out.set([1, sps[1], sps[2], sps[3], 0xff, 0xe1, sps.length >> 8, sps.length & 0xff]);
+  out.set(sps, 8);
+  let off = 8 + sps.length;
+  out.set([1, pps.length >> 8, pps.length & 0xff], off);
+  out.set(pps, off + 3);
+  return out;
 }
 
 function ema(prev, v) { return prev == null ? v : prev * 0.9 + v * 0.1; }

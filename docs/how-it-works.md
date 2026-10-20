@@ -17,7 +17,9 @@ Ideas from Sunshine and Moonlight:
 * The quality button sets resolution, frame rate and priority (smoothness or sharpness).
 * The **I** key opens a panel with delay, codec, buffer and whether the path is direct or relayed.
 
-**Minimum delay mode** (`turbo.js`, Chrome and Edge): the streamer encodes once with WebCodecs and sends the same packets to everyone over an unordered data channel. Viewers decode and show each frame right away, with no jitter buffer. If a viewer keeps losing data, they switch back to normal WebRTC. On a direct connection at 720p60 this measured 45 to 48 ms, against 66 to 80 ms in normal mode.
+**Minimum delay mode** (`turbo.js`, Chrome and Edge stream it): the streamer encodes once with WebCodecs and sends the same packets to everyone over an unordered data channel. Viewers decode and show each frame right away, with no jitter buffer. If a viewer keeps losing data, they switch back to normal WebRTC. On a direct connection at 720p60 this measured 45 to 48 ms, against 66 to 80 ms in normal mode.
+
+Chrome and Edge viewers hand each decoded frame to a video track. Safari 16.4+ (iPad included) and Firefox 130+ have the decoder but not that track, so they paint the newest frame on a canvas once per screen refresh, dropping any frame that a newer one replaced before its turn. Their audio still comes over WebRTC. If their decoder rejects the H.264 as it travels (Annex B), they retry it in the MP4 layout (avcC); if it still fails, that viewer gets normal WebRTC. `?render=canvas` forces the canvas in Chrome, and `measure.mjs --canvas` measures it.
 
 `tools/latency` measures the delay with two automated Chromes:
 

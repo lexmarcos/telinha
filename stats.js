@@ -284,7 +284,7 @@ function renderTurbo(b, t, rtt) {
 
   const codec = !t.codec ? "" : t.codec.startsWith("avc1") ? "H264" : t.codec.toUpperCase();
   const hw = typeof t.hardware === "boolean" ? (t.hardware ? "hardware" : "software") : "";
-  setText(f.codec, [codec, hw, "WebCodecs"].filter(Boolean).join(" · "));
+  setText(f.codec, [codec, hw, "WebCodecs", t.render === "canvas" ? "canvas" : ""].filter(Boolean).join(" · "));
   const fps = dt > 0 ? (t.frames - prev.frames) / dt : null;
   const res = t.width && t.height ? `${t.width}×${t.height}` : "";
   setText(f.res, [res, isNum(fps) ? `${n0.format(fps)} fps` : ""].filter(Boolean).join(" · ") || DASH);

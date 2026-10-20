@@ -190,6 +190,10 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   object-fit: contain; background: #000;
 }
 .stage.idle .feature { display: none; }
+.feature[hidden] { display: none; }
+/* Picture painted on the canvas above it; the video only plays the audio. */
+.feature.audio-only { visibility: hidden; }
+.pip-source { position: absolute; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
 .stage.idle-cursor { cursor: none; }
 
 .empty {
@@ -268,7 +272,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 }
 .thumb:active { transform: scale(0.97); transition-duration: 60ms; }
 .thumb[aria-current="true"] { box-shadow: 0 0 0 2px var(--phosphor); }
-.thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb video, .thumb canvas { width: 100%; height: 100%; object-fit: cover; display: block; }
 .thumb-name {
   position: absolute; left: 0.5rem; bottom: 0.5rem; max-width: calc(100% - 1rem);
   display: inline-flex; align-items: center; gap: 0.4rem;

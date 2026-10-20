@@ -1,7 +1,7 @@
 //! RTP path: the same H.264 from the GPU, but as regular WebRTC video
 //! (retransmission with NACK, keyframe requests with PLI). This is the path for
 //! viewers on the relay, with poor reception over the data channel, or using a
-//! browser without WebCodecs (Firefox, Safari).
+//! browser without WebCodecs (older Safari and Firefox).
 
 use std::collections::VecDeque;
 use std::sync::Arc;

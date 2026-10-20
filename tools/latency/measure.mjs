@@ -7,6 +7,10 @@
 // joins the channel via the link and sends its own test screen (same time grid).
 // Requires --server. E.g.: --nativo ../../native/target/release/telinha
 //
+// --canvas makes the viewer paint frames on a canvas (?render=canvas, the
+// Safari/Firefox path of the minimum delay mode) instead of feeding a video
+// track; the probe then reads each frame as it is painted. Use with --turbo.
+//
 // --server points the app at the signaling/TURN server (deploy/). Without it,
 // the app served on localhost uses public PeerJS, STUN only, and --relay does not connect.
 //
@@ -48,7 +52,7 @@ import puppeteer from "puppeteer";
 /* ---------------- args ---------------- */
 
 const argv = process.argv.slice(2);
-const opt = { app: null, server: null, native: null, seconds: 20, relay: false, turbo: false, label: null, warmup: 3, headed: false, retries: 3 };
+const opt = { app: null, server: null, native: null, seconds: 20, relay: false, turbo: false, canvas: false, label: null, warmup: 3, headed: false, retries: 3 };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--app") opt.app = argv[++i];
@@ -60,6 +64,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--relay") opt.relay = true;
   else if (a === "--turbo") opt.turbo = true; // the app's "minimum delay" mode (WebCodecs)
   else if (a === "--headed") opt.headed = true;
+  else if (a === "--canvas") opt.canvas = true;
+  else if (a === "--query") opt.query = argv[++i]; // extra viewer URL parameters, e.g. avc=avcc
   else if (a === "--retries") opt.retries = Number(argv[++i]);
   else if (a === "--foto") opt.photo = argv[++i]; // saves the last received frame (PNG, full size)
   else { console.error(`unknown arg ${a}`); process.exit(2); }
@@ -308,6 +314,66 @@ function startDecoder() {
   video.requestVideoFrameCallback(onFrame);
 }
 
+/* ---------------- injected: decoder for the canvas path (viewer page) ---------------- */
+
+// The canvas has no frame callback: wrap drawImage and read the timestamp grid
+// from each VideoFrame painted on the stage canvas, at the moment it is painted
+// (inside the animation frame that presents it, like rVFC's callback).
+function startCanvasDecoder() {
+  const CELL = 40, COLS = 16, ROWS = 4, GX = 48, GY = 48, SRC_W = 1280;
+  const MARKER = [1, 0, 1, 1];
+  const RW = COLS * CELL, RH = ROWS * CELL;
+  const cv = document.createElement("canvas"); cv.width = RW; cv.height = RH;
+  const g = cv.getContext("2d", { willReadFrequently: true });
+  const crc8 = (bits) => { let crc = 0; for (const b of bits) { const fb = ((crc >> 7) & 1) ^ b; crc = (crc << 1) & 0xff; if (fb) crc ^= 0x07; } return crc; };
+  const S = (window.__lat = { recording: false, samples: [], fails: 0, failReasons: {}, mismatch: 0, firstOkAt: 0, total: 0, sizes: {} });
+  const fail = (why) => { if (S.recording) { S.fails++; S.failReasons[why] = (S.failReasons[why] || 0) + 1; } };
+  const draw = CanvasRenderingContext2D.prototype.drawImage;
+  CanvasRenderingContext2D.prototype.drawImage = function (src, ...rest) {
+    const at = performance.now();
+    const r = draw.call(this, src, ...rest);
+    if (this.canvas.id !== "featureCanvas" || !(src instanceof VideoFrame)) return r;
+    const cbWall = Date.now();
+    const offset = cbWall - (performance.timeOrigin + performance.now());
+    try {
+      const vw = src.displayWidth, vh = src.displayHeight, k = vw / SRC_W;
+      S.sizes[`${vw}x${vh}`] = (S.sizes[`${vw}x${vh}`] || 0) + 1;
+      draw.call(g, src, GX * k, GY * k, RW * k, RH * k, 0, 0, RW, RH);
+      const d = g.getImageData(0, 0, RW, RH).data;
+      const bits = [];
+      let ambiguous = 0;
+      for (let i = 0; i < COLS * ROWS; i++) {
+        const cx = (i % COLS) * CELL + CELL / 2, cy = Math.floor(i / COLS) * CELL + CELL / 2;
+        let sum = 0, cnt = 0;
+        for (let y = cy - 4; y <= cy + 4; y += 2) for (let x = cx - 4; x <= cx + 4; x += 2) {
+          const o = (y * RW + x) * 4;
+          sum += 0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2]; cnt++;
+        }
+        const l = sum / cnt;
+        if (l > 70 && l < 185) ambiguous++;
+        bits.push(l >= 128 ? 1 : 0);
+      }
+      if (MARKER.some((b, i) => bits[i] !== b)) { fail("marker"); return r; }
+      let crc = 0;
+      for (let i = 56; i < 64; i++) crc = (crc << 1) | bits[i];
+      if (crc8(bits.slice(4, 56)) !== crc) { fail("crc"); return r; }
+      let ts = 0;
+      for (let i = 4; i < 48; i++) ts = ts * 2 + bits[i];
+      let counter = 0;
+      for (let i = 48; i < 56; i++) counter = (counter << 1) | bits[i];
+      if (Math.abs(cbWall - ts) > 10_000) { fail("range"); return r; }
+      if (!S.firstOkAt) S.firstOkAt = cbWall;
+      S.total++;
+      if (!S.recording) return r;
+      const paint = performance.timeOrigin + at + offset;
+      S.samples.push({ ts, counter, ambiguous, at: cbWall, disp: paint - ts, cb: cbWall - ts, recv: null, present: null, match: true, w: vw });
+    } catch (e) {
+      fail("exception:" + e.message);
+    }
+    return r;
+  };
+}
+
 /* ---------------- injected: stats snapshot ---------------- */
 
 async function snapshotStats() {
@@ -413,7 +479,7 @@ async function cleanup() {
 let attemptState = null;
 const FALLBACK_RE = /servidor próprio indispon|PeerJS público|fallback/i;
 
-async function mkPage(name, { sender }) {
+async function mkPage(name, { sender, url = URL_ }) {
   const ctx = await browser.createBrowserContext();
   attemptState.contexts.push(ctx);
   const st = attemptState;
@@ -430,7 +496,7 @@ async function mkPage(name, { sender }) {
   }, opt.turbo);
   p.on("console", (m) => { if (m.type() === "error" || m.type() === "warn") log(name, m.type(), m.text()); });
   p.on("pageerror", (e) => log(name, "PAGEERROR", e.message));
-  await p.goto(URL_, { waitUntil: "load" });
+  await p.goto(url, { waitUntil: "load" });
   // Chrome only exposes encoderImplementation/decoderImplementation in getStats() to documents
   // that are currently capturing camera/mic ("exposing hardware is allowed"). Hold a fake mic
   // track (fake device, auto-accepted) for the whole run; the app itself never sees it.
@@ -442,6 +508,14 @@ async function mkPage(name, { sender }) {
   await p.waitForSelector("#name");
   await p.type("#name", name);
   return p;
+}
+
+// The stage shows a picture: the video element, or the canvas on that path.
+function receiving() {
+  const c = document.querySelector("#featureCanvas");
+  if (c && !c.hidden) return c.width > 1 && !document.querySelector("#stage").classList.contains("idle");
+  const v = document.querySelector("#feature");
+  return v.videoWidth > 0 && v.readyState >= 2 && !document.querySelector("#stage").classList.contains("idle");
 }
 
 /* Native app as the streamer: its side's numbers do not exist in the page. */
@@ -456,12 +530,9 @@ async function nativeSender(viewer, code) {
   const nativeLog = process.env.NATIVO_LOG ? (await import("node:fs")).createWriteStream(process.env.NATIVO_LOG) : null;
   nativeProc.stderr.on("data", (d) => nativeLog?.write(d));
   nativeProc.stderr.on("data", (d) => { const t = d.toString().replace(/\x1b\[[0-9;]*m/g, ""); if (/escolhido|ERROR|WARN/.test(t)) log("nativo:", t.trim().slice(0, 160)); });
-  await viewer.waitForFunction(() => {
-    const v = document.querySelector("#feature");
-    return v.videoWidth > 0 && v.readyState >= 2;
-  }, { timeout: 30000, polling: 200 });
+  await viewer.waitForFunction(receiving, { timeout: 30000, polling: 200 });
   log("viewer receiving video from native app");
-  await viewer.evaluate(startDecoder);
+  await viewer.evaluate(opt.canvas ? startCanvasDecoder : startDecoder);
   await viewer.waitForFunction(() => window.__lat.firstOkAt > 0, { timeout: 15000, polling: 100 });
   return { evaluate: async (fn) => (fn === snapshotStats ? { inbound: [], outbound: [], sources: [], pairs: [] } : null) };
 }
@@ -469,7 +540,9 @@ async function nativeSender(viewer, code) {
 async function setup() {
   const checkFallback = () => { if (attemptState.fallback) throw new Error(`app fell back off the signaling server (${attemptState.fallback})`); };
   // A: creates the channel, watches.
-  const viewer = await mkPage("Viewer", { sender: false });
+  const query = [opt.canvas ? "render=canvas" : "", opt.query ?? ""].filter(Boolean).join("&");
+  const viewerUrl = query ? `${URL_}${URL_.includes("?") ? "&" : "?"}${query}` : URL_;
+  const viewer = await mkPage("Viewer", { sender: false, url: viewerUrl });
   await viewer.click("#create");
   await viewer.waitForSelector("#room:not([hidden])", { timeout: 20000 });
   await viewer.waitForFunction(() => /^\d{4}$/.test(document.querySelector("#channelDigits")?.textContent || ""), { timeout: 10000 });
@@ -500,10 +573,7 @@ async function setup() {
     log("share click did not take, retrying");
   }
 
-  await viewer.waitForFunction(() => {
-    const v = document.querySelector("#feature");
-    return v.videoWidth > 0 && v.readyState >= 2 && !document.querySelector("#stage").classList.contains("idle");
-  }, { timeout: 30000, polling: 200 }).catch(async (e) => {
+  await viewer.waitForFunction(receiving, { timeout: 30000, polling: 200 }).catch(async (e) => {
     log("viewer state", JSON.stringify(await viewer.evaluate(() => {
       const v = document.querySelector("#feature");
       return { w: v.videoWidth, rs: v.readyState, paused: v.paused, stage: document.querySelector("#stage").className, pcs: (window.__pcs || []).map((p) => p.connectionState + "/" + p.getReceivers().length) };
@@ -513,7 +583,7 @@ async function setup() {
   });
   log("viewer receiving video");
 
-  await viewer.evaluate(startDecoder);
+  await viewer.evaluate(opt.canvas ? startCanvasDecoder : startDecoder);
   await viewer.waitForFunction(() => window.__lat.firstOkAt > 0, { timeout: 15000, polling: 100 }).catch(async () => {
     const shot = path.join(path.dirname(new URL(import.meta.url).pathname), `fail-${opt.label}.png`);
     await viewer.screenshot({ path: shot });
@@ -587,6 +657,7 @@ try {
     qualityLimitationReason: out1?.qualityLimitationReason ?? null,
     relay: opt.relay,
     turbo: opt.turbo,
+    canvas: opt.canvas,
     // extras
     extra: {
       presentedFps: r1(S.length / elapsed),
