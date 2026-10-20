@@ -173,6 +173,14 @@ fn video_test(secs: u64) {
         }
     }
     control.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut t = control.take_timings();
+    println!(
+        "stages (p50/p95/max ms): wait {}, convert {}, encode {}, total {}",
+        video::percentiles(&mut t.wait),
+        video::percentiles(&mut t.convert),
+        video::percentiles(&mut t.encode),
+        video::percentiles(&mut t.total)
+    );
     let st = control.stats();
     let secs_f = start.elapsed().as_secs_f64();
     println!(

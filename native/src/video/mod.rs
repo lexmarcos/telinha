@@ -5,6 +5,7 @@ pub mod encoders;
 pub mod ffi;
 pub mod h264;
 pub mod source;
+mod stage;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +21,7 @@ use crate::engine::EncoderInfo;
 use encoders::{Candidate, Ctx, SourceKind};
 use ffi::{Encoder, EncoderParams, Frame, Graph, HwDevice, HwFrames, InputSpec};
 use source::{CpuFrame, CpuSource};
+use stage::{EncodeStage, Job, Overlap};
 
 #[derive(Debug)]
 pub struct EncodedFrame {
@@ -99,6 +101,36 @@ pub struct Stats {
     pub error: Option<String>,
 }
 
+/// How long each stage took per frame (ms) since the last read, for the
+/// "video rates" log: waiting (capture to the pipeline: the mailbox and the
+/// pacer), converting (upload, scale, colour), encoding (into the encoder to
+/// the packet out) and in all (capture to packet).
+#[derive(Default, Debug)]
+pub struct Timings {
+    pub wait: Vec<f32>,
+    pub convert: Vec<f32>,
+    pub encode: Vec<f32>,
+    pub total: Vec<f32>,
+}
+
+impl Timings {
+    fn add(v: &mut Vec<f32>, d: Duration) {
+        if v.len() < 4096 {
+            v.push(d.as_secs_f32() * 1000.0);
+        }
+    }
+}
+
+/// "p50/p95/max" in ms, or "-" without samples.
+pub fn percentiles(v: &mut [f32]) -> String {
+    if v.is_empty() {
+        return "-".into();
+    }
+    v.sort_by(f32::total_cmp);
+    let at = |p: f32| v[((v.len() - 1) as f32 * p).round() as usize];
+    format!("{:.1}/{:.1}/{:.1}", at(0.5), at(0.95), v[v.len() - 1])
+}
+
 /// Commands for the video thread, read on every frame.
 #[derive(Default)]
 pub struct Control {
@@ -107,6 +139,7 @@ pub struct Control {
     pending: Mutex<Option<Settings>>,
     pub stats: Mutex<Stats>,
     pub gop: Mutex<Gop>,
+    pub timings: Mutex<Timings>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -127,6 +160,10 @@ impl Control {
 
     pub fn stats(&self) -> Stats {
         self.stats.lock().unwrap().clone()
+    }
+
+    pub fn take_timings(&self) -> Timings {
+        std::mem::take(&mut *self.timings.lock().unwrap())
     }
 
     /// See [`Gop::replay`].
@@ -153,7 +190,7 @@ pub fn start(source: Source, quality: Quality, out: broadcast::Sender<Arc<Encode
         .spawn(move || {
             let _streaming = crate::realtime::streaming();
             let _boost = crate::realtime::boost(crate::realtime::Task::Video);
-            if let Err(e) = run(source, quality, &c, &out) {
+            if let Err(e) = run(source, quality, &c, out) {
                 tracing::error!("video stopped: {e}");
                 c.stats.lock().unwrap().error = Some(e.0);
             }
@@ -162,9 +199,10 @@ pub fn start(source: Source, quality: Quality, out: broadcast::Sender<Arc<Encode
     control
 }
 
+/// Capture-side half of the pipeline; the encoder lives in the
+/// [`EncodeStage`].
 struct Pipeline {
     graph: Graph,
-    encoder: Encoder,
     candidate: usize,
     out: (u32, u32),
     /// Incoming DMA-BUF frames (only with `SourceKind::Prime`).
@@ -190,7 +228,7 @@ fn open_encoder(cand: &Candidate, graph: &Graph, ctx: &Ctx, bitrate: u32) -> ffi
 /// Tries candidates in order; the first that builds the graph and opens the
 /// encoder wins. `start_at` skips the ones that already failed.
 /// `pixel` is the pixel format (BGRX/RGBX), even when the pixels are on the GPU.
-fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Settings, start_at: usize) -> ffi::Result<Pipeline> {
+fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Settings, start_at: usize) -> ffi::Result<(Pipeline, Encoder)> {
     let out = s.quality.output_size(native);
     let ctx = Ctx { native, out, fps: s.quality.fps };
     let mut last = ffi::Error("nenhum codificador disponível".into());
@@ -198,7 +236,7 @@ fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Set
         if cand.source != kind {
             continue;
         }
-        let attempt = || -> ffi::Result<Pipeline> {
+        let attempt = || -> ffi::Result<(Pipeline, Encoder)> {
             let device = match (kind, cand.device) {
                 #[cfg(target_os = "linux")]
                 (SourceKind::Prime, _) => Some(HwDevice::create(ff::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM, Some(&render_node()))?),
@@ -224,11 +262,11 @@ fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Set
             let graph = Graph::new(&(cand.chain)(&ctx), input.as_ref(), graph_device)?;
             let encoder = open_encoder(cand, &graph, &ctx, s.bitrate)?;
             let out = graph_out(&graph);
-            Ok(Pipeline { graph, encoder, candidate: i, out, frames, _device: device })
+            Ok((Pipeline { graph, candidate: i, out, frames, _device: device }, encoder))
         };
         match attempt() {
             Ok(p) => {
-                tracing::info!(encoder = cand.encoder, label = cand.label, w = p.out.0, h = p.out.1, gpu = (kind == SourceKind::Prime), "encoder chosen");
+                tracing::info!(encoder = cand.encoder, label = cand.label, w = p.0.out.0, h = p.0.out.1, gpu = (kind == SourceKind::Prime), "encoder chosen");
                 return Ok(p);
             }
             Err(e) => {
@@ -253,37 +291,41 @@ fn render_node() -> String {
 /// Rebuilds everything for `next`. The old pipeline goes first (NVENC
 /// allows only a few sessions per GPU, and with the old one open the build
 /// could settle for a worse encoder); if `next` fails, back to `current`.
-fn rebuild(pipe: Pipeline, kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, current: Settings, next: Settings) -> ffi::Result<(Pipeline, Settings)> {
+fn rebuild(pipe: Pipeline, stage: &EncodeStage, kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, current: Settings, next: Settings) -> ffi::Result<(Pipeline, Settings)> {
+    drop(stage.remove());
     drop(pipe);
-    match build(kind, native, pixel, &next, 0) {
-        Ok(p) => Ok((p, next)),
+    let (pipe, encoder, settings) = match build(kind, native, pixel, &next, 0) {
+        Ok((p, e)) => (p, e, next),
         Err(e) => {
             tracing::warn!("new quality failed ({e}); keeping the previous one");
-            Ok((build(kind, native, pixel, &current, 0)?, current))
+            let (p, e) = build(kind, native, pixel, &current, 0)?;
+            (p, e, current)
         }
-    }
+    };
+    stage.install(encoder);
+    Ok((pipe, settings))
 }
 
 /// Changes the encoder's bitrate and returns the one in effect. NVENC takes
 /// it on the open session (FFmpeg's nvenc reconfigures at the next frame, with
 /// an IDR); the others are closed and opened again, the old one first. If
 /// the new one does not open, the old bitrate comes back.
-fn set_bitrate(pipe: &mut Pipeline, native: (u32, u32), s: &Settings, bitrate: u32) -> ffi::Result<u32> {
+fn set_bitrate(pipe: &Pipeline, encoder: &mut Encoder, native: (u32, u32), s: &Settings, bitrate: u32) -> ffi::Result<u32> {
     let cand = &encoders::candidates()[pipe.candidate];
     if cand.encoder == "h264_nvenc" {
-        pipe.encoder.set_bitrate(bitrate);
+        encoder.set_bitrate(bitrate);
         return Ok(bitrate);
     }
     let ctx = Ctx { native, out: pipe.out, fps: s.quality.fps };
-    pipe.encoder.close();
+    encoder.close();
     match open_encoder(cand, &pipe.graph, &ctx, bitrate) {
         Ok(e) => {
-            pipe.encoder = e;
+            *encoder = e;
             Ok(bitrate)
         }
         Err(e) => {
             tracing::warn!(bitrate, "could not change the bitrate ({e}); keeping {}", s.bitrate);
-            pipe.encoder = open_encoder(cand, &pipe.graph, &ctx, s.bitrate)?;
+            *encoder = open_encoder(cand, &pipe.graph, &ctx, s.bitrate)?;
             Ok(s.bitrate)
         }
     }
@@ -293,7 +335,7 @@ fn graph_out(g: &Graph) -> (u32, u32) {
     g.out_size()
 }
 
-fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sender<Arc<EncodedFrame>>) -> ffi::Result<()> {
+fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast::Sender<Arc<EncodedFrame>>) -> ffi::Result<()> {
     let (kind, mut cpu) = match source {
         Source::Cpu(s) => (SourceKind::Cpu, Some(s)),
         #[cfg(target_os = "windows")]
@@ -319,11 +361,14 @@ fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sen
 
     // Sized for the real screen from the start: no encoder reopen a second in.
     let mut settings = Settings { quality, bitrate: quality.bitrate(native) };
-    let mut pipe = build(kind, native, pixel, &settings, 0)?;
-    let mut headers = h264::Headers::default();
+    let (mut pipe, encoder) = build(kind, native, pixel, &settings, 0)?;
+    // Declared after the pipeline so it goes first: its thread stops and the
+    // encoder closes before the graph and devices do.
+    let stage = EncodeStage::start(control.clone(), out.clone());
+    stage.install(encoder);
+    let mut overlap = Overlap::new();
     let mut captured_at: HashMap<i64, Instant> = HashMap::new();
     let mut pts: i64 = 0;
-    let mut index: u64 = 0;
     let mut filtered = Frame::new();
     publish_encoder(control, &pipe, native);
     // Last image received, to re-encode while the screen is static.
@@ -332,6 +377,8 @@ fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sen
     let mut pacer = Pacer::new(settings.quality.fps);
     // A frame that came early, waiting for its turn (newer ones replace it).
     let mut early: Option<CpuFrame> = None;
+    // When the last input went into the graph (for the conversion time).
+    let mut convert_from: Option<Instant> = None;
 
     loop {
         if control.stop.load(Ordering::Relaxed) {
@@ -343,10 +390,12 @@ fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sen
             if next != settings {
                 let rebuild_all = next.quality.output_size(native) != settings.quality.output_size(native) || next.quality.fps != settings.quality.fps;
                 if rebuild_all {
-                    (pipe, settings) = rebuild(pipe, kind, native, pixel, settings, next)?;
+                    (pipe, settings) = rebuild(pipe, &stage, kind, native, pixel, settings, next)?;
                     last_input = None;
                 } else {
-                    settings.bitrate = set_bitrate(&mut pipe, native, &settings, next.bitrate)?;
+                    if let Some(encoder) = stage.encoder().as_mut() {
+                        settings.bitrate = set_bitrate(&pipe, encoder, native, &settings, next.bitrate)?;
+                    }
                     settings.quality = next.quality;
                 }
                 pacer = Pacer::new(settings.quality.fps);
@@ -398,8 +447,11 @@ fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sen
                         control.stats.lock().unwrap().native = Some(native);
                         // The ideal bitrate for the new size (the session follows).
                         let next = Settings { quality: settings.quality, bitrate: settings.quality.bitrate(native) };
+                        drop(stage.remove());
                         drop(pipe);
-                        pipe = build(kind, native, pixel, &next, 0)?;
+                        let encoder;
+                        (pipe, encoder) = build(kind, native, pixel, &next, 0)?;
+                        stage.install(encoder);
                         settings = next;
                         last_input = None;
                         control.gop.lock().unwrap().clear();
@@ -408,6 +460,8 @@ fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sen
                     }
                     pts += 1;
                     captured_at.insert(pts, f.captured);
+                    Timings::add(&mut control.timings.lock().unwrap().wait, now.saturating_duration_since(f.captured));
+                    convert_from = Some(Instant::now());
                     let mut av = match f.data {
                         source::Pixels::Cpu(data) => Frame::from_cpu(data, f.width, f.height, f.stride, pixel, pts),
                         #[cfg(target_os = "linux")]
@@ -433,6 +487,7 @@ fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sen
                             av.set_pts(pts);
                             repeats.repeated(now);
                             captured_at.insert(pts, now);
+                            convert_from = Some(Instant::now());
                             pipe.graph.push(&mut av)?;
                         }
                         None => got_input = false,
@@ -446,32 +501,32 @@ fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sen
 
         while pipe.graph.pull(&mut filtered)? {
             let t0 = Instant::now();
+            let mut convert_ms = 0.0;
+            if let Some(from) = convert_from.take() {
+                Timings::add(&mut control.timings.lock().unwrap().convert, t0 - from);
+                convert_ms = (t0 - from).as_secs_f32() * 1000.0;
+            }
             if kind == SourceKind::Desktop {
                 pts += 1;
                 captured_at.insert(pts, t0);
                 control.stats.lock().unwrap().captured += 1;
                 unsafe { (*filtered.0).pts = pts };
             }
-            let key = control.force_key.swap(false, Ordering::Relaxed);
-            filtered.set_keyframe(key);
-            pipe.encoder.send(&mut filtered)?;
-            filtered.unref();
-            while let Some(pkt) = pipe.encoder.receive()? {
-                let captured = captured_at.remove(&pkt.pts).unwrap_or(t0);
-                let ms = captured.elapsed().as_secs_f32() * 1000.0;
-                {
-                    let mut st = control.stats.lock().unwrap();
-                    st.encoded += 1;
-                    st.encode_ms = Some(st.encode_ms.map_or(ms, |p| p * 0.9 + ms * 0.1));
+            let captured = captured_at.remove(&filtered.pts()).unwrap_or(t0);
+            let frame = std::mem::replace(&mut filtered, Frame::new());
+            let job = Job { frame, captured, converted: Instant::now(), size: pipe.out };
+            let period_ms = 1000.0 / settings.quality.fps.max(1) as f32;
+            let encoded = control.stats.lock().unwrap().encoded;
+            if overlap.update(t0, convert_ms, stage.encode_ms(), period_ms, encoded) {
+                // To the encoder's thread; one it had not started yet is skipped.
+                if stage.submit(job) {
+                    control.stats.lock().unwrap().skipped += 1;
                 }
-                let data = headers.fix_keyframe(pkt.data, pkt.key);
-                let Some(codec) = headers.codec() else { continue };
-                index += 1;
-                let frame = Arc::new(EncodedFrame { data: Bytes::from(data), key: pkt.key, codec, width: pipe.out.0, height: pipe.out.1, captured, index });
-                // Into the cache before it goes out: a sender subscribed to `out`
-                // and then reading the cache sees every frame at least once.
-                control.gop.lock().unwrap().push(&frame);
-                let _ = out.send(frame);
+            } else {
+                stage.encode_here(job, control, &out)?;
+            }
+            if let Some(e) = stage.failure() {
+                return Err(e);
             }
             if captured_at.len() > 240 {
                 captured_at.clear();

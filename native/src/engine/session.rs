@@ -1141,11 +1141,17 @@ impl Session {
         let (at, captured, encoded) = live.log_at;
         let secs = at.elapsed().as_secs_f32();
         if secs >= 10.0 {
+            // Per stage, p50/p95/max in ms: where a frame's time goes.
+            let mut t = live.control.take_timings();
             tracing::info!(
                 capture_fps = format!("{:.1}", (st.captured - captured) as f32 / secs),
                 encode_fps = format!("{:.1}", (st.encoded - encoded) as f32 / secs),
                 encode_ms = format!("{:.1}", st.encode_ms.unwrap_or(0.0)),
                 target_fps = live.quality.fps,
+                wait = video::percentiles(&mut t.wait),
+                convert = video::percentiles(&mut t.convert),
+                encode = video::percentiles(&mut t.encode),
+                total = video::percentiles(&mut t.total),
                 "video rates"
             );
             live.log_at = (Instant::now(), st.captured, st.encoded);
