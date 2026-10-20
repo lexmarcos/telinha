@@ -74,6 +74,12 @@ for (let i = 0; i < argv.length; i++) {
   // No pixel probe on the viewer: only the app's own measurement (the panel's
   // "Atraso medido"), without the probe's per-frame readback on the main thread.
   else if (a === "--sem-sonda") opt.noProbe = true;
+  // Real viewers never capture, so Chrome hides their address behind a "<uuid>.local" name
+  // (mDNS). The harness's fake mic permission (--use-fake-ui-for-media-stream in an isolated
+  // context) makes Chrome expose plain host addresses instead. --mdns drops both the fake UI
+  // flag and the fake mic, to test that path; the decoder name then does not show in the
+  // stats, which only matters for the plain WebRTC path.
+  else if (a === "--mdns") opt.mdns = true;
   else if (a === "--retries") opt.retries = Number(argv[++i]);
   else if (a === "--foto") opt.photo = argv[++i]; // saves the last received frame (PNG, full size)
   else { console.error(`unknown arg ${a}`); process.exit(2); }
@@ -471,7 +477,7 @@ const browser = await puppeteer.launch({
   headless: !opt.headed,
   args: [
     "--autoplay-policy=no-user-gesture-required",
-    "--use-fake-ui-for-media-stream",
+    ...(opt.mdns ? [] : ["--use-fake-ui-for-media-stream"]),
     "--use-fake-device-for-media-stream",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
@@ -516,7 +522,7 @@ async function mkPage(name, { sender, url = URL_ }) {
   // Chrome only exposes encoderImplementation/decoderImplementation in getStats() to documents
   // that are currently capturing camera/mic ("exposing hardware is allowed"). Hold a fake mic
   // track (fake device, auto-accepted) for the whole run; the app itself never sees it.
-  const gum = await p.evaluate(async () => {
+  const gum = opt.mdns ? "ok" : await p.evaluate(async () => {
     try { window.__gum = await navigator.mediaDevices.getUserMedia({ audio: true }); return "ok"; }
     catch (e) { return e.name; }
   });
