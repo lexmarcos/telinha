@@ -55,21 +55,52 @@ pub struct Counters {
 /// Rate-limits one viewer's keyframe requests. Each viewer has its own, so
 /// one asking does not hold back another who just joined; requests that
 /// land in the same frame still make a single keyframe (one encoder).
+///
+/// A viewer that keeps asking backs off: 500 ms, then 1 s, then 2 s between
+/// keyframes, back to the start after a few calm seconds. A keyframe is many
+/// frames' worth of bytes for everyone; on a link that keeps losing, asking
+/// as fast as allowed only makes the loss worse.
 pub struct KeyLimiter {
-    last: std::sync::Mutex<Option<Instant>>,
+    state: std::sync::Mutex<KeyState>,
 }
+
+#[derive(Default)]
+struct KeyState {
+    last: Option<Instant>,
+    backoff: Duration,
+}
+
+const KEY_BACKOFF_START: Duration = Duration::from_millis(500);
+const KEY_BACKOFF_MAX: Duration = Duration::from_secs(2);
+/// No request for this long: the backoff starts over.
+const KEY_CALM: Duration = Duration::from_secs(4);
 
 impl KeyLimiter {
     pub fn new() -> Self {
-        Self { last: std::sync::Mutex::new(None) }
+        Self { state: std::sync::Mutex::new(KeyState::default()) }
     }
 
-    pub fn request(&self, control: &Control, min: Duration) {
-        let mut last = self.last.lock().unwrap();
-        if last.is_none_or(|t| t.elapsed() >= min) {
-            *last = Some(Instant::now());
+    /// Asks the encoder for a keyframe unless one was asked within `min` (or
+    /// the backoff, if longer). Returns whether it asked.
+    pub fn request(&self, control: &Control, min: Duration) -> bool {
+        let asked = self.allow(Instant::now(), min);
+        if asked {
             control.request_key();
         }
+        asked
+    }
+
+    fn allow(&self, now: Instant, min: Duration) -> bool {
+        let mut st = self.state.lock().unwrap();
+        if st.last.is_none_or(|t| now.saturating_duration_since(t) >= KEY_CALM) {
+            st.backoff = Duration::ZERO;
+        }
+        if st.last.is_some_and(|t| now.saturating_duration_since(t) < min.max(st.backoff)) {
+            return false;
+        }
+        st.last = Some(now);
+        st.backoff = (st.backoff * 2).clamp(KEY_BACKOFF_START, KEY_BACKOFF_MAX);
+        true
     }
 }
 
@@ -127,7 +158,31 @@ pub fn spawn(
         let mut need_key = true;
         // Size and send time of the last keyframe, for the queue budget.
         let mut last_key: Option<(usize, Instant)> = None;
-        keys.request(&control, Duration::ZERO);
+        // Start from the cached keyframe when what came after it fits in
+        // about 100 ms of the bitrate (a still screen, or a keyframe someone
+        // else just asked for); otherwise ask for a new one.
+        let allowance = bitrate.load(Ordering::Relaxed) as usize / 8 / 10;
+        let mut replayed: u64 = 0;
+        match control.replay(|_, rest| rest <= allowance) {
+            Some(gop) => {
+                for frame in &gop {
+                    let ts = frame.captured.saturating_duration_since(epoch).as_micros() as f64;
+                    if !send_frame(&channel, seq, frame, ts).await {
+                        return;
+                    }
+                    seq = seq.wrapping_add(1);
+                    c.frames.fetch_add(1, Ordering::Relaxed);
+                    c.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
+                }
+                need_key = false;
+                last_key = gop.first().map(|k| (k.data.len(), Instant::now()));
+                replayed = gop.last().map_or(0, |f| f.index);
+                tracing::debug!(frames = gop.len(), "new viewer starts from the cached keyframe");
+            }
+            None => {
+                keys.request(&control, Duration::ZERO);
+            }
+        }
         while !s.load(Ordering::Relaxed) {
             let frame = match tokio::time::timeout(Duration::from_millis(500), frames.recv()).await {
                 Ok(Ok(f)) => f,
@@ -140,6 +195,9 @@ pub fn spawn(
                 Ok(Err(broadcast::error::RecvError::Closed)) => break,
                 Err(_) => continue,
             };
+            if frame.index <= replayed {
+                continue; // already sent from the cache
+            }
             let budget = budget(bitrate.load(Ordering::Relaxed), fps, last_key, Instant::now());
             let queued = channel.outstanding_bytes().await.unwrap_or(0);
             if need_key && !frame.key {
@@ -155,14 +213,7 @@ pub fn spawn(
                 continue;
             }
             let ts = frame.captured.saturating_duration_since(epoch).as_micros() as f64;
-            let mut failed = false;
-            for p in packets(seq, &frame, ts) {
-                if channel.send(p).await.is_err() {
-                    failed = true;
-                    break;
-                }
-            }
-            if failed {
+            if !send_frame(&channel, seq, &frame, ts).await {
                 break;
             }
             seq = seq.wrapping_add(1);
@@ -177,9 +228,40 @@ pub fn spawn(
     Sender { counters, keys, stop }
 }
 
+async fn send_frame(channel: &Arc<dyn DataChannel>, seq: u32, frame: &EncodedFrame, ts: f64) -> bool {
+    for p in packets(seq, frame, ts) {
+        if channel.send(p).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pedidos_de_keyframe_recuam() {
+        let k = KeyLimiter::new();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let min = Duration::from_millis(300);
+        assert!(k.allow(at(0), min));
+        // Next ones wait 500 ms, then 1 s, then 2 s at most.
+        assert!(!k.allow(at(400), min));
+        assert!(k.allow(at(500), min));
+        assert!(!k.allow(at(1400), min));
+        assert!(k.allow(at(1500), min));
+        assert!(!k.allow(at(3400), min));
+        assert!(k.allow(at(3500), min));
+        assert!(k.allow(at(5500), min));
+        // Calm for a while: back to the short wait.
+        assert!(k.allow(at(10_000), min));
+        assert!(k.allow(at(10_500), min));
+        // A longer minimum from the caller still holds.
+        assert!(!k.allow(at(11_000), Duration::from_secs(1)));
+    }
 
     #[test]
     fn splits_like_the_site() {
@@ -190,6 +272,7 @@ mod tests {
             width: 1920,
             height: 1080,
             captured: Instant::now(),
+            index: 1,
         };
         let ps = packets(9, &f, 1234.0);
         assert_eq!(ps.len(), 3);

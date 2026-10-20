@@ -414,6 +414,7 @@ pub fn spawn(
     mut frames: broadcast::Receiver<Arc<EncodedFrame>>,
     control: Arc<Control>,
     fps: u32,
+    bitrate: u32,
 ) -> Sender {
     let counters = Arc::new(Counters::default());
     // This viewer's own keyframe limit (PLI/FIR and its sender's requests).
@@ -450,7 +451,36 @@ pub fn spawn(
         // nearly a second trying to make up for "late" frames.
         let mut last: Option<Instant> = None;
         let mut need_key = true;
-        keys.request(&control, Duration::ZERO);
+        // Start from the cached keyframe when it and what came after it fit
+        // the pacer comfortably (a quarter second of the bitrate after it,
+        // 1 MB in all); otherwise ask for a new one.
+        let allowance = bitrate as usize / 8 / 4;
+        let mut replayed: u64 = 0;
+        match control.replay(|key, rest| rest <= allowance && key + rest <= 1 << 20) {
+            Some(gop) => {
+                for frame in &gop {
+                    // Replayed frames go out back to back: on the receiver's
+                    // clock they are a millisecond apart, so the live frames
+                    // after them do not look seconds early (or the burst late).
+                    let sample = Sample { data: frame.data.clone(), duration: Duration::from_millis(1), ..Sample::new(Instant::now()) };
+                    let mut writer = track.sample_writer(ssrc, pt);
+                    if no_delay {
+                        writer = writer.with_extension(HeaderExtension::PlayoutDelay(PlayoutDelayExtension { min_delay: 0, max_delay: 0 }));
+                    }
+                    if writer.write_sample(&sample).await.is_err() {
+                        return;
+                    }
+                    c.frames.fetch_add(1, Ordering::Relaxed);
+                    c.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
+                }
+                need_key = false;
+                last = gop.last().map(|f| f.captured);
+                replayed = gop.last().map_or(0, |f| f.index);
+            }
+            None => {
+                keys.request(&control, Duration::ZERO);
+            }
+        }
         while !s.load(Ordering::Relaxed) {
             let frame = match tokio::time::timeout(Duration::from_millis(500), frames.recv()).await {
                 Ok(Ok(f)) => f,
@@ -461,6 +491,9 @@ pub fn spawn(
                 Ok(Err(broadcast::error::RecvError::Closed)) => break,
                 Err(_) => continue,
             };
+            if frame.index <= replayed {
+                continue; // already sent from the cache
+            }
             if need_key && !frame.key {
                 keys.request(&control, Duration::from_millis(500));
                 continue;

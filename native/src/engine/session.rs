@@ -709,7 +709,8 @@ impl Session {
                         if c.kind == Kind::Media && !c.open {
                             c.open = true;
                             if let Some(track) = c.track.clone() {
-                                c.rtp_sender = Some(rtp::spawn(track, live.frames.subscribe(), live.control.clone(), live.quality.fps));
+                                let bitrate = live.bitrate.load(Ordering::Relaxed);
+                                c.rtp_sender = Some(rtp::spawn(track, live.frames.subscribe(), live.control.clone(), live.quality.fps, bitrate));
                             }
                             if let (Some(track), Some(audio)) = (c.audio_track.clone(), &live.audio) {
                                 c.audio_sender = Some(rtp::spawn_audio(track, audio.packets.subscribe()));

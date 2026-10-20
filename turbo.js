@@ -22,10 +22,25 @@ const PACKET_LIFETIME_MS = 150;
 const KEY_INTERVAL_MS = 1000; // keyframe requested due to full queue: at most 1 per second per viewer
 const QUEUE_FRAMES = 3;       // send queue allowed per viewer, in average frames (~50 ms)
 const VIEWER_KEY_MS = 500;    // keyframe requested by a viewer that lost a frame
-// Frames waiting in the viewer's decoder. Past this, decoding is slower than
-// the stream: delta frames are dropped until a keyframe (each one queued
-// would add a frame of delay that never goes away).
+// Someone who keeps asking for keyframes waits longer each time (500 ms, 1 s,
+// 2 s), back to the start after a few calm seconds: on a link that keeps
+// losing, a keyframe as often as allowed only adds to the loss.
+const KEY_BACKOFF_START_MS = 500;
+const KEY_BACKOFF_MAX_MS = 2000;
+const KEY_CALM_MS = 4000;
+// A new viewer starts from the last keyframe if what came after it fits in
+// this share of a second of the bitrate (a still screen, or a keyframe just
+// sent to someone else), instead of making everyone get a new keyframe.
+const REPLAY_SECONDS = 0.1;
+const GOP_MAX_BYTES = 8 << 20;
+const GOP_MAX_FRAMES = 600;
+// Frames waiting in the viewer's decoder. Past this for a while, decoding is
+// slower than the stream: delta frames are dropped until a keyframe (each one
+// queued would add a frame of delay that never goes away). A short burst (a
+// new viewer starting from a cached keyframe, frames held up by the network)
+// drains on its own and is left alone.
 const MAX_DECODE_QUEUE = 2;
+const DECODE_BEHIND_MS = 150;
 const REPORT_MS = 1000;       // report from viewer to streamer
 // Hardware encoders (NVENC/QuickSync via Media Foundation, VAAPI)
 // keep a few frames in flight; only drop if the queue goes past that.
@@ -46,6 +61,19 @@ function renderMode() {
   const canvas = typeof HTMLCanvasElement === "function" && typeof VideoFrame === "function"
     && typeof CanvasRenderingContext2D === "function";
   return canvas ? "canvas" : null;
+}
+
+class KeyBackoff {
+  constructor() { this.last = -Infinity; this.wait = 0; }
+  // Whether a keyframe may be asked for now (and, if so, counts it).
+  allow(min = 0) {
+    const now = performance.now();
+    if (now - this.last >= KEY_CALM_MS) this.wait = 0;
+    if (now - this.last < Math.max(min, this.wait)) return false;
+    this.last = now;
+    this.wait = Math.min(KEY_BACKOFF_MAX_MS, Math.max(KEY_BACKOFF_START_MS, this.wait * 2));
+    return true;
+  }
 }
 
 export function turboSupport() {
@@ -104,7 +132,8 @@ export class TurboSender {
     this.framerate = framerate;
     this.viewers = new Map();
     this.needKey = true;
-    this.lastKeyAt = 0;
+    this.keys = new KeyBackoff();
+    this.gop = { frames: [], rest: 0 }; // last keyframe and what came after it
     this.encoder = null;
     this.choice = null;
     this.size = null;
@@ -117,9 +146,16 @@ export class TurboSender {
   }
 
   addViewer(id, channel, { onCongested } = {}) {
-    const v = { id, channel, seq: 0, needKey: true, frames: 0, bytes: 0, dropped: 0, drops: [], onCongested, last: null, strikes: 0, lastKeyAt: -Infinity, lastKey: null };
+    const v = { id, channel, seq: 0, needKey: true, frames: 0, bytes: 0, dropped: 0, drops: [], onCongested, last: null, strikes: 0, keys: new KeyBackoff(), lastKey: null };
     this.viewers.set(id, v);
-    const start = () => this.requestKey(0, id);
+    const start = () => {
+      const { frames, rest } = this.gop;
+      if (frames.length && rest <= (this.bitrate / 8) * REPLAY_SECONDS) {
+        for (const f of frames) this.#sendTo(v, f.data, f.key, f.ts, f.config);
+        if (!v.needKey) return;
+      }
+      this.requestKey(0, id);
+    };
     if (channel.readyState === "open") start();
     else channel.addEventListener("open", start, { once: true });
   }
@@ -146,10 +182,7 @@ export class TurboSender {
   // who just joined; requests within the same frame still make one keyframe.
   requestKey(minInterval = KEY_INTERVAL_MS, id = null) {
     const holder = (id !== null && this.viewers.get(id)) || this;
-    const now = performance.now();
-    if (now - holder.lastKeyAt < minInterval) return;
-    holder.lastKeyAt = now;
-    this.needKey = true;
+    if (holder.keys.allow(minInterval)) this.needKey = true;
   }
 
   // Bytes allowed in a viewer's send queue: a few average frames, plus what is
@@ -228,6 +261,7 @@ export class TurboSender {
     this.size = { w, h };
     this.dirty = false;
     this.needKey = true;
+    this.gop = { frames: [], rest: 0 }; // frames from before do not lead into the new ones
     this.config = new TextEncoder().encode(JSON.stringify({ codec: this.choice.codec, w, h }));
   }
 
@@ -239,10 +273,20 @@ export class TurboSender {
     const data = new Uint8Array(chunk.byteLength);
     chunk.copyTo(data);
     const key = chunk.type === "key";
+    this.#cache(data, key, chunk.timestamp);
     for (const v of this.viewers.values()) this.#sendTo(v, data, key, chunk.timestamp);
   }
 
-  #sendTo(v, data, key, ts) {
+  #cache(data, key, ts) {
+    const g = this.gop;
+    if (key) { g.frames = []; g.rest = 0; }
+    else if (!g.frames.length) return;
+    else g.rest += data.byteLength;
+    g.frames.push({ data, key, ts, config: this.config });
+    if (g.rest > GOP_MAX_BYTES || g.frames.length > GOP_MAX_FRAMES) { g.frames = []; g.rest = 0; }
+  }
+
+  #sendTo(v, data, key, ts, config = this.config) {
     const ch = v.channel;
     if (ch.readyState !== "open") { v.needKey = true; return; }
     const budget = this.#budget(v);
@@ -264,7 +308,7 @@ export class TurboSender {
     const seq = v.seq++;
     for (let i = 0; i < count; i++) {
       const body = data.subarray(i * FRAG, (i + 1) * FRAG);
-      const extra = i === 0 && key ? this.config : null;
+      const extra = i === 0 && key ? config : null;
       const extraLen = extra?.byteLength ?? 0;
       const buf = new Uint8Array(HEADER + extraLen + body.byteLength);
       const dv = new DataView(buf.buffer);
@@ -308,6 +352,7 @@ export class TurboReceiver {
     this.avcc = /[?&]avc=avcc\b/.test(globalThis.location?.search ?? "");
     this.decodedAny = false;
     this.sinkSkips = 0;
+    this.behindSince = null;
     this.frames = new Map(); // seq -> frame being assembled
     this.expected = null;
     this.waitingKey = true;
@@ -325,11 +370,9 @@ export class TurboReceiver {
     this.payload = 0; // video data only, to compare with what was sent
     this.onUnsupported = onUnsupported;
     this.hold = HOLD_MS;
-    let last = 0;
+    const keys = new KeyBackoff();
     this.requestKey = () => {
-      const now = performance.now();
-      if (now - last < VIEWER_KEY_MS) return;
-      last = now;
+      if (!keys.allow(VIEWER_KEY_MS)) return;
       this.stats.keyRequests++;
       requestKey();
     };
@@ -412,7 +455,10 @@ export class TurboReceiver {
       this.expected++;
       const queue = this.decoder?.decodeQueueSize ?? 0;
       this.stats.decodeQueue = queue;
-      if (!f.key && queue > MAX_DECODE_QUEUE) {
+      const now = performance.now();
+      if (queue <= MAX_DECODE_QUEUE) this.behindSince = null;
+      else this.behindSince ??= now;
+      if (!f.key && this.behindSince !== null && now - this.behindSince > DECODE_BEHIND_MS) {
         // The decoder is behind: skip ahead to a keyframe instead of queueing.
         this.stats.decodeDrops++;
         this.waitingKey = true;

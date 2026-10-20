@@ -31,6 +31,51 @@ pub struct EncodedFrame {
     pub height: u32,
     /// When the image was captured (to measure encoding time).
     pub captured: Instant,
+    /// Position in the stream (counts every frame out of the encoder).
+    pub index: u64,
+}
+
+/// The last keyframe and every frame since, so a viewer who joins can start
+/// from it instead of making the one encoder send everyone a new keyframe.
+/// Dropped once it grows past what is worth replaying (motion makes it grow
+/// fast; a still screen only adds tiny repeats).
+#[derive(Default)]
+pub struct Gop {
+    frames: Vec<Arc<EncodedFrame>>,
+    /// Bytes after the keyframe.
+    rest: usize,
+}
+
+const GOP_MAX_BYTES: usize = 8 << 20;
+const GOP_MAX_FRAMES: usize = 600;
+
+impl Gop {
+    fn push(&mut self, f: &Arc<EncodedFrame>) {
+        if f.key {
+            self.frames.clear();
+            self.rest = 0;
+        } else if self.frames.is_empty() {
+            return;
+        } else {
+            self.rest += f.data.len();
+        }
+        self.frames.push(f.clone());
+        if self.rest > GOP_MAX_BYTES || self.frames.len() > GOP_MAX_FRAMES {
+            self.clear();
+        }
+    }
+
+    fn clear(&mut self) {
+        self.frames.clear();
+        self.rest = 0;
+    }
+
+    /// The cached frames, keyframe first, if `fits(keyframe bytes, bytes
+    /// after it)` says replaying them is cheap enough.
+    pub fn replay(&self, fits: impl Fn(usize, usize) -> bool) -> Option<Vec<Arc<EncodedFrame>>> {
+        let key = self.frames.first()?;
+        fits(key.data.len(), self.rest).then(|| self.frames.clone())
+    }
 }
 
 /// NVENC refused because the NVIDIA driver is older than the bundled FFmpeg
@@ -61,6 +106,7 @@ pub struct Control {
     pub stop: AtomicBool,
     pending: Mutex<Option<Settings>>,
     pub stats: Mutex<Stats>,
+    pub gop: Mutex<Gop>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -81,6 +127,11 @@ impl Control {
 
     pub fn stats(&self) -> Stats {
         self.stats.lock().unwrap().clone()
+    }
+
+    /// See [`Gop::replay`].
+    pub fn replay(&self, fits: impl Fn(usize, usize) -> bool) -> Option<Vec<Arc<EncodedFrame>>> {
+        self.gop.lock().unwrap().replay(fits)
     }
 }
 
@@ -272,6 +323,7 @@ fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sen
     let mut headers = h264::Headers::default();
     let mut captured_at: HashMap<i64, Instant> = HashMap::new();
     let mut pts: i64 = 0;
+    let mut index: u64 = 0;
     let mut filtered = Frame::new();
     publish_encoder(control, &pipe, native);
     // Last image received, to re-encode while the screen is static.
@@ -298,6 +350,8 @@ fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sen
                     settings.quality = next.quality;
                 }
                 pacer = Pacer::new(settings.quality.fps);
+                // Frames from before the change do not lead into the ones after it.
+                control.gop.lock().unwrap().clear();
                 control.request_key();
                 publish_encoder(control, &pipe, native);
             }
@@ -348,6 +402,7 @@ fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sen
                         pipe = build(kind, native, pixel, &next, 0)?;
                         settings = next;
                         last_input = None;
+                        control.gop.lock().unwrap().clear();
                         control.request_key();
                         publish_encoder(control, &pipe, native);
                     }
@@ -411,14 +466,12 @@ fn run(source: Source, quality: Quality, control: &Control, out: &broadcast::Sen
                 }
                 let data = headers.fix_keyframe(pkt.data, pkt.key);
                 let Some(codec) = headers.codec() else { continue };
-                let _ = out.send(Arc::new(EncodedFrame {
-                    data: Bytes::from(data),
-                    key: pkt.key,
-                    codec,
-                    width: pipe.out.0,
-                    height: pipe.out.1,
-                    captured,
-                }));
+                index += 1;
+                let frame = Arc::new(EncodedFrame { data: Bytes::from(data), key: pkt.key, codec, width: pipe.out.0, height: pipe.out.1, captured, index });
+                // Into the cache before it goes out: a sender subscribed to `out`
+                // and then reading the cache sees every frame at least once.
+                control.gop.lock().unwrap().push(&frame);
+                let _ = out.send(frame);
             }
             if captured_at.len() > 240 {
                 captured_at.clear();
@@ -624,6 +677,31 @@ mod tests {
             assert!((rate - fps as f64).abs() <= fps as f64 * 0.04, "{hz} Hz → {fps}: {rate} fps");
             assert!(hold < 1000.0 / hz + 1.0, "{hz} Hz → {fps}: held {hold} ms");
         }
+    }
+
+    #[test]
+    fn guarda_o_gop_para_quem_chega() {
+        let f = |index: u64, key: bool, len: usize| {
+            Arc::new(EncodedFrame { data: Bytes::from(vec![0u8; len]), key, codec: "avc1.640028".into(), width: 2, height: 2, captured: Instant::now(), index })
+        };
+        let mut g = Gop::default();
+        // Nothing before the first keyframe.
+        g.push(&f(1, false, 10));
+        assert!(g.replay(|_, _| true).is_none());
+        g.push(&f(2, true, 1000));
+        g.push(&f(3, false, 10));
+        g.push(&f(4, false, 20));
+        let r = g.replay(|key, rest| key == 1000 && rest == 30).unwrap();
+        assert_eq!(r.iter().map(|f| f.index).collect::<Vec<_>>(), [2, 3, 4]);
+        // Too much after the keyframe for this viewer: not replayed.
+        assert!(g.replay(|_, rest| rest <= 20).is_none());
+        // A new keyframe starts over.
+        g.push(&f(5, true, 900));
+        assert_eq!(g.replay(|_, rest| rest == 0).unwrap().len(), 1);
+        // Past the limits it is dropped until the next keyframe.
+        g.push(&f(6, false, GOP_MAX_BYTES + 1));
+        g.push(&f(7, false, 10));
+        assert!(g.replay(|_, _| true).is_none());
     }
 
     #[test]
