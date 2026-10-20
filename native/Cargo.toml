@@ -1,6 +1,6 @@
 [package]
 name = "telinha"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 description = "Transmissão de tela de baixa latência para o Telinha"
 license = "MIT"
