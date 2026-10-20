@@ -159,7 +159,8 @@ fn run_pipewire(fd: OwnedFd, node: u32, fps: u32, mailbox: Arc<Mailbox>, stop: A
             };
             let dmabuf = info.flags().bits() & spa::sys::SPA_VIDEO_FLAG_MODIFIER != 0;
             fmt.modifier = dmabuf.then(|| info.modifier());
-            tracing::info!(w = fmt.width, h = fmt.height, format = ?info.format(), dmabuf, "capture negotiated");
+            let max = info.max_framerate();
+            tracing::info!(w = fmt.width, h = fmt.height, format = ?info.format(), dmabuf, max_fps = format!("{}/{}", max.num, max.denom), "capture negotiated");
             // Says which buffer type we accept: DMA-BUF if the format came with
             // a modifier, memory otherwise.
             let types = if dmabuf { 1 << spa::buffer::DataType::DmaBuf.as_raw() } else { (1 << spa::buffer::DataType::MemPtr.as_raw()) | (1 << spa::buffer::DataType::MemFd.as_raw()) };
@@ -243,7 +244,9 @@ fn serialize(v: &spa::pod::Value) -> Result<Vec<u8>, String> {
     Ok(spa::pod::serialize::PodSerializer::serialize(std::io::Cursor::new(Vec::new()), v).map_err(|e| format!("{e:?}"))?.0.into_inner())
 }
 
-/// Raw BGRX/RGBX video, any size, up to `fps` frames per second.
+/// Raw BGRX/RGBX video, any size. `fps` is only a hint for compositors that
+/// capture on a timer (wlroots); GNOME sends on every refresh where the screen
+/// changed, and the video thread holds the stream to the chosen rate (Pacer).
 fn video_format(fps: u32) -> spa::pod::Object {
     spa::pod::object!(
         spa::utils::SpaTypes::ObjectParamFormat,
@@ -277,6 +280,20 @@ fn video_format(fps: u32) -> spa::pod::Object {
             Fraction,
             spa::utils::Fraction { num: fps, denom: 1 },
             spa::utils::Fraction { num: 0, denom: 1 },
+            spa::utils::Fraction { num: 240, denom: 1 }
+        ),
+        // The compositor's own frame limit: as high as it allows. Left out,
+        // it is whatever the compositor proposes, which could be lower than
+        // the screen. GNOME caps it at the refresh rate anyway (and then
+        // skips frames that come a hair early: one more reason not to ask
+        // for less).
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoMaxFramerate,
+            Choice,
+            Range,
+            Fraction,
+            spa::utils::Fraction { num: 240, denom: 1 },
+            spa::utils::Fraction { num: 1, denom: 1 },
             spa::utils::Fraction { num: 240, denom: 1 }
         ),
     )

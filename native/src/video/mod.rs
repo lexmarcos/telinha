@@ -232,8 +232,10 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
     publish_encoder(control, &pipe, native);
     // Last image received, to re-encode while the screen is static.
     let mut last_input: Option<Frame> = None;
-    let mut last_change = Instant::now();
-    let mut last_push = Instant::now();
+    let mut repeats = Repeats::new(Instant::now());
+    let mut pacer = Pacer::new(settings.quality.fps);
+    // A frame that came early, waiting for its turn (newer ones replace it).
+    let mut early: Option<CpuFrame> = None;
 
     loop {
         if control.stop.load(Ordering::Relaxed) {
@@ -244,6 +246,7 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
             if next != settings {
                 let rebuild_all = next.quality.output_size(native) != settings.quality.output_size(native) || next.quality.fps != settings.quality.fps;
                 settings = next;
+                pacer = Pacer::new(settings.quality.fps);
                 if rebuild_all {
                     pipe = build(kind, native, pixel, &settings, 0)?;
                     last_input = None;
@@ -261,10 +264,32 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
         let mut got_input = true;
         if let Some(src) = cpu.as_mut() {
             let period = Duration::from_secs_f64(1.0 / settings.quality.fps.max(1) as f64);
-            let frame = match first.take() {
-                Some(f) => Some(f),
-                None => src.next(period),
+            // Wakes up for the held frame's turn or for the next repeat, and at
+            // least every 50 ms to see stop and quality requests.
+            let wake = match (&early, pacer.due()) {
+                (Some(_), Some(due)) => due,
+                _ => repeats.next_at(period, control.force_key.load(Ordering::Relaxed)),
             };
+            let timeout = wake.saturating_duration_since(Instant::now()).min(Duration::from_millis(50));
+            let mut frame = match first.take() {
+                Some(f) => Some(f),
+                None => src.next(timeout),
+            };
+            let now = Instant::now();
+            if let Some(f) = frame.take() {
+                control.stats.lock().unwrap().captured += 1;
+                // The compositor sends more than the chosen rate (GNOME: every
+                // refresh): this one waits, and a newer one takes its place.
+                if pacer.arrive(f.captured, now) {
+                    frame = Some(f);
+                    early = None;
+                } else {
+                    early = Some(f);
+                }
+            } else if early.is_some() && pacer.due().is_none_or(|d| now + pace::SLACK >= d) {
+                // Nothing newer came in time: the held frame goes out.
+                frame = early.take();
+            }
             match frame {
                 Some(f) => {
                     // The screen changed size (monitor or window switch) or
@@ -281,7 +306,6 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
                     }
                     pts += 1;
                     captured_at.insert(pts, f.captured);
-                    control.stats.lock().unwrap().captured += 1;
                     let mut av = match f.data {
                         source::Pixels::Cpu(data) => Frame::from_cpu(data, f.width, f.height, f.stride, pixel, pts),
                         #[cfg(target_os = "linux")]
@@ -291,24 +315,22 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
                         }
                     };
                     last_input = av.share();
-                    last_change = Instant::now();
-                    last_push = last_change;
+                    pacer.sent(now);
+                    repeats.real(now);
                     pipe.graph.push(&mut av)?;
                 }
                 // The compositor only sends a frame when the screen changes. When static,
-                // we re-encode the last image (like Sunshine): at full rate
-                // right after the change, so the encoder can refine what
-                // was blurry, and slowly afterwards. A requested keyframe goes out immediately.
+                // we re-encode the last image (like Sunshine): a few times right
+                // after the change, so the encoder can refine what was blurry,
+                // then slowly. A requested keyframe goes out right away.
                 None => {
-                    let due = last_change.elapsed() < REFINE
-                        || last_push.elapsed() >= KEEPALIVE
-                        || control.force_key.load(Ordering::Relaxed);
+                    let due = early.is_none() && now >= repeats.next_at(period, control.force_key.load(Ordering::Relaxed));
                     match last_input.as_ref().filter(|_| due).and_then(Frame::share) {
                         Some(mut av) => {
                             pts += 1;
                             av.set_pts(pts);
-                            last_push = Instant::now();
-                            captured_at.insert(pts, last_push);
+                            repeats.repeated(now);
+                            captured_at.insert(pts, now);
                             pipe.graph.push(&mut av)?;
                         }
                         None => got_input = false,
@@ -365,10 +387,116 @@ fn run(source: Source, mut settings: Settings, control: &Control, out: &broadcas
     }
 }
 
-/// How long after a change a static screen is still re-encoded at full rate.
-const REFINE: Duration = Duration::from_secs(3);
-/// After that, how often.
-const KEEPALIVE: Duration = Duration::from_millis(100);
+/// When the last image is re-encoded while the compositor sends nothing.
+struct Repeats {
+    /// Last frame that came from the source.
+    real: Instant,
+    /// Last frame pushed into the encoder (real or repeated).
+    push: Instant,
+    /// Repeats left at full rate after the last change.
+    refine: u32,
+}
+
+/// Repeats right after a change, a period apart: the encoder spends them
+/// sharpening what was blurry in motion (text especially).
+const REFINE_FRAMES: u32 = 15;
+/// After that, one every so often. It carries no new picture (a few hundred
+/// bytes): it keeps the encoder refining and lets a loss show up at the viewer
+/// without waiting for the next change. Chrome asks for a keyframe only after
+/// 3 s without frames, and the site has no stall detection of its own.
+const KEEPALIVE: Duration = Duration::from_millis(250);
+
+impl Repeats {
+    fn new(now: Instant) -> Self {
+        Self { real: now, push: now, refine: 0 }
+    }
+
+    fn real(&mut self, now: Instant) {
+        (self.real, self.push, self.refine) = (now, now, REFINE_FRAMES);
+    }
+
+    fn repeated(&mut self, now: Instant) {
+        self.push = now;
+        self.refine = self.refine.saturating_sub(1);
+    }
+
+    /// When the next repeat is due. Only after real silence: during motion a
+    /// frame a little late is not a static screen, and repeating the old one
+    /// would delay the new one behind it.
+    fn next_at(&self, period: Duration, key: bool) -> Instant {
+        let silence = self.real + period * 5 / 2;
+        if key {
+            // A keyframe request (someone joined) does not wait for the keepalive.
+            (self.real + period * 3 / 2).max(self.push + period / 2)
+        } else if self.refine > 0 {
+            silence.max(self.push + period)
+        } else {
+            silence.max(self.push + KEEPALIVE)
+        }
+    }
+}
+
+pub(crate) mod pace {
+    use std::time::{Duration, Instant};
+
+    /// A frame up to this early still counts as on time.
+    pub const SLACK: Duration = Duration::from_millis(1);
+
+    /// Holds the source to the chosen frame rate. GNOME sends a frame on every
+    /// refresh the screen changes (its own limit is the refresh rate, which
+    /// the portal does not let us raise), so a 30 fps stream on a 60 Hz screen,
+    /// or 60 on 144 Hz, is thinned here. When the source is not clearly faster
+    /// than the target (60 on 60 Hz) every frame goes through as it arrives:
+    /// holding one for a slot would only add delay.
+    pub struct Pacer {
+        period: Duration,
+        /// Average gap between source frames while it sends continuously (s).
+        gap: Option<f64>,
+        last: Option<Instant>,
+        due: Option<Instant>,
+    }
+
+    impl Pacer {
+        pub fn new(fps: u32) -> Self {
+            Self { period: Duration::from_secs_f64(1.0 / fps.max(1) as f64), gap: None, last: None, due: None }
+        }
+
+        fn thinning(&self) -> bool {
+            self.gap.is_some_and(|g| g < self.period.as_secs_f64() * 0.85)
+        }
+
+        /// A frame captured at `at` arrived at `now`: `true` to send it now,
+        /// `false` to hold it until [`due`](Self::due) (or a newer one).
+        pub fn arrive(&mut self, at: Instant, now: Instant) -> bool {
+            if let Some(prev) = self.last {
+                let g = at.saturating_duration_since(prev).as_secs_f64();
+                if g < 0.1 {
+                    self.gap = Some(self.gap.map_or(g, |a| a * 0.9 + g * 0.1));
+                }
+            }
+            self.last = Some(at);
+            !self.thinning() || self.due.is_none_or(|d| now + SLACK >= d)
+        }
+
+        /// When the next frame may go out.
+        pub fn due(&self) -> Option<Instant> {
+            self.due
+        }
+
+        /// A frame went to the encoder at `now`. The slots stay on a fixed
+        /// grid (so 144 Hz → 60 averages 60, not 48), never closer than half
+        /// a period, and start over after a pause.
+        pub fn sent(&mut self, now: Instant) {
+            let p = self.period;
+            self.due = Some(match self.due {
+                Some(d) if now < d + p => (d + p).max(now + p / 2),
+                _ => now + p,
+            });
+        }
+    }
+}
+
+use pace::Pacer;
 
 fn frame_kind(f: &CpuFrame) -> SourceKind {
     if f.data.on_gpu() { SourceKind::Prime } else { SourceKind::Cpu }
@@ -393,4 +521,83 @@ fn desktop_size(fps: u32) -> ffi::Result<(u32, u32)> {
 #[cfg(not(target_os = "windows"))]
 fn desktop_size(_: u32) -> ffi::Result<(u32, u32)> {
     Err(ffi::Error("captura da área de trabalho só existe no Windows".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Frames from a source at `hz` (with ± `jitter_ms`) through the pacer at
+    /// `fps`: how many go out, and the longest any waited for its slot (ms).
+    fn simulate(hz: f64, jitter_ms: f64, fps: u32, secs: f64) -> (usize, usize, f64) {
+        let base = Instant::now();
+        let at = |t: f64| base + Duration::from_secs_f64(t);
+        let mut p = Pacer::new(fps);
+        let mut early: Option<f64> = None;
+        let (mut sent, mut hold) = (0, 0f64);
+        let n = (secs * hz) as usize;
+        for k in 0..n {
+            let j = ((k * 7919 % 13) as f64 / 12.0 - 0.5) * 2.0 * jitter_ms / 1000.0;
+            let t = 0.01 + k as f64 / hz + j;
+            // Nothing newer came before the slot: the held frame goes out then.
+            if let (Some(e), Some(d)) = (early, p.due()) {
+                let slot = d.duration_since(base).as_secs_f64();
+                if slot <= t {
+                    p.sent(d);
+                    sent += 1;
+                    hold = hold.max(slot - e);
+                    early = None;
+                }
+            }
+            if p.arrive(at(t), at(t)) {
+                p.sent(at(t));
+                sent += 1;
+                early = None;
+            } else {
+                early = Some(t);
+            }
+        }
+        (n, sent, hold * 1000.0)
+    }
+
+    #[test]
+    fn mesma_taxa_passa_tudo_sem_esperar() {
+        // 60 Hz with jitter, 60 fps: every frame, none held.
+        let (n, sent, hold) = simulate(60.0, 1.5, 60, 10.0);
+        assert_eq!((sent, hold), (n, 0.0));
+        // A screen a hair faster than the target does not drift into delay.
+        let (n, sent, hold) = simulate(60.05, 0.5, 60, 30.0);
+        assert_eq!((sent, hold), (n, 0.0));
+    }
+
+    #[test]
+    fn afina_fonte_mais_rapida() {
+        for (hz, fps) in [(60.0, 30), (144.0, 60), (120.0, 60), (75.0, 60), (240.0, 30)] {
+            let (_, sent, hold) = simulate(hz, 1.0, fps, 10.0);
+            let rate = sent as f64 / 10.0;
+            assert!((rate - fps as f64).abs() <= fps as f64 * 0.04, "{hz} Hz → {fps}: {rate} fps");
+            assert!(hold < 1000.0 / hz + 1.0, "{hz} Hz → {fps}: held {hold} ms");
+        }
+    }
+
+    #[test]
+    fn repete_so_depois_de_silencio() {
+        let p = Duration::from_millis(16);
+        let t0 = Instant::now();
+        let mut r = Repeats::new(t0);
+        r.real(t0);
+        // In motion a frame 1 ms late is not silence.
+        assert!(r.next_at(p, false) > t0 + p + Duration::from_millis(1));
+        assert_eq!(r.next_at(p, false), t0 + p * 5 / 2);
+        // Then a few a period apart, then the keepalive.
+        let mut now = t0 + p * 5 / 2;
+        for _ in 0..REFINE_FRAMES {
+            assert_eq!(r.next_at(p, false), now);
+            r.repeated(now);
+            now += p;
+        }
+        assert_eq!(r.next_at(p, false), now - p + KEEPALIVE);
+        // A keyframe request does not wait for the keepalive.
+        assert!(r.next_at(p, true) <= now);
+    }
 }
