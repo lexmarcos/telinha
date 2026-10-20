@@ -76,6 +76,11 @@ if (!/android|iphone|ipad/i.test(navigator.userAgent)) {
 // The bot's /new-telinha opens #novo/<name>/<avatar>: a new channel right away,
 // as that Discord person.
 const [hashRaw = "", hashPass = "", hashAvatar = ""] = location.hash.slice(1).split("/");
+// This tab was in a channel and did not close normally: the browser killed the
+// page, out of sight ("hidden": a phone that left the browser) or in plain view
+// ("visible": it crashed). Sent with the next join, for the streamer's log.
+let lastPageEnd = (() => { try { return sessionStorage.getItem("telinha:watching") || ""; } catch { return ""; } })();
+window.addEventListener("pagehide", (e) => { if (!e.persisted) safeSession("telinha:watching", null); });
 const opening = hashRaw === "novo";
 const hashCode = opening ? "" : hashRaw.replace(/\D/g, "").slice(0, 4);
 let discordPass = opening ? "" : hashPass.trim();
@@ -232,7 +237,8 @@ async function join(code) {
   let peer;
   try {
     peer = await openPeer();
-    const conn = await connectTo(peer, PREFIX + code, { name: state.name, avatar: myAvatar, wc: TURBO.receive, dec: await DECODERS });
+    const conn = await connectTo(peer, PREFIX + code, { name: state.name, avatar: myAvatar, wc: TURBO.receive, dec: await DECODERS, restart: lastPageEnd });
+    lastPageEnd = "";
     state.peer = peer;
     state.code = code;
     state.hostConn = conn;
@@ -1066,6 +1072,14 @@ function addStream(id, stream, name, local, view = null) {
 function renderEmpty() {
   const me = state.peer?.id;
   const gated = [...state.members].find(([id, m]) => id !== me && m.sharing && m.discord);
+  const sharing = [...state.members].find(([id, m]) => id !== me && m.sharing);
+  if (!gated && sharing) {
+    // Someone is on the air and the picture is on its way (joining, or
+    // switching how it travels): not an empty channel.
+    ui.emptyTitle.textContent = `Conectando à tela de ${sharing[1].name}…`;
+    ui.emptyText.textContent = "A imagem aparece em instantes.";
+    return;
+  }
   if (!gated) {
     ui.emptyTitle.textContent = "Ninguém está transmitindo";
     ui.emptyText.textContent = "Compartilhe sua tela ou mande o convite pra galera entrar.";
@@ -1321,6 +1335,7 @@ function hash(s) { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) 
 
 function enterRoom() {
   state.inRoom = true;
+  safeSession("telinha:watching", "visible");
   history.replaceState(null, "", "#" + state.code);
   document.title = `Canal ${state.code} · Telinha`;
   ui.channelDigits.textContent = state.code;
@@ -1351,6 +1366,7 @@ function enterRoom() {
 ui.leaveBtn.addEventListener("click", leave);
 ui.offairBtn.addEventListener("click", leave);
 function leave() {
+  safeSession("telinha:watching", null);
   state.localStream?.getTracks().forEach((t) => t.stop());
   state.peer?.destroy();
   location.href = location.pathname;
@@ -1459,7 +1475,12 @@ function drawStatic(t) {
 function stopStatic() { cancelAnimationFrame(staticRaf); staticRaf = 0; }
 drawStatic(100);
 document.addEventListener("visibilitychange", () => {
-  if (state.inRoom) return;
+  if (state.inRoom) {
+    // For the streamer's log: a phone that leaves the browser can lose the stream.
+    if (state.hostConn?.open) state.hostConn.send({ t: "visible", on: !document.hidden });
+    safeSession("telinha:watching", document.hidden ? "hidden" : "visible");
+    return;
+  }
   if (document.hidden) stopStatic();
   else if (!staticRaf) drawStatic(performance.now());
 });
@@ -1468,3 +1489,4 @@ document.addEventListener("visibilitychange", () => {
 
 function safeGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
 function safeSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
+function safeSession(k, v) { try { v === null ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch {} }

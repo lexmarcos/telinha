@@ -792,6 +792,11 @@ impl Session {
                 self.members.retain(|m| m.id != id);
                 let avatar = c.meta["avatar"].as_str().filter(|a| a.starts_with("https://cdn.discordapp.com/avatars/")).unwrap_or_default().to_owned();
                 let dec = decoders(&c.meta["dec"]);
+                // Their last page in a channel ended without closing (see app.js).
+                if let Some(how) = c.meta["restart"].as_str().filter(|h| !h.is_empty()) {
+                    let why = if how == "hidden" { "the browser dropped it while in the background" } else { "it crashed" };
+                    tracing::warn!(who = %name, why, "viewer's previous page ended without closing");
+                }
                 self.members.push(Member { id, name, sharing: false, wc, discord: false, avatar, dec });
                 self.broadcast_roster().await;
             }
@@ -862,6 +867,10 @@ impl Session {
                 self.chime();
                 self.publish_viewers().await;
                 self.sync_viewers().await;
+            }
+            (Kind::Guest, "visible") => {
+                let who = self.conns.get(&conn).and_then(|c| c.meta["name"].as_str()).unwrap_or("?");
+                tracing::info!(who, visible = v["on"].as_bool(), "viewer's page went to the background or came back");
             }
             (Kind::Guest, "sharing") => {
                 let peer = self.conns.get(&conn).map(|c| c.peer.clone()).unwrap_or_default();
