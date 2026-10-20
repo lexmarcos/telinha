@@ -97,13 +97,28 @@
 .stats-grid dd { margin: 0; text-align: right; min-width: 0; overflow-wrap: anywhere; }
 .stats-unit { color: var(--muted); }
 
-/* On phones the channel number takes the left corner: the panel moves down and uses the full width. */
-@media (max-width: 760px) {
-  .stats-panel {
-    top: 3.5rem; left: var(--stats-gap); width: auto;
-    max-height: calc(100% - 3.5rem - 5.25rem);
+/* Portrait: the picture is a short band, so the panel becomes a sheet above the dock, clear of the picture. */
+@media (orientation: portrait) {
+  .stage:not(.is-fs) .stats-panel {
+    position: fixed; top: auto; width: auto; max-width: 28rem; margin-inline: auto;
+    left: max(var(--stats-gap), env(safe-area-inset-left)); right: max(var(--stats-gap), env(safe-area-inset-right));
+    bottom: calc(var(--dock-bottom, 0.875rem) + var(--dock-h, 4rem) + var(--stats-gap));
+    /* the space between the stream bar and the dock (--stage-bottom comes from app.js) */
+    max-height: max(12rem, calc(100dvh - var(--stage-bottom, 50dvh) - 3.5rem - var(--dock-bottom, 0.875rem) - var(--dock-h, 4rem) - 2 * var(--stats-gap)));
+    transform-origin: bottom center;
   }
-  .stage:fullscreen .stats-panel { top: var(--stats-gap); max-height: calc(100% - var(--stats-gap) - 5.25rem); }
+}
+/* Phone on its side: the full-screen stage has the corner and the controls to keep clear. */
+@media (orientation: landscape) and (pointer: coarse) and (max-height: 520px) {
+  .stats-panel {
+    top: calc(max(0.5rem, env(safe-area-inset-top)) + 3.5rem); right: max(var(--stats-gap), env(safe-area-inset-right));
+    max-height: calc(100% - 3.5rem - max(0.5rem, env(safe-area-inset-top)) - 4.75rem);
+  }
+}
+@media (pointer: coarse) {
+  .stats-close { width: 2.75rem; height: 2.75rem; }
+  .stats-top { padding: 0.25rem 0.25rem 0 0.875rem; }
+  .stats-title { font-size: 0.9375rem; }
 }
 
 @media (prefers-reduced-transparency: reduce) {

@@ -24,6 +24,10 @@ const PREFIX = "telinha-canal-v1-";
 const MAX_BITRATE = 8_000_000;
 const $ = (id) => document.getElementById(id);
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+// Phones and tablets can watch but not share: no screen capture API there.
+const CAN_SHARE = !!navigator.mediaDevices?.getDisplayMedia;
+// A finger instead of a mouse: the stream bar needs a tap to come back, there is no hover.
+const touchOnly = matchMedia("(hover: none) and (pointer: coarse)");
 
 const ui = {
   lobby: $("lobby"), tv: $("tv"), code: $("code"), name: $("name"), tune: $("tune"),
@@ -33,10 +37,11 @@ const ui = {
   volume: $("volume"), muteBtn: $("muteBtn"), pipBtn: $("pipBtn"), fullBtn: $("fullBtn"),
   channelDigits: $("channelDigits"), emptyDigits: $("emptyDigits"),
   emptyTitle: $("emptyTitle"), emptyText: $("emptyText"),
-  people: $("people"), shareBtn: $("shareBtn"), leaveBtn: $("leaveBtn"),
+  people: $("people"), peopleBtn: $("peopleBtn"), peoplePanel: $("peoplePanel"), roster: $("roster"),
+  shareBtn: $("shareBtn"), leaveBtn: $("leaveBtn"),
   offair: $("offair"), offairText: $("offairText"), offairBtn: $("offairBtn"),
   toasts: $("toasts"),
-  qualityBtn: $("qualityBtn"), qualityLabel: $("qualityLabel"), qualityPanel: $("qualityPanel"),
+  dock: document.querySelector(".dock"), qualityBtn: $("qualityBtn"), qualityLabel: $("qualityLabel"), qualityPanel: $("qualityPanel"),
 };
 
 const state = {
@@ -1090,7 +1095,9 @@ function renderEmpty() {
   }
   if (!gated) {
     ui.emptyTitle.textContent = "Ninguém está transmitindo";
-    ui.emptyText.textContent = "Compartilhe sua tela ou mande o convite pra galera entrar.";
+    ui.emptyText.textContent = CAN_SHARE
+      ? "Compartilhe sua tela ou mande o convite pra galera entrar."
+      : "Quando alguém transmitir, a imagem aparece aqui.";
     return;
   }
   const [id, m] = gated;
@@ -1131,7 +1138,9 @@ function feature(id) {
 
 function renderStreams() {
   const s = state.streams.get(state.featured);
+  const wasIdle = ui.stage.classList.contains("idle");
   ui.stage.classList.toggle("idle", !s);
+  if (s && wasIdle) wake(); // a picture just arrived: the controls rest after a moment
   ui.stageBar.hidden = !s;
   renderEmpty();
 
@@ -1151,6 +1160,7 @@ function renderStreams() {
         if (!s.local && s.stream.getAudioTracks().length) ui.unmute.hidden = false;
       });
     }
+    syncAspect();
     ui.featureName.textContent = s.local ? "Sua tela" : s.name;
     const hasAudio = !s.local && s.stream.getAudioTracks().length > 0;
     $("volumeWrap").hidden = !hasAudio;
@@ -1171,6 +1181,21 @@ function renderStreams() {
   }
   if (!showStrip) for (const item of state.streams.values()) item.thumb.remove();
 }
+
+// On a tall screen the stage is only as tall as the picture (style.css, --ar):
+// no black bands above and below a desktop screen shown on a phone.
+function syncAspect() {
+  const s = state.streams.get(state.featured);
+  const w = s?.view ? s.view.width : ui.feature.videoWidth;
+  const h = s?.view ? s.view.height : ui.feature.videoHeight;
+  const bottom = `${Math.round(ui.stage.getBoundingClientRect().bottom)}px`;
+  if (document.documentElement.style.getPropertyValue("--stage-bottom") !== bottom) document.documentElement.style.setProperty("--stage-bottom", bottom);
+  if (!w || !h) return;
+  const ar = Math.min(2.4, Math.max(0.6, w / h)).toFixed(3);
+  if (ui.stage.style.getPropertyValue("--ar") !== ar) ui.stage.style.setProperty("--ar", ar);
+}
+ui.feature.addEventListener("resize", syncAspect);
+setInterval(syncAspect, 500); // a canvas has no resize event; this is a few property reads
 
 // Glass to glass on the video element path: when each frame of the featured
 // minimum delay stream is shown (the canvas path reports its own paints).
@@ -1198,6 +1223,8 @@ function showCanvas(view) {
 
 /* Volume, fullscreen, picture-in-picture */
 state.volume = Number(safeGet("telinha:volume") ?? 1);
+// iOS ignores the volume of a media element (always 1): leave only the mute button there.
+{ const probe = document.createElement("video"); probe.volume = 0.5; if (probe.volume !== 0.5) document.documentElement.classList.add("fixed-volume"); }
 state.muted = false;
 ui.volume.value = state.volume;
 
@@ -1240,8 +1267,16 @@ statsBtn.addEventListener("click", () => stats.toggle());
 ui.stage.addEventListener("statstoggle", (e) => statsBtn.setAttribute("aria-pressed", String(e.detail.open)));
 
 ui.fullBtn.addEventListener("click", toggleFullscreen);
-ui.feature.addEventListener("dblclick", toggleFullscreen);
-ui.featureCanvas.addEventListener("dblclick", toggleFullscreen);
+// Double click or double tap on the picture; a touch double tap raises both events, so only one counts.
+let lastFullscreenGesture = 0;
+function fullscreenGesture() {
+  const now = performance.now();
+  if (now - lastFullscreenGesture < 500) return;
+  lastFullscreenGesture = now;
+  toggleFullscreen();
+}
+ui.feature.addEventListener("dblclick", fullscreenGesture);
+ui.featureCanvas.addEventListener("dblclick", fullscreenGesture);
 // Older iPadOS Safari only has the prefixed API; iPhone has none for elements
 // (only the video's own player, which cannot show a canvas).
 function fullscreenApi() {
@@ -1257,6 +1292,17 @@ function toggleFullscreen() {
   if (fs.element) fs.exit?.();
   else if (fs.request) fs.request()?.catch?.(() => {});
   else if (!state.canvasView) ui.feature.webkitEnterFullscreen?.();
+}
+// The layout drops its portrait arrangement while the stage is fullscreen; and a
+// phone held upright turns to landscape for it (Android; iOS has no such lock).
+for (const ev of ["fullscreenchange", "webkitfullscreenchange"]) {
+  document.addEventListener(ev, () => {
+    const on = fullscreenApi().element === ui.stage;
+    ui.stage.classList.toggle("is-fs", on);
+    if (!touchOnly.matches) return;
+    if (on) screen.orientation?.lock?.("landscape").catch(() => {});
+    else screen.orientation?.unlock?.();
+  });
 }
 ui.pipBtn.addEventListener("click", async () => {
   try {
@@ -1289,37 +1335,64 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "i" || e.key === "I") stats.toggle();
 });
 
-// Hides the stream bar when the mouse rests over the screen.
+// Hides the floating controls when the pointer rests over the screen. On touch
+// a tap on the picture brings them back, and another tap sends them away.
 let idleTimer;
 function wake() {
   ui.stage.classList.remove("idle-cursor");
   clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
-    if (!ui.stage.classList.contains("idle") && !ui.stageBar.matches(":hover, :focus-within")) {
-      ui.stage.classList.add("idle-cursor");
-    }
-  }, 2600);
+    const busy = ui.stageBar.matches(touchOnly.matches ? ":focus-visible" : ":hover, :focus-within")
+      || ui.stageBar.querySelector(":focus-visible");
+    if (!ui.stage.classList.contains("idle") && !busy) ui.stage.classList.add("idle-cursor");
+  }, touchOnly.matches ? 3600 : 2600);
 }
-ui.stage.addEventListener("pointermove", wake);
-ui.stage.addEventListener("pointerdown", wake);
+ui.stage.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") wake(); });
+let hiddenAtTouch = false; // the pointer down already wakes the controls; the tap needs to know what it found
+ui.stage.addEventListener("pointerdown", () => { hiddenAtTouch = ui.stage.classList.contains("idle-cursor"); wake(); });
 ui.stage.addEventListener("focusin", wake);
+ui.dock.addEventListener("pointerdown", wake);
+ui.stage.addEventListener("click", (e) => {
+  if (!touchOnly.matches || e.target.closest("button, input, label, .stats-panel")) return;
+  if (!hiddenAtTouch && !ui.stage.classList.contains("idle")) {
+    clearTimeout(idleTimer);
+    ui.stage.classList.add("idle-cursor");
+  }
+});
+// A double tap on the picture is a fullscreen gesture (not for the controls).
+let lastTap = { t: 0, x: 0, y: 0 };
+ui.stage.addEventListener("pointerup", (e) => {
+  if (e.pointerType === "mouse" || e.target.closest("button, input, label, .stats-panel, .unmute")) return;
+  const now = performance.now();
+  if (now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 40 && fullscreenApi().request) fullscreenGesture();
+  lastTap = { t: now, x: e.clientX, y: e.clientY };
+});
 
 /* ---------------- People ---------------- */
 
 const AVATAR_COLORS = ["#cfe0ff", "#ffd9a8", "#bff0d4", "#f5c6ff", "#ffe48a", "#a8ecff", "#ffc2c2"];
+// Fewer avatars fit the dock on a narrow phone.
+const narrow = matchMedia("(max-width: 480px)");
+narrow.addEventListener("change", () => { if (state.peer) renderPeople(); });
+
+function avatarFor(el, id, m) {
+  el.textContent = initials(m.name);
+  el.style.background = AVATAR_COLORS[hash(m.name + id) % AVATAR_COLORS.length];
+  if (m.avatar) {
+    // Discord photo instead of the initials.
+    el.textContent = "";
+    el.style.background = `center / cover no-repeat url("${m.avatar}")`;
+  }
+  return el;
+}
+
 function renderPeople() {
   const me = state.peer.id;
   const list = [...state.members].sort((a, b) => (a[0] === me ? -1 : b[0] === me ? 1 : 0));
-  const shown = list.slice(0, 5);
+  const max = narrow.matches ? 3 : 5;
+  const shown = list.slice(0, max);
   ui.people.replaceChildren(...shown.map(([id, m]) => {
-    const li = document.createElement("li");
-    li.textContent = initials(m.name);
-    li.style.background = AVATAR_COLORS[hash(m.name + id) % AVATAR_COLORS.length];
-    if (m.avatar) {
-      // Discord photo instead of the initials.
-      li.textContent = "";
-      li.style.background = `center / cover no-repeat url("${m.avatar}")`;
-    }
+    const li = avatarFor(document.createElement("li"), id, m);
     li.title = (id === me ? `${m.name} (você)` : m.name) + (m.sharing ? ", transmitindo" : "");
     li.classList.toggle("sharing", m.sharing);
     return li;
@@ -1328,11 +1401,43 @@ function renderPeople() {
     const li = document.createElement("li");
     li.className = "more";
     li.textContent = `+${list.length - shown.length}`;
-    li.title = list.slice(5).map(([, m]) => m.name).join(", ");
     ui.people.append(li);
   }
-  ui.people.setAttribute("aria-label", `${list.length} ${list.length === 1 ? "pessoa" : "pessoas"} no canal`);
+  const label = `${list.length} ${list.length === 1 ? "pessoa" : "pessoas"} no canal`;
+  ui.people.setAttribute("aria-label", label);
+  ui.peopleBtn.setAttribute("aria-label", `${label}. Ver quem está no canal`);
+
+  // The same people by name, for touch screens that have no tooltips.
+  ui.roster.replaceChildren(...list.map(([id, m]) => {
+    const li = document.createElement("li");
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = m.name;
+    if (id === me) who.append(Object.assign(document.createElement("small"), { textContent: "você" }));
+    li.append(avatarFor(Object.assign(document.createElement("span"), { className: "avatar" }), id, m), who);
+    if (m.sharing) li.insertAdjacentHTML("beforeend", '<span class="live"><i class="tally"></i>transmitindo</span>');
+    return li;
+  }));
 }
+
+function openRoster() {
+  ui.peoplePanel.hidden = false;
+  ui.peopleBtn.setAttribute("aria-expanded", "true");
+}
+function closeRoster(returnFocus) {
+  if (ui.peoplePanel.hidden) return;
+  ui.peoplePanel.hidden = true;
+  ui.peopleBtn.setAttribute("aria-expanded", "false");
+  if (returnFocus) ui.peopleBtn.focus();
+}
+ui.peopleBtn.addEventListener("click", () => (ui.peoplePanel.hidden ? openRoster() : closeRoster()));
+document.addEventListener("pointerdown", (e) => {
+  if (!ui.peoplePanel.hidden && !ui.peoplePanel.contains(e.target) && !ui.peopleBtn.contains(e.target)) closeRoster();
+});
+ui.peoplePanel.addEventListener("keydown", (e) => { if (e.key === "Escape") closeRoster(true); });
+ui.peopleBtn.addEventListener("keydown", (e) => { if (e.key === "Escape") closeRoster(); });
+// Not "resize": Safari fires it whenever its address bar slides away.
+matchMedia("(orientation: portrait)").addEventListener("change", () => closeRoster());
 function initials(name) {
   const parts = name.trim().split(/\s+/);
   return ((parts[0]?.[0] || "?") + (parts.length > 1 ? parts.at(-1)[0] : "")).toUpperCase();
@@ -1348,7 +1453,7 @@ function enterRoom() {
   document.title = `Canal ${state.code} · Telinha`;
   ui.channelDigits.textContent = state.code;
   ui.emptyDigits.textContent = state.code;
-  if (!navigator.mediaDevices?.getDisplayMedia) ui.shareBtn.disabled = true;
+  ui.shareBtn.hidden = !CAN_SHARE;
   renderPeople();
   renderStreams();
   renderShareButton();

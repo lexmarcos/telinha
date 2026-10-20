@@ -88,6 +88,11 @@
       <svg><use href="#i-sound"/></svg>Ativar o som
     </button>
 
+    <div class="channel" title="Número do canal">
+      <span class="channel-word">Canal</span>
+      <span class="channel-digits" id="channelDigits">0000</span>
+    </div>
+
     <div class="stage-bar" id="stageBar" hidden>
       <span class="live-chip"><i class="tally"></i><span id="featureName"></span></span>
       <div class="stage-tools">
@@ -112,13 +117,11 @@
 
   <ul class="strip" id="strip" aria-label="Transmissões"></ul>
 
-  <div class="channel" title="Número do canal">
-    <span class="channel-word">Canal</span>
-    <span class="channel-digits" id="channelDigits">0000</span>
-  </div>
-
   <nav class="dock" aria-label="Controles">
-    <ul class="people" id="people" aria-label="Quem está no canal"></ul>
+    <div class="people-wrap">
+      <ul class="people" id="people" aria-label="Quem está no canal"></ul>
+      <button class="people-hit" id="peopleBtn" type="button" aria-label="Ver quem está no canal" aria-haspopup="dialog" aria-expanded="false" aria-controls="peoplePanel"></button>
+    </div>
     <button class="btn btn-primary dock-share" id="shareBtn" type="button">
       <svg><use href="#i-screen"/></svg><span>Compartilhar tela</span>
     </button>
@@ -132,6 +135,11 @@
       <svg><use href="#i-leave"/></svg>
     </button>
   </nav>
+
+  <div class="roster" id="peoplePanel" role="dialog" aria-labelledby="rosterTitle" hidden>
+    <h2 class="roster-title" id="rosterTitle">No canal</h2>
+    <ul id="roster"></ul>
+  </div>
 
   <div class="quality" id="qualityPanel" role="dialog" aria-labelledby="qualityTitle" hidden>
     <h2 class="quality-title" id="qualityTitle">Qualidade da transmissão</h2>

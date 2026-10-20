@@ -211,11 +211,15 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 
 /* ---------- Room ---------- */
 .room {
+  --dock-h: 4rem;
+  --dock-bottom: max(0.875rem, env(safe-area-inset-bottom));
   position: fixed; inset: 0;
   display: grid; grid-template-columns: 1fr auto; gap: 0.75rem;
-  padding: 0.75rem;
-  padding-bottom: calc(5.75rem + env(safe-area-inset-bottom));
+  padding:
+    max(0.75rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right))
+    calc(var(--dock-h) + var(--dock-bottom) + 0.75rem) max(0.75rem, env(safe-area-inset-left));
   background: var(--room);
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
 }
 
 .stage {
@@ -224,7 +228,7 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   background: var(--screen);
   box-shadow: 0 0 0 1px var(--line);
 }
-.stage:fullscreen { border-radius: 0; }
+.stage:fullscreen, .stage.is-fs { border-radius: 0; }
 .feature {
   position: absolute; inset: 0; width: 100%; height: 100%;
   object-fit: contain; background: #000;
@@ -286,13 +290,13 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 }
 
 .channel {
-  position: fixed; left: calc(0.75rem + 0.75rem); top: calc(0.75rem + 0.75rem);
+  position: absolute; left: 0.75rem; top: 0.75rem;
   display: inline-flex; align-items: baseline; gap: 0.5rem;
   padding: 0.4rem 0.9rem; border-radius: 999px; pointer-events: none;
   transition: opacity 260ms ease;
 }
-.room:has(.stage.idle-cursor) .channel { opacity: 0; }
-.room:has(.stage.idle) .channel { display: none; }
+.stage.idle-cursor .channel { opacity: 0; }
+.stage.idle .channel { display: none; }
 .channel-word { font: 700 0.8125rem/1 var(--osd); color: var(--phosphor); opacity: 0.7; }
 .channel-digits { font: 900 1.25rem/1 var(--osd); color: var(--phosphor); letter-spacing: 0.06em; }
 
@@ -329,12 +333,14 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 /* Dock */
 .dock {
   position: fixed; left: 50%; translate: -50% 0;
-  bottom: calc(0.875rem + env(safe-area-inset-bottom));
+  bottom: var(--dock-bottom);
   display: flex; align-items: center; gap: 0.5rem;
   padding: 0.5rem; border-radius: 999px;
   max-width: calc(100vw - 1.5rem);
+  transition: opacity 260ms ease;
 }
-.dock-share { min-height: 3rem; }
+.dock-share { min-height: 3rem; white-space: nowrap; }
+.icon-btn-leave { margin-left: 0.25rem; }
 .dock-share.live { background: var(--tally); color: #fff; }
 .dock-share.live:hover { background: #ff5a4f; }
 
@@ -408,6 +414,12 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .seg label:has(input:focus-visible) { outline: 2px solid var(--phosphor); outline-offset: -2px; }
 .seg input { position: absolute; opacity: 0; pointer-events: none; }
 
+.people-wrap { position: relative; flex: 0 1 auto; min-width: 0; }
+.people-hit {
+  position: absolute; inset: -0.25rem -0.125rem; padding: 0; border: 0; border-radius: 999px;
+  background: transparent; transition: background-color 160ms ease;
+}
+.people-hit:hover, .people-hit[aria-expanded="true"] { background: rgba(200, 212, 255, 0.1); }
 .people { list-style: none; margin: 0; padding: 0 0.5rem 0 0.25rem; display: flex; }
 .people li {
   width: 2.25rem; height: 2.25rem; border-radius: 50%;
@@ -419,6 +431,31 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .people li:first-child { margin-left: 0; }
 .people li.sharing { box-shadow: 0 0 0 2px #1a2452, 0 0 0 4px var(--tally); }
 .people li.more { background: rgba(200,212,255,0.16); color: var(--text); }
+
+/* Everyone in the channel: the avatars in the dock open it (names are not hover-only) */
+.roster {
+  position: fixed; z-index: 5; left: 50%; translate: -50% 0;
+  bottom: calc(var(--dock-bottom) + var(--dock-h) + 0.5rem);
+  width: min(19rem, calc(100vw - 1.5rem)); max-height: min(50dvh, 24rem);
+  overflow-y: auto; overscroll-behavior: contain;
+  padding: 0.9rem 0.5rem 0.5rem; border-radius: 24px;
+  background: rgba(16, 23, 56, 0.86);
+  -webkit-backdrop-filter: blur(32px) saturate(180%); backdrop-filter: blur(32px) saturate(180%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.1), 0 0 0 1px var(--line), 0 30px 70px -20px rgba(0,0,0,0.75);
+  transform-origin: 50% 100%;
+  animation: materialize 320ms var(--ease-out) both;
+}
+.roster-title { margin: 0 0.625rem 0.375rem; font-size: 0.8125rem; font-weight: 600; color: var(--muted); }
+.roster ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.roster li { display: flex; align-items: center; gap: 0.7rem; min-height: 2.75rem; padding: 0.25rem 0.625rem; border-radius: 14px; }
+.roster .avatar {
+  width: 2rem; height: 2rem; flex: none; border-radius: 50%;
+  display: grid; place-items: center; font-size: 0.75rem; font-weight: 700; color: #0d1430;
+}
+.roster .who { min-width: 0; flex: 1; font-weight: 600; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roster .who small { margin-left: 0.35rem; font-weight: 400; color: var(--muted); }
+.roster .live { display: inline-flex; align-items: center; gap: 0.4rem; flex: none; font-size: 0.8125rem; color: #ffb3ad; }
+.roster .live .tally { width: 0.45rem; height: 0.45rem; box-shadow: 0 0 6px var(--tally); }
 
 /* Off air */
 .offair {
@@ -452,18 +489,111 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   animation: toast-in 380ms var(--ease-out) both;
 }
 .toast.out { animation: toast-out 240ms ease-in both; }
-@keyframes toast-in { from { opacity: 0; transform: translateY(-120%) scale(0.96); } }
-@keyframes toast-out { to { opacity: 0; transform: translateY(-120%) scale(0.96); } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(var(--toast-from, -120%)) scale(0.96); } }
+@keyframes toast-out { to { opacity: 0; transform: translateY(var(--toast-from, -120%)) scale(0.96); } }
 
 /* ---------- Smaller screens ---------- */
 @media (max-width: 760px) {
-  .room { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
-  .strip { width: auto; flex-direction: row; overflow-x: auto; }
-  .thumb { width: 8.5rem; flex: none; }
   .volume input { display: none; }
   .dock-share span { display: none; }
   .dock-share { width: 3rem; padding: 0; }
   .actions { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) and (orientation: landscape) {
+  .room { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+  .strip { width: auto; flex-direction: row; overflow-x: auto; }
+  .thumb { width: 8.5rem; flex: none; }
+}
+/* iOS keeps the volume of a media element at 1: only mute works there. */
+.fixed-volume .volume input { display: none; }
+
+/* ---------- Portrait: the picture takes the width, the controls sit under it ---------- */
+@media (orientation: portrait) {
+  .room {
+    display: flex; flex-direction: column; justify-content: center; gap: 0.75rem;
+    padding: max(0.5rem, env(safe-area-inset-top)) 0 calc(var(--dock-h) + var(--dock-bottom) + 0.5rem);
+  }
+  .stage {
+    flex: none; margin-inline: max(0.75rem, env(safe-area-inset-left)) max(0.75rem, env(safe-area-inset-right));
+    transition: margin 360ms var(--ease-out), border-radius 360ms var(--ease-out);
+  }
+  .stage.idle { flex: 1 1 0; }
+  /* The stage is as tall as the picture, not a tall card with black above and below. */
+  .stage:not(.idle):not(.is-fs) {
+    aspect-ratio: var(--ar, 1.7778); max-height: calc(100dvh - 15rem);
+    margin-bottom: 3.25rem; overflow: visible;
+  }
+  .room:has(.strip:not(:empty)) .stage:not(.idle):not(.is-fs) { max-height: calc(100dvh - 21rem); }
+  .stage:not(.is-fs) .feature, .stage:not(.is-fs) .empty { border-radius: inherit; }
+  .unmute { top: auto; bottom: 0.75rem; }
+
+  /* Name and tools under the picture, flat on the room instead of floating over it. */
+  .stage:not(.is-fs) .stage-bar {
+    left: 0; right: 0; top: calc(100% + 0.25rem); bottom: auto;
+    padding: 0 max(0.375rem, env(safe-area-inset-right)) 0 max(0.875rem, env(safe-area-inset-left));
+    background: none; box-shadow: none;
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+  }
+  .stage:not(.is-fs).idle-cursor .stage-bar { opacity: 1; translate: 0 0; pointer-events: auto; }
+
+  .strip {
+    flex: none; width: auto; flex-direction: row; gap: 0.5rem; overflow-x: auto; overflow-y: hidden;
+    margin-inline: max(0.75rem, env(safe-area-inset-left)) max(0.75rem, env(safe-area-inset-right));
+    scroll-snap-type: x proximity; overscroll-behavior-x: contain;
+  }
+  .thumb { width: 9rem; flex: none; scroll-snap-align: start; }
+  .roster { max-height: min(40dvh, 24rem); }
+}
+/* Phones: edge to edge, nothing to frame. */
+@media (orientation: portrait) and (max-width: 599px) {
+  .stage:not(.idle):not(.is-fs) { margin-inline: 0; border-radius: 0; box-shadow: none; }
+  .channel { left: max(0.5rem, env(safe-area-inset-left)); top: 0.5rem; }
+}
+@media (orientation: portrait) and (min-width: 600px) {
+  .thumb { width: 11rem; }
+  .stage:not(.idle):not(.is-fs) { max-height: calc(100dvh - 17rem); }
+}
+
+/* ---------- Phone on its side: the picture owns the screen, controls come and go on tap ---------- */
+@media (orientation: landscape) and (pointer: coarse) and (max-height: 520px) {
+  .room { display: block; padding: 0; }
+  .stage { position: absolute; inset: 0; border-radius: 0; box-shadow: none; }
+  .channel { left: max(0.75rem, env(safe-area-inset-left)); top: max(0.625rem, env(safe-area-inset-top)); }
+  .stage-bar {
+    left: max(0.75rem, env(safe-area-inset-left)); right: max(0.75rem, env(safe-area-inset-right));
+    bottom: max(0.625rem, env(safe-area-inset-bottom));
+  }
+  .unmute { top: auto; bottom: calc(max(0.625rem, env(safe-area-inset-bottom)) + 4.25rem); }
+  /* the top corners hold the channel and the dock: notices rise from the bottom instead */
+  .toasts { top: auto; bottom: calc(max(0.625rem, env(safe-area-inset-bottom)) + 4.25rem); --toast-from: 120%; }
+
+  .dock {
+    top: max(0.5rem, env(safe-area-inset-top)); bottom: auto; left: auto; translate: none;
+    right: max(0.75rem, env(safe-area-inset-right));
+    padding: 0.25rem; gap: 0.25rem;
+  }
+  .dock .icon-btn-lg, .dock-share, .quality-btn { width: auto; height: 2.75rem; min-height: 2.75rem; }
+  .dock .icon-btn-lg { width: 2.75rem; }
+  .dock-share { width: 2.75rem; padding: 0; }
+  .dock-share span { display: none; }
+  .volume input { display: none; }
+  .strip {
+    position: absolute; right: max(0.75rem, env(safe-area-inset-right));
+    top: calc(max(0.5rem, env(safe-area-inset-top)) + 3.75rem); bottom: calc(max(0.625rem, env(safe-area-inset-bottom)) + 4.25rem);
+    width: 8rem; transition: opacity 260ms ease;
+  }
+  .stage.idle-cursor ~ .dock, .stage.idle-cursor ~ .strip { opacity: 0; pointer-events: none; }
+  .roster {
+    left: auto; translate: none; bottom: auto;
+    top: calc(max(0.5rem, env(safe-area-inset-top)) + 3.5rem); right: max(0.75rem, env(safe-area-inset-right));
+    max-height: calc(100dvh - 5.5rem); transform-origin: 100% 0;
+  }
+
+  /* Compact empty state: the number, a line and the button have to fit a 375px tall screen. */
+  .empty { gap: 0.25rem; padding: 0.75rem 1.5rem; }
+  .empty-digits { margin-bottom: 0.125rem; font-size: clamp(2.75rem, 16vh, 4.5rem); }
+  .empty h2 { font-size: 1.125rem; }
+  .empty p:not(.empty-digits) { margin-bottom: 0.5rem; max-width: 36ch; font-size: 0.9375rem; line-height: 1.35; }
 }
 
 /* ---------- Touch ---------- */
