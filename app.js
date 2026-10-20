@@ -347,6 +347,7 @@ function acceptTurbo(conn) {
   state.audioIn.delete(id); // audio from a previous connection; the new one arrives right after this
   const rx = new TurboReceiver(openVideoChannel(conn.peerConnection), {
     requestKey: () => { if (conn.open) conn.send({ t: "key" }); },
+    ping: (msg) => { if (conn.open) conn.send(msg); },
     onUnsupported: () => { if (conn.open) conn.send({ t: "unsupported" }); },
     report: (r) => { if (conn.open) conn.send({ t: "rx", ...r, relay: entry.relay }); },
   });
@@ -362,7 +363,10 @@ function acceptTurbo(conn) {
     });
   }, 2000);
   const entry = { conn, rx, remote: null, close() { clearInterval(rtt); rx.close(); conn.close(); } };
-  conn.on("data", (msg) => { if (msg?.t === "tx") entry.remote = msg; });
+  conn.on("data", (msg) => {
+    if (msg?.t === "tx") entry.remote = msg;
+    else if (msg?.t === "pong") rx.pong(msg);
+  });
   state.turboIn.set(id, entry);
   conn.on("open", () => showTurbo(id));
   const end = () => {
@@ -653,6 +657,8 @@ function turboMember(id) {
       else state.turboOut?.report(id, msg);
     }
     else if (msg?.t === "unsupported") demote(id);
+    // The viewer's clock: when this side answered, on its wall and frame clocks.
+    else if (msg?.t === "ping") conn.send({ t: "pong", a: msg.a, b: Date.now(), s: state.turboOut?.frameClock() });
   });
   // Tells viewers how this side is doing (capture, encoder, hidden tab), so the
   // bottleneck can be found from the viewer's panel alone.
@@ -1088,6 +1094,19 @@ function renderStreams() {
     }
   }
   if (!showStrip) for (const item of state.streams.values()) item.thumb.remove();
+}
+
+// Glass to glass on the video element path: when each frame of the featured
+// minimum delay stream is shown (the canvas path reports its own paints).
+if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+  const onFrame = (now, md) => {
+    const entry = state.turboIn.get(state.featured);
+    if (entry?.rx.track && ui.feature.srcObject?.getVideoTracks().includes(entry.rx.track)) {
+      entry.rx.displayed(Math.round(md.mediaTime * 1e6), Date.now() - (performance.now() - md.expectedDisplayTime));
+    }
+    ui.feature.requestVideoFrameCallback(onFrame);
+  };
+  ui.feature.requestVideoFrameCallback(onFrame);
 }
 
 // The stage canvas follows the featured screen's CanvasView; the video

@@ -71,6 +71,9 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--canvas") opt.canvas = true;
   else if (a === "--sinal-local") opt.localSignal = true; // starts sinal.mjs and uses it as --server
   else if (a === "--query") opt.query = argv[++i]; // extra viewer URL parameters, e.g. avc=avcc
+  // No pixel probe on the viewer: only the app's own measurement (the panel's
+  // "Atraso medido"), without the probe's per-frame readback on the main thread.
+  else if (a === "--sem-sonda") opt.noProbe = true;
   else if (a === "--retries") opt.retries = Number(argv[++i]);
   else if (a === "--foto") opt.photo = argv[++i]; // saves the last received frame (PNG, full size)
   else { console.error(`unknown arg ${a}`); process.exit(2); }
@@ -324,7 +327,7 @@ function startDecoder() {
 // The canvas has no frame callback: wrap drawImage and read the timestamp grid
 // from each VideoFrame painted on the stage canvas, at the moment it is painted
 // (inside the animation frame that presents it, like rVFC's callback).
-function startCanvasDecoder() {
+function startCanvasDecoder(noProbe) {
   const CELL = 40, COLS = 16, ROWS = 4, GX = 48, GY = 48, SRC_W = 1280;
   const MARKER = [1, 0, 1, 1];
   const RW = COLS * CELL, RH = ROWS * CELL;
@@ -333,6 +336,7 @@ function startCanvasDecoder() {
   const crc8 = (bits) => { let crc = 0; for (const b of bits) { const fb = ((crc >> 7) & 1) ^ b; crc = (crc << 1) & 0xff; if (fb) crc ^= 0x07; } return crc; };
   const S = (window.__lat = { recording: false, samples: [], fails: 0, failReasons: {}, mismatch: 0, firstOkAt: 0, total: 0, sizes: {} });
   const fail = (why) => { if (S.recording) { S.fails++; S.failReasons[why] = (S.failReasons[why] || 0) + 1; } };
+  if (noProbe) { S.firstOkAt = Date.now(); return; }
   const draw = CanvasRenderingContext2D.prototype.drawImage;
   CanvasRenderingContext2D.prototype.drawImage = function (src, ...rest) {
     const at = performance.now();
@@ -544,7 +548,7 @@ async function nativeSender(viewer, code) {
   nativeProc.stderr.on("data", (d) => { const t = d.toString().replace(/\x1b\[[0-9;]*m/g, ""); if (/escolhido|ERROR|WARN/.test(t)) log("nativo:", t.trim().slice(0, 160)); });
   await viewer.waitForFunction(receiving, { timeout: 30000, polling: 200 });
   log("viewer receiving video from native app");
-  await viewer.evaluate(opt.canvas ? startCanvasDecoder : startDecoder);
+  await viewer.evaluate(opt.canvas || opt.noProbe ? startCanvasDecoder : startDecoder, !!opt.noProbe);
   await viewer.waitForFunction(() => window.__lat.firstOkAt > 0, { timeout: 15000, polling: 100 });
   return { evaluate: async (fn) => (fn === snapshotStats ? { inbound: [], outbound: [], sources: [], pairs: [] } : null) };
 }
@@ -595,7 +599,7 @@ async function setup() {
   });
   log("viewer receiving video");
 
-  await viewer.evaluate(opt.canvas ? startCanvasDecoder : startDecoder);
+  await viewer.evaluate(opt.canvas || opt.noProbe ? startCanvasDecoder : startDecoder, !!opt.noProbe);
   await viewer.waitForFunction(() => window.__lat.firstOkAt > 0, { timeout: 15000, polling: 100 }).catch(async () => {
     const shot = path.join(path.dirname(new URL(import.meta.url).pathname), `fail-${opt.label}.png`);
     await viewer.screenshot({ path: shot });

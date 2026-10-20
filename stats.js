@@ -245,11 +245,14 @@ function render(b, report) {
 function renderLocalTurbo(b, t) {
   if (!b.localRows) {
     const grid = b.el.querySelector(".stats-grid");
-    grid.insertAdjacentHTML("beforeend", `<dt>Fila do decodificador</dt><dd data-f="tqueue">${DASH}</dd><dt>Descartados aqui</dt><dd data-f="tdrop">${DASH}</dd>`);
+    grid.insertAdjacentHTML("beforeend", `<dt>Etapas</dt><dd data-f="tstages">${DASH}</dd><dt>Fila do decodificador</dt><dd data-f="tqueue">${DASH}</dd><dt>Descartados aqui</dt><dd data-f="tdrop">${DASH}</dd>`);
     for (const node of grid.querySelectorAll("[data-f^=t]")) b.f[node.dataset.f] = node;
     b.localRows = true;
   }
   const { f } = b;
+  // Capture to first packet in, then decoder output to screen (ms each).
+  setText(f.tstages, isNum(t.arriveMs) && isNum(t.displayMs) ? `chegada ${fmtMs(t.arriveMs)} · tela ${fmtMs(t.displayMs)} ms` : DASH);
+  f.tstages.title = "Chegada: da captura ao primeiro pedaço do quadro aqui (captura, codificação, envio e rede). Tela: da saída do decodificador até aparecer.";
   setText(f.tqueue, isNum(t.decodeQueue) ? `${n0.format(t.decodeQueue)} ${t.decodeQueue === 1 ? "quadro" : "quadros"}` : DASH);
   const parts = [];
   if (isNum(t.decodeDrops)) parts.push(`${n0.format(t.decodeDrops)} na decodificação`);
@@ -319,10 +322,15 @@ function renderTurbo(b, t, rtt) {
     renderLocalTurbo(b, t);
     renderRemote(b, t.remote);
     const est = isNum(rtt) && isNum(t.assemblyMs) && isNum(t.decodeMs) ? rtt / 2 + t.assemblyMs + t.decodeMs : null;
-    hero(f.hero, est);
-    f.hero.parentNode.title = isNum(est)
-      ? `Estimativa: metade da ida e volta (${ms(rtt)}) + montagem do quadro (${ms(t.assemblyMs)}) + decodificação (${ms(t.decodeMs)}). Sem buffer de espera.`
-      : "";
+    // Measured when the streamer answers the clock pings: capture to screen.
+    const measured = isNum(t.glassMs);
+    hero(f.hero, measured ? t.glassMs : est);
+    setText(f.hero.parentNode.querySelector(".stats-hero-label"), measured ? "Atraso medido" : "Atraso estimado");
+    f.hero.parentNode.title = measured
+      ? `Da captura até a tela, com o relógio de quem transmite (acertado por ida e volta de ${ms(t.clockRtt)}): ${ms(t.arriveMs)} até chegar (captura, codificação, envio e rede), ${ms(t.assemblyMs)} montando, ${ms(t.decodeMs)} decodificando e ${ms(t.displayMs)} até aparecer.`
+      : isNum(est)
+        ? `Estimativa: metade da ida e volta (${ms(rtt)}) + montagem do quadro (${ms(t.assemblyMs)}) + decodificação (${ms(t.decodeMs)}). Sem buffer de espera.`
+        : "";
   } else {
     setHTML(f.encode, msPerFrame(t.encodeMs));
     // where frames get lost: capture → encoder → network

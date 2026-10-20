@@ -102,6 +102,47 @@ export function openVideoChannel(pc) {
   return ch;
 }
 
+/* ---------------- Clocks ---------------- */
+
+// The viewer pings the streamer over the control channel; the pong carries
+// the streamer's wall clock (`b`, ms) and its frame clock (`s`, µs, the unit of
+// the packets' timestamps) at the moment it answered. The sample with the
+// shortest round trip of the recent ones gives the offset between the two
+// wall clocks and where frame timestamps sit on the streamer's wall clock, so
+// each frame's capture time lands on this viewer's clock: glass to glass.
+const PING_MS = 1000;
+const PING_KEEP = 10;
+
+export class PeerClock {
+  constructor(send) {
+    this.send = send;
+    this.samples = [];
+    this.best = null; // { rtt, offset (streamer - viewer, ms), frameZero (streamer wall ms at frame clock 0) }
+    this.timer = setInterval(() => this.ping(), PING_MS);
+    this.ping();
+  }
+  ping() { try { this.send({ t: "ping", a: Date.now() }); } catch {} }
+  pong({ a, b, s }) {
+    const c = Date.now();
+    if (typeof a !== "number" || typeof b !== "number" || c < a) return;
+    const sample = { rtt: c - a, offset: b - (a + c) / 2, frameZero: typeof s === "number" ? b - s / 1000 : null };
+    this.samples.push(sample);
+    if (this.samples.length > PING_KEEP) this.samples.shift();
+    this.best = this.samples.reduce((m, x) => (x.rtt < m.rtt ? x : m));
+  }
+  get rtt() { return this.best?.rtt ?? null; }
+  /// A frame timestamp (µs) as a time on this viewer's wall clock (ms).
+  captureTime(ts) {
+    const b = this.best;
+    if (!b || b.frameZero === null) return null;
+    return b.frameZero + ts / 1000 - b.offset;
+  }
+  close() { clearInterval(this.timer); }
+}
+
+// Wall-clock time (ms) of a performance.now() instant.
+function wall(t) { return Date.now() - (performance.now() - t); }
+
 /* ---------------- Packets ---------------- */
 
 export function fecGroups(count) { return count < 2 ? 0 : Math.ceil(count / FEC_GROUP); }
@@ -280,7 +321,14 @@ export class TurboSender {
     }
   }
 
+  /// The frame clock (µs, the unit of frame timestamps) now: viewers place
+  /// capture times with it (PeerClock). Estimated from the shortest gap seen
+  /// between a frame's timestamp and the moment it was read.
+  frameClock() { return this.tsLag == null ? null : performance.now() * 1000 - this.tsLag; }
+
   async #encode(frame) {
+    const lag = performance.now() * 1000 - frame.timestamp;
+    this.tsLag = Math.min(this.tsLag ?? lag, lag);
     if (!this.viewers.size) { frame.close(); this.needKey = true; return; }
     this.stats.captured++;
     const w = frame.displayWidth & ~1, h = frame.displayHeight & ~1;
@@ -366,7 +414,7 @@ export class TurboSender {
 /* ---------------- Viewer ---------------- */
 
 export class TurboReceiver {
-  constructor(channel, { requestKey, onUnsupported, report, render = turboSupport().render }) {
+  constructor(channel, { requestKey, onUnsupported, report, ping, render = turboSupport().render }) {
     this.generator = null;
     this.writer = null;
     this.canvas = null;
@@ -379,7 +427,15 @@ export class TurboReceiver {
         this.generator = null;
       }
     }
-    if (!this.writer) this.canvas = new CanvasView();
+    if (!this.writer) {
+      this.canvas = new CanvasView();
+      // Painted inside the animation frame that shows it.
+      this.canvas.onPaint = (frame) => this.displayed(frame.timestamp, Date.now());
+    }
+    // Glass to glass: capture (streamer's clock) to display (here).
+    this.clock = ping ? new PeerClock(ping) : null;
+    this.times = new Map(); // timestamp -> { at, done, decode, output } (performance.now())
+    this.glass = [];        // recent capture-to-display samples (ms)
     // H.264 goes to the decoder as it travels (Annex B); a decoder that refuses
     // it before decoding anything gets length-prefixed NAL units and an avcC
     // description instead (?avc=avcc forces that, for testing).
@@ -399,6 +455,7 @@ export class TurboReceiver {
     this.stats = {
       codec: null, width: 0, height: 0, frames: 0, bytes: 0, lost: 0, keyRequests: 0, assemblyMs: null, decodeMs: null,
       decodeQueue: 0, decodeDrops: 0, renderDrops: 0, recovered: 0,
+      glassMs: null, arriveMs: null, displayMs: null, clockRtt: null,
     };
     // fec: this viewer rebuilds fragments from parity packets.
     this.reportTimer = report ? setInterval(() => report({ bytes: this.payload, lost: this.stats.lost, recovered: this.stats.recovered, fec: 1 }), REPORT_MS) : 0;
@@ -429,6 +486,7 @@ export class TurboReceiver {
     this.closed = true;
     clearTimeout(this.timer);
     clearInterval(this.reportTimer);
+    this.clock?.close();
     try { this.decoder?.close(); } catch {}
     this.writer?.close().catch(() => {});
     try { (this.generator?.track ?? this.generator)?.stop(); } catch {}
@@ -580,6 +638,8 @@ export class TurboReceiver {
       if (this.avccMode) data = toAvcc(splitAnnexB(data).filter((n) => ![7, 8, 9].includes(n[0] & 0x1f)));
       if (this.pending.size > 120) this.pending.clear();
       this.pending.set(f.ts, performance.now());
+      if (this.times.size > 120) this.times.clear();
+      this.times.set(f.ts, { at: f.at, done: f.done, decode: performance.now(), output: 0 });
       this.decoder.decode(new EncodedVideoChunk({ type: f.key ? "key" : "delta", timestamp: f.ts, data }));
     } catch (err) {
       this.#fail(err);
@@ -606,6 +666,8 @@ export class TurboReceiver {
     const t0 = this.pending.get(frame.timestamp);
     this.pending.delete(frame.timestamp);
     if (t0) this.stats.decodeMs = ema(this.stats.decodeMs, performance.now() - t0);
+    const times = this.times.get(frame.timestamp);
+    if (times) times.output = performance.now();
     this.stats.frames++;
     this.stats.width = frame.displayWidth;
     this.stats.height = frame.displayHeight;
@@ -629,6 +691,28 @@ export class TurboReceiver {
     }
     this.sinkSkips = 0;
     this.writer.write(frame).catch(() => { try { frame.close(); } catch {} });
+  }
+
+  /// The streamer answered a ping.
+  pong(msg) { this.clock?.pong(msg); }
+
+  /// A frame (its timestamp, µs) reached the screen at `at` (wall clock, ms):
+  /// the canvas when it paints, the page's video frame callback otherwise.
+  displayed(ts, at) {
+    const times = this.times.get(ts);
+    this.times.delete(ts);
+    const captured = this.clock?.captureTime(ts);
+    this.stats.clockRtt = this.clock?.rtt ?? null;
+    if (captured == null || !times?.output) return;
+    const glass = at - captured;
+    if (glass < 0 || glass > 5000) return; // clocks not settled yet
+    this.glass.push(glass);
+    if (this.glass.length > 120) this.glass.shift();
+    this.stats.glassMs = median(this.glass);
+    // First packet in (capture, encoding, sending and the network), and from
+    // the decoder's output to the screen.
+    this.stats.arriveMs = ema(this.stats.arriveMs, wall(times.at) - captured);
+    this.stats.displayMs = ema(this.stats.displayMs, at - wall(times.output));
   }
 
   #fail(err) {
@@ -771,3 +855,4 @@ export function avcDescription(nals) {
 }
 
 function ema(prev, v) { return prev == null ? v : prev * 0.9 + v * 0.1; }
+function median(v) { const s = [...v].sort((a, b) => a - b); return s[s.length >> 1]; }

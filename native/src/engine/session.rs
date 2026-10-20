@@ -824,6 +824,15 @@ impl Session {
                 }
             }
             (Kind::Turbo, "rx") => self.on_report(&conn, &v).await,
+            (Kind::Turbo, "ping") => {
+                // The viewer's clock: this side's wall clock and frame clock
+                // (µs since the stream began, as in the video packets) now.
+                if let (Some(live), Some(ch)) = (&self.live, self.conns.get(&conn).and_then(|c| c.control.clone())) {
+                    let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64() * 1000.0);
+                    let msg = json!({ "t": "pong", "a": v["a"], "b": wall, "s": live.epoch.elapsed().as_micros() as f64 });
+                    peer::send_json(&ch, &msg).await;
+                }
+            }
             (Kind::Turbo, "unsupported") => {
                 // The browser has WebCodecs but cannot decode this video (Firefox
                 // without an H.264 decoder, say): it gets RTP instead, video and
