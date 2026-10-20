@@ -21,6 +21,8 @@ Ideas from Sunshine and Moonlight:
 
 Chrome and Edge viewers hand each decoded frame to a video track. Safari 16.4+ (iPad included) and Firefox 130+ have the decoder but not that track, so they paint the newest frame on a canvas once per screen refresh, dropping any frame that a newer one replaced before its turn. Their audio still comes over WebRTC. If their decoder rejects the H.264 as it travels (Annex B), they retry it in the MP4 layout (avcC); if it still fails, that viewer gets normal WebRTC. `?render=canvas` forces the canvas in Chrome, and `measure.mjs --canvas` measures it.
 
+**Desktop app over RTP** (viewers on the relay, or whose browser lacks WebCodecs): each viewer's connection runs Google Congestion Control on the browser's transport-wide feedback, and a pacer releases packets at 2.5 times the estimate, so a keyframe is not held back for long. The app's single encoder follows the lowest estimate among RTP viewers: far below the bitrate it drops at once, otherwise in the usual big, spaced steps, and it only climbs as far as the estimates allow. A viewer whose estimate is under half of the next worst one's does not set the bitrate for everyone; it keeps getting the stream, paced and retransmitted. Giving that viewer a lighter stream of its own needs temporal layers (dropping every other frame for them only) or a second encoder, which is not done yet.
+
 `tools/latency` measures the delay with two automated Chromes:
 
 ```sh

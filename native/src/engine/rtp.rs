@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use rtc::interceptor::{Attribute, Interceptor, Packet, StreamInfo, TaggedPacket};
+use rtc::interceptor::{Attribute, Gcc, Interceptor, PacerBuilder, Packet, Registry, Slot, StreamInfo, TaggedPacket};
+use rtc::peer_connection::configuration::interceptor_registry::{
+    CongestionFeedback, configure_congestion_control, configure_nack, configure_rtcp_reports, configure_simulcast_extension_headers,
+};
 use rtc::media::Sample;
 use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
@@ -79,6 +82,107 @@ pub fn media_engine() -> Result<MediaEngine, String> {
     m.register_header_extension(RTCRtpHeaderExtensionCapability { uri: PLAYOUT_DELAY_URI.into() }, RtpCodecKind::Video, None)
         .map_err(|e| e.to_string())?;
     Ok(m)
+}
+
+/* ---------------- congestion control ---------------- */
+
+/// The pacer releases at this multiple of the estimate: it smooths bursts
+/// onto the wire without holding a keyframe (many frames' worth of bytes)
+/// behind the estimate for long. libwebrtc paces at 2.5x as well.
+pub const PACE_FACTOR: f64 = 2.5;
+/// GCC's range. The floor sits below the ladder's (1.5 Mb/s) so a viewer far
+/// worse than that still shows as such; the ceiling is above any bitrate the
+/// app uses (the session clamps the bitrate itself).
+const GCC_MIN: f64 = 300_000.0;
+const GCC_MAX: f64 = 100_000_000.0;
+/// Packets the pacer holds before refusing new ones: about a 4K keyframe.
+/// Past that the path is far below the bitrate and the session is already
+/// stepping down; holding more would only turn into seconds of delay.
+const PACER_QUEUE: usize = 1024;
+
+/// Send-side congestion control for one viewer's RTP video: Google
+/// Congestion Control over the browser's transport-wide feedback (TWCC), a
+/// pacer, and the estimate for the session's bitrate ladder.
+pub struct Congestion {
+    /// Latest estimate in bits per second (0 until the first one).
+    pub estimate: Arc<AtomicU32>,
+    initial: u32,
+}
+
+impl Congestion {
+    /// `initial`: the bitrate the encoder is at. GCC starts there rather
+    /// than at its usual 300 kb/s, so a fresh viewer does not read as a
+    /// collapse, and the pacer starts at that rate's multiple.
+    pub fn new(initial: u32) -> Self {
+        Self { estimate: Arc::new(AtomicU32::new(0)), initial }
+    }
+
+    /// The interceptor chain for this connection; registers on `media` what
+    /// the browser needs to send transport-wide feedback.
+    pub fn registry(&self, media: &mut MediaEngine) -> Result<Registry, String> {
+        let initial = f64::from(self.initial);
+        let registry = configure_nack(Registry::new(), media);
+        configure_simulcast_extension_headers(media).map_err(|e| e.to_string())?;
+        let registry = configure_congestion_control(registry, Gcc::new(initial, GCC_MIN, GCC_MAX), CongestionFeedback::Twcc, media)
+            .map_err(|e| e.to_string())?;
+        Ok(configure_rtcp_reports(registry)
+            // In place of the helper's 1 Mb/s pacer.
+            .with(Slot::Pacer, PacerBuilder::new().with_target_bitrate(initial * PACE_FACTOR).with_queue_limit(PACER_QUEUE).build())
+            .with(PACE_SLOT, PaceScale::new(self.estimate.clone())))
+    }
+}
+
+/// Between the congestion controller (1_000) and the pacer (3_000), on the
+/// read leg the estimate travels: records it for the session and hands the
+/// pacer its multiple.
+const PACE_SLOT: Slot = Slot::Custom(2_500);
+
+pub struct PaceScale {
+    estimate: Arc<AtomicU32>,
+    read: VecDeque<TaggedPacket>,
+    write: VecDeque<TaggedPacket>,
+}
+
+impl PaceScale {
+    fn new(estimate: Arc<AtomicU32>) -> Self {
+        Self { estimate, read: VecDeque::new(), write: VecDeque::new() }
+    }
+}
+
+impl Protocol<TaggedPacket, TaggedPacket, ()> for PaceScale {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        for a in &mut msg.message.attributes {
+            if let Attribute::TargetBitrateChanged { bits_per_second } = a {
+                self.estimate.store(bits_per_second.clamp(0.0, f64::from(u32::MAX)) as u32, Ordering::Relaxed);
+                *bits_per_second *= PACE_FACTOR;
+            }
+        }
+        self.read.push_back(msg);
+        Ok(())
+    }
+    fn poll_read(&mut self) -> Option<Self::Rout> {
+        self.read.pop_front()
+    }
+    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        self.write.push_back(msg);
+        Ok(())
+    }
+    fn poll_write(&mut self) -> Option<Self::Wout> {
+        self.write.pop_front()
+    }
+}
+
+impl Interceptor for PaceScale {
+    fn bind_local_stream(&mut self, _: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, _: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _: &StreamInfo) {}
 }
 
 /* ---------------- interceptor: PLI/FIR and reports for the app ---------------- */
@@ -425,6 +529,35 @@ m=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r
 a=fingerprint:sha-256 8B:0F:D7:CF:1D:D4:9D:3C:FC:8F:CA:10:45:BC:DE:7E:30:5A:8C:04:D8:0F:49:9B:D8:91:E6:E8:C2:4C:A4:F5\r\na=setup:active\r\na=mid:1\r\n\
 a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\na=recvonly\r\na=rtcp-mux\r\na=rtcp-rsize\r\na=rtpmap:111 opus/48000/2\r\n\
 a=rtcp-fb:111 transport-cc\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n";
+
+    #[test]
+    fn pacer_segue_a_estimativa_com_folga() {
+        let cc = Congestion::new(10_000_000);
+        let mut media = media_engine().unwrap();
+        let slots: Vec<String> = cc.registry(&mut media).unwrap().slots().into_iter().map(|(slot, name)| format!("{}:{name}", usize::from(slot))).collect();
+        for want in ["1000:CongestionControl", "2000:TwccSender", "2500:PaceScale", "3000:Pacer", "8000:TwccReceiver"] {
+            assert!(slots.iter().any(|s| s.starts_with(want)), "{want} missing from {slots:?}");
+        }
+        // The estimate goes to the session as is, and to the pacer multiplied.
+        let mut scale = PaceScale::new(cc.estimate.clone());
+        let mut message = rtc::interceptor::AttributedPacket::new(Packet::Rtcp(vec![Box::new(ReceiverReport::default())]));
+        message.add(Attribute::TargetBitrateChanged { bits_per_second: 4_000_000.0 });
+        scale.handle_read(TaggedPacket { now: Instant::now(), transport: rtc::shared::TransportContext::default(), message }).unwrap();
+        let out = scale.poll_read().unwrap();
+        assert_eq!(cc.estimate.load(Ordering::Relaxed), 4_000_000);
+        assert!(matches!(out.message.get(&Attribute::TargetBitrateChanged { bits_per_second: 0.0 }), Some(Attribute::TargetBitrateChanged { bits_per_second }) if *bits_per_second == 10_000_000.0));
+    }
+
+    #[tokio::test]
+    async fn video_pede_feedback_de_congestionamento() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
+        let cc = Congestion::new(8_000_000);
+        let pc = super::super::peer::new_video_connection(&[], "teste", &cc, tx).await.unwrap();
+        add_video_track(&pc).await.unwrap();
+        let offer = pc.create_offer(None).await.unwrap();
+        assert!(offer.sdp.contains("a=rtcp-fb:102 transport-cc"), "{}", offer.sdp);
+        assert!(offer.sdp.contains("transport-wide-cc-extensions-01"));
+    }
 
     async fn negotiate(answer: String) -> (u8, bool) {
         let (pc, video, _) = offer().await;

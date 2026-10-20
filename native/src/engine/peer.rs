@@ -68,9 +68,24 @@ pub async fn new_connection(ice: &[RTCIceServer], conn: &str, video: bool, tx: m
         m.register_default_codecs().map_err(|e| e.to_string())?;
         m
     };
-    let registry = register_default_interceptors(Registry::new(), &mut media)
-        .map_err(|e| e.to_string())?
-        .with(rtc::interceptor::Slot::from(14_000), super::rtp::Feedback::new());
+    let registry = register_default_interceptors(Registry::new(), &mut media).map_err(|e| e.to_string())?;
+    build(ice, conn, media, registry, tx).await
+}
+
+/// Media connection carrying video, with send-side congestion control.
+pub async fn new_video_connection(
+    ice: &[RTCIceServer],
+    conn: &str,
+    cc: &super::rtp::Congestion,
+    tx: mpsc::Sender<PeerEvent>,
+) -> Result<Arc<dyn PeerConnection>, String> {
+    let mut media = super::rtp::media_engine()?;
+    let registry = cc.registry(&mut media)?;
+    build(ice, conn, media, registry, tx).await
+}
+
+async fn build(ice: &[RTCIceServer], conn: &str, media: MediaEngine, registry: Registry, tx: mpsc::Sender<PeerEvent>) -> Result<Arc<dyn PeerConnection>, String> {
+    let registry = registry.with(rtc::interceptor::Slot::from(14_000), super::rtp::Feedback::new());
     let config = RTCConfigurationBuilder::new().with_ice_servers(ice.to_vec()).build();
     let pc = PeerConnectionBuilder::new()
         .with_configuration(config)

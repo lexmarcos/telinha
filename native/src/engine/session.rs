@@ -69,6 +69,8 @@ struct Conn {
     audio_sender: Option<rtp::AudioSender>,
     /// Audio-only call (goes with the data channel video).
     audio_only: bool,
+    /// RTP video: the congestion controller's estimate for this viewer (bits/s, 0 = none yet).
+    estimate: Option<Arc<AtomicU32>>,
     health: Health,
 }
 
@@ -95,6 +97,11 @@ struct Live {
     /// Screen size the ideal bitrate was last computed for.
     screen: Option<(u32, u32)>,
     ladder: Ladder,
+    /// What the RTP viewers' congestion estimates allow for the video (none
+    /// without estimates); the ladder never climbs past it.
+    cap: Option<u32>,
+    /// RTP connection currently left out of `cap` for being far below the rest.
+    outlier: Option<String>,
 }
 
 /// Network adaptation of the shared bitrate: few, large, well spaced steps.
@@ -118,6 +125,16 @@ const STEP: f64 = 0.75;
 const MIN_GAP: Duration = Duration::from_secs(5);
 /// Up only after this long without a bad report from anyone.
 const CALM: Duration = Duration::from_secs(15);
+/// A congestion estimate this far below the bitrate moves it at once, straight
+/// to the estimate: waiting out a streak and the gap would let the pacer's
+/// queue (and the delay) grow for seconds.
+const URGENT: f64 = 0.7;
+/// Share of a viewer's estimate the video may use: the rest is audio, packet
+/// headers and retransmissions.
+const VIDEO_SHARE: f64 = 0.9;
+/// A viewer whose estimate is below this fraction of the next worst one's
+/// does not set the bitrate for everyone.
+const OUTLIER: f64 = 0.5;
 
 impl Ladder {
     fn new(now: Instant) -> Self {
@@ -125,18 +142,25 @@ impl Ladder {
     }
 
     /// The next bitrate given one connection's verdict (`bad_streak`
-    /// consecutive bad reports from it).
-    fn next(&mut self, now: Instant, current: u32, ideal: u32, floor: u32, bad_streak: u32) -> u32 {
+    /// consecutive bad reports from it) and what the congestion estimates
+    /// allow (`cap`).
+    fn next(&mut self, now: Instant, current: u32, ideal: u32, floor: u32, bad_streak: u32, cap: Option<u32>) -> u32 {
         if bad_streak > 0 {
             self.trouble = now;
+        }
+        if let Some(cap) = cap.filter(|&c| (c as f64) < current as f64 * URGENT && current > floor) {
+            self.trouble = now;
+            self.changed = now;
+            return cap.max(floor);
         }
         if now < self.changed + MIN_GAP {
             return current;
         }
         let next = if bad_streak >= 2 && current > floor {
-            ((current as f64 * STEP) as u32).max(floor)
+            ((current as f64 * STEP) as u32).min(cap.unwrap_or(u32::MAX)).max(floor)
         } else if bad_streak == 0 && current < ideal && now >= self.trouble + CALM {
-            ((current as f64 / STEP) as u32).min(ideal)
+            // Up only as far as the estimates say the network takes.
+            ((current as f64 / STEP) as u32).min(ideal).min(cap.unwrap_or(u32::MAX)).max(current)
         } else {
             current
         };
@@ -436,6 +460,7 @@ impl Session {
                 audio_track: None,
                 audio_sender: None,
                 audio_only: false,
+                estimate: None,
                 health: Health::default(),
             },
         );
@@ -447,7 +472,14 @@ impl Session {
     /// video over the data channel).
     async fn open_media(&mut self, dst: &str, audio_only: bool) -> Result<String, String> {
         let conn = format!("mc_{:012x}", rand::random::<u64>() & 0xffff_ffff_ffff);
-        let pc = peer::new_connection(&self.ice, &conn, true, self.peers.clone()).await?;
+        // Video gets congestion control, starting from the bitrate in use.
+        let (pc, estimate) = if audio_only {
+            (peer::new_connection(&self.ice, &conn, true, self.peers.clone()).await?, None)
+        } else {
+            let current = self.live.as_ref().map_or(self.quality.bitrate((1920, 1080)), |l| l.bitrate.load(Ordering::Relaxed));
+            let cc = rtp::Congestion::new(current);
+            (peer::new_video_connection(&self.ice, &conn, &cc, self.peers.clone()).await?, Some(cc.estimate))
+        };
         let track = if audio_only { None } else { Some(rtp::add_video_track(&pc).await?) };
         let has_audio = self.live.as_ref().is_some_and(|l| l.audio.is_some());
         let audio_track = if has_audio { Some(rtp::add_audio_track(&pc).await?) } else { None };
@@ -481,6 +513,7 @@ impl Session {
                 audio_track,
                 audio_sender: None,
                 audio_only,
+                estimate,
                 health: Health::default(),
             },
         );
@@ -632,6 +665,7 @@ impl Session {
                 audio_track: None,
                 audio_sender: None,
                 audio_only: false,
+                estimate: None,
                 health: Health::default(),
             },
         );
@@ -895,6 +929,8 @@ impl Session {
             capture_fps: 0.0,
             screen: None,
             ladder: Ladder::new(Instant::now()),
+            cap: None,
+            outlier: None,
         });
         self.set_sharing(true).await;
         self.sync_viewers().await;
@@ -1031,7 +1067,7 @@ impl Session {
             Priority::Nitidez => (ideal / 2).max(1_500_000),
         };
         let give_up = current <= floor && c.health.bad >= 4;
-        let next = live.ladder.next(Instant::now(), current, ideal, floor, c.health.bad);
+        let next = live.ladder.next(Instant::now(), current, ideal, floor, c.health.bad, live.cap);
         if next != current {
             // A fresh streak is needed for the next step down.
             c.health.bad = 0;
@@ -1105,14 +1141,42 @@ impl Session {
         if let Some(info) = st.encoder.clone() {
             let _ = self.ui.send(Event::Encoder(info)).await;
         }
-        // RTP: loss from receiver reports (more than ~5% is bad), each report
-        // counted once (none since the last tick: nothing to judge).
+        // RTP: each viewer's congestion estimate (GCC) bounds the bitrate;
+        // the lowest sets it, unless it is far below everyone else's.
+        let current = live.bitrate.load(Ordering::Relaxed);
+        let estimates: Vec<(String, u32)> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| c.rtp_sender.is_some())
+            .filter_map(|(k, c)| Some((k.clone(), c.estimate.as_ref()?.load(Ordering::Relaxed))))
+            .filter(|(_, e)| *e > 0)
+            .collect();
+        let (cap, outlier) = rtp_cap(&estimates);
+        if outlier != live.outlier {
+            if let Some(o) = &outlier {
+                let peer = self.conns.get(o).map(|c| c.peer.clone()).unwrap_or_default();
+                tracing::info!(peer, "one viewer's network is far below the others': not lowering everyone's video for it");
+            }
+            live.outlier = outlier.clone();
+        }
+        if cap != live.cap {
+            tracing::debug!(?cap, current, "congestion estimate");
+            live.cap = cap;
+        }
+        // A verdict per RTP viewer: loss from receiver reports (more than ~5%
+        // is bad, each report counted once) or an estimate below the bitrate.
         let media: Vec<(String, bool)> = self
             .conns
             .iter()
+            .filter(|(k, _)| outlier.as_ref() != Some(*k))
             .filter_map(|(k, c)| {
-                let lost = c.rtp_sender.as_ref()?.counters.take_fraction_lost()?;
-                Some((k.clone(), lost > 13))
+                let sender = c.rtp_sender.as_ref()?;
+                let lost = sender.counters.take_fraction_lost().map(|l| l > 13);
+                let below = c.estimate.as_ref().map(|e| e.load(Ordering::Relaxed)).filter(|&e| e > 0).map(|e| (e as f64 * VIDEO_SHARE) < current as f64);
+                if lost.is_none() && below.is_none() {
+                    return None; // nothing new to judge
+                }
+                Some((k.clone(), lost.unwrap_or(false) || below.unwrap_or(false)))
             })
             .collect();
         for (conn, bad) in media {
@@ -1140,6 +1204,23 @@ impl Session {
     }
 }
 
+/// What the RTP viewers' estimates allow for the shared video, and which
+/// viewer (if any) is left out for being far below the next worst: one bad
+/// network should not take everyone's picture down with it. That viewer still
+/// gets the stream, paced and with retransmissions, just above what its
+/// estimate says. (Giving it a lighter stream of its own needs temporal
+/// layers or a second encoder; see docs/how-it-works.md.)
+fn rtp_cap(estimates: &[(String, u32)]) -> (Option<u32>, Option<String>) {
+    let mut sorted: Vec<&(String, u32)> = estimates.iter().collect();
+    sorted.sort_by_key(|(_, e)| *e);
+    let outlier = match sorted.as_slice() {
+        [low, next, ..] if (low.1 as f64) < next.1 as f64 * OUTLIER => Some(low.0.clone()),
+        _ => None,
+    };
+    let cap = sorted.iter().find(|(k, _)| Some(k) != outlier.as_ref()).map(|(_, e)| (*e as f64 * VIDEO_SHARE) as u32);
+    (cap, outlier)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1151,20 +1232,51 @@ mod tests {
         let (ideal, floor) = (40_000_000, 1_500_000);
         let mut l = Ladder::new(t0);
         // One bad report is not enough; two in a row step down 25% right away.
-        assert_eq!(l.next(s(0), ideal, ideal, floor, 1), ideal);
-        assert_eq!(l.next(s(1), ideal, ideal, floor, 2), 30_000_000);
+        assert_eq!(l.next(s(0), ideal, ideal, floor, 1, None), ideal);
+        assert_eq!(l.next(s(1), ideal, ideal, floor, 2, None), 30_000_000);
         // Still bad, but the next step waits 5 s.
-        assert_eq!(l.next(s(3), 30_000_000, ideal, floor, 2), 30_000_000);
-        assert_eq!(l.next(s(6), 30_000_000, ideal, floor, 3), 22_500_000);
+        assert_eq!(l.next(s(3), 30_000_000, ideal, floor, 2, None), 30_000_000);
+        assert_eq!(l.next(s(6), 30_000_000, ideal, floor, 3, None), 22_500_000);
         // Good reports: up only after 15 s without trouble from anyone.
-        assert_eq!(l.next(s(12), 22_500_000, ideal, floor, 0), 22_500_000);
-        assert_eq!(l.next(s(20), 22_500_000, ideal, floor, 0), 22_500_000);
-        assert_eq!(l.next(s(21), 22_500_000, ideal, floor, 0), 30_000_000);
-        assert_eq!(l.next(s(24), 30_000_000, ideal, floor, 0), 30_000_000);
-        assert_eq!(l.next(s(26), 30_000_000, ideal, floor, 0), ideal);
+        assert_eq!(l.next(s(12), 22_500_000, ideal, floor, 0, None), 22_500_000);
+        assert_eq!(l.next(s(20), 22_500_000, ideal, floor, 0, None), 22_500_000);
+        assert_eq!(l.next(s(21), 22_500_000, ideal, floor, 0, None), 30_000_000);
+        assert_eq!(l.next(s(24), 30_000_000, ideal, floor, 0, None), 30_000_000);
+        assert_eq!(l.next(s(26), 30_000_000, ideal, floor, 0, None), ideal);
         // Never past the ideal nor below the floor.
-        assert_eq!(l.next(s(60), ideal, ideal, floor, 0), ideal);
-        assert_eq!(l.next(s(70), 1_800_000, ideal, floor, 2), floor);
-        assert_eq!(l.next(s(80), floor, ideal, floor, 5), floor);
+        assert_eq!(l.next(s(60), ideal, ideal, floor, 0, None), ideal);
+        assert_eq!(l.next(s(70), 1_800_000, ideal, floor, 2, None), floor);
+        assert_eq!(l.next(s(80), floor, ideal, floor, 5, None), floor);
+    }
+
+    #[test]
+    fn escada_segue_a_estimativa() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        let (ideal, floor) = (40_000_000, 1_500_000);
+        let mut l = Ladder::new(t0);
+        // An estimate a little below: an ordinary 25% step after a streak.
+        assert_eq!(l.next(s(0), ideal, ideal, floor, 2, Some(35_000_000)), 30_000_000);
+        // Far below: straight to it, without waiting for the gap.
+        assert_eq!(l.next(s(1), 30_000_000, ideal, floor, 1, Some(8_000_000)), 8_000_000);
+        // Never below the floor.
+        assert_eq!(l.next(s(2), 8_000_000, ideal, floor, 1, Some(500_000)), floor);
+        // Up: one step at a time, only as far as the estimate allows.
+        assert_eq!(l.next(s(20), 8_000_000, ideal, floor, 0, Some(9_000_000)), 9_000_000);
+        assert_eq!(l.next(s(40), 9_000_000, ideal, floor, 0, Some(9_000_000)), 9_000_000);
+        assert_eq!(l.next(s(60), 9_000_000, ideal, floor, 0, Some(50_000_000)), 12_000_000);
+        // An estimate below the bitrate never turns a step up into a step down.
+        assert_eq!(l.next(s(80), 12_000_000, ideal, floor, 0, Some(11_000_000)), 12_000_000);
+    }
+
+    #[test]
+    fn um_espectador_ruim_nao_derruba_todos() {
+        let e = |v: &[(&str, u32)]| v.iter().map(|(k, e)| (k.to_string(), *e)).collect::<Vec<_>>();
+        assert_eq!(rtp_cap(&[]), (None, None));
+        assert_eq!(rtp_cap(&e(&[("a", 10_000_000)])), (Some(9_000_000), None));
+        // Close together: the lowest sets it.
+        assert_eq!(rtp_cap(&e(&[("a", 20_000_000), ("b", 12_000_000)])), (Some(10_800_000), None));
+        // One far below the next: left out.
+        assert_eq!(rtp_cap(&e(&[("a", 20_000_000), ("b", 2_000_000), ("c", 15_000_000)])), (Some(13_500_000), Some("b".into())));
     }
 }
