@@ -593,7 +593,6 @@ mod tests {
                     p.sent(d);
                     sent += 1;
                     hold = hold.max(slot - e);
-                    early = None;
                 }
             }
             if p.arrive(at(t), at(t)) {
