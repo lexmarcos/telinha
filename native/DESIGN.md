@@ -24,7 +24,7 @@ missing, it is added here first.
 4. **Respond on press.** Buttons and the bubble react on press, not on release.
    Animations use interruptible springs: a click in the middle of an animation starts
    from where the thing currently is, never jumps.
-5. **Words say what happens.** "Transmitir a tela", "Parar de
+5. **Words say what happens.** "Transmitir", "Parar de
    transmitir", "Copiar convite". Short phrases, verb first, no all caps.
 
 ## Colors
@@ -152,7 +152,16 @@ back arrow on the left (always in the same place).
 ### Menu item (`menu_item`)
 Icon + text, full width. Variants: `normal`, `primary` (text in
 `phosphor`) and `danger` (text in `tally`, only for stopping a broadcast). Hover paints
-`room_raised`.
+`room_raised`. Disabled: text and icon in `muted`, no hover, no pointer cursor.
+
+The menu has a single main action, **Transmitir**, in or out of a channel. Outside one it
+opens the channel, starts the stream as soon as it joins and copies the invite once it is
+on air, with no other click. From the click until then the item says where it is
+("Conectando…", "Iniciando a transmissão…") and is disabled, along with what depends on the
+engine (joining, quality, copying the invite, leaving), because commands wait behind
+the system's capture picker. If the capture is cancelled or fails in a channel opened this
+way, the app leaves it: the bubble goes back to the start and the error appears. A
+channel the person was already in stays.
 
 ### Segmented control (`segmented`)
 `room_raised` track with a thumb that slides with `spring_ui` to the chosen
@@ -175,8 +184,9 @@ page. Also accepts a pasted invite link.
 
 UI copy stays in Brazilian Portuguese; the examples below are the actual strings.
 
-- Verb first, and the same word as the button until confirmation: "Transmitir a
-  tela" → "Transmitindo"; "Copiar convite" → "Convite copiado".
+- Verb first, and the same word as the button until confirmation: "Transmitir"
+  → "Transmitindo"; "Copiar convite" → "Convite copiado".
 - Errors say what happened and what to do: "O canal 4821 não está no ar. Confira o
   número com quem te convidou."
-- No decorative ellipses, no exclamation marks, no emoji.
+- No decorative ellipses (only on something in progress, "Conectando…"), no
+  exclamation marks, no emoji.

@@ -9,16 +9,18 @@ export component MenuItem inherits Rectangle {
     in property <image> icon;
     in property <string> label;
     in property <Tone> tone: Tone.normal;
+    in property <bool> enabled: true;
     callback clicked();
 
-    property <color> fg: root.tone == Tone.primary ? Palette.phosphor : root.tone == Tone.danger ? Palette.tally : Palette.text;
+    property <color> fg: !root.enabled ? Palette.muted : root.tone == Tone.primary ? Palette.phosphor : root.tone == Tone.danger ? Palette.tally : Palette.text;
     height: Size.item-h;
     border-radius: Radius.item;
     background: touch.pressed ? Palette.phosphor.with-alpha(0.16) : touch.has-hover ? Palette.room-raised : Palette.room-raised.with-alpha(0);
     animate background { duration: Motion.press; }
 
     touch := TouchArea {
-        mouse-cursor: pointer;
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.clicked(); }
     }
     HorizontalLayout {

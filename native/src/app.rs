@@ -17,10 +17,11 @@ use std::time::{Duration, Instant};
 use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
-use crate::config::{Config, Priority, Resolution};
+use crate::config::{Config, Priority, Quality, Resolution};
 use crate::engine::{self, Command, EncoderInfo, Event, Viewer};
 use crate::ui::motion;
 use crate::ui::spring::{Spring, reduced_motion};
+use crate::ui::stream_flow::{Place, Step, StreamFlow};
 
 /// Measurements from ui/tokens.slint the app needs to move the window.
 const PANEL_W: f32 = 264.0;
@@ -63,6 +64,8 @@ struct Controller {
     ui: Bolha,
     config: Config,
     session: Session,
+    /// How far the "Transmitir" click got (ui/stream_flow.rs).
+    flow: StreamFlow,
     viewers: Vec<Viewer>,
     encoder: Option<EncoderInfo>,
     screen: Option<(u32, u32)>,
@@ -137,6 +140,7 @@ pub fn run() {
     let mut c = Controller {
         ui: ui.clone_strong(),
         session: Session::Idle,
+        flow: StreamFlow::default(),
         viewers: Vec::new(),
         encoder: None,
         screen: None,
@@ -196,20 +200,7 @@ impl Controller {
 
         let st = ui.global::<AppState>();
         st.on_open(|i| with(|c| c.open_panel(Panel::from_index(i))));
-        st.on_create(|| {
-            with(|c| {
-                let (name, server) = (c.config.name.clone(), c.config.server.clone());
-                c.send(Command::Create { name, server });
-                c.close_panel();
-            })
-        });
-        st.on_start_live(|| {
-            with(|c| {
-                let quality = c.config.quality;
-                c.send(Command::StartLive { quality });
-                c.close_panel();
-            })
-        });
+        st.on_start_live(|| with(|c| c.begin_stream()));
         st.on_stop_live(|| with(|c| c.stop_live()));
         st.on_copy_invite(|| {
             with(|c| {
@@ -493,6 +484,8 @@ impl Controller {
         st.set_session(session);
         st.set_code(code.clone().into());
         st.set_live(live);
+        st.set_stream_busy(self.flow.busy(self.stream_place()));
+        st.set_stream_label(self.flow.label(self.stream_place()).into());
         st.set_subtitle(self.subtitle().into());
 
         let palette = ui.global::<Palette>().get_avatars();
@@ -528,8 +521,7 @@ impl Controller {
         st.set_prio_sel(i32::from(q.priority == Priority::Nitidez));
         st.set_audio_sel(i32::from(q.system_audio));
         let native = self.native();
-        let (ow, oh) = q.output_size(native);
-        st.set_screen_note(format!("Sua tela: {}×{}. Saindo em {ow}×{oh}.", native.0, native.1).into());
+        st.set_screen_note(screen_note(self.screen, q).into());
         st.set_prio_note(
             if q.priority == Priority::Fluidez { "Mantém o movimento suave. Bom pra jogos e vídeos." } else { "Mantém a imagem nítida. Bom pra texto e código." }.into(),
         );
@@ -715,6 +707,31 @@ impl Controller {
         let _ = self.engine.try_send(cmd);
     }
 
+    fn stream_place(&self) -> Place {
+        match &self.session {
+            Session::Idle => Place::Outside,
+            Session::Connecting => Place::Connecting,
+            Session::Channel { live: false, .. } => Place::Channel,
+            Session::Channel { live: true, .. } => Place::Live,
+        }
+    }
+
+    /// The one way a stream starts: the "Transmitir" click, and again when the
+    /// channel that click opened joins. Anything that has to happen before the
+    /// capture opens belongs in the `Step::Capture` arm.
+    fn begin_stream(&mut self) {
+        match self.flow.begin(self.stream_place()) {
+            Step::Wait => return,
+            Step::Create => {
+                let (name, server) = (self.config.name.clone(), self.config.server.clone());
+                self.send(Command::Create { name, server });
+            }
+            Step::Capture => self.send(Command::StartLive { quality: self.config.quality }),
+        }
+        self.close_panel();
+        self.render();
+    }
+
     fn stop_live(&mut self) {
         self.send(Command::StopLive);
         self.close_panel();
@@ -725,7 +742,8 @@ impl Controller {
         let Session::Channel { invite, .. } = &self.session else { return false };
         let invite = invite.clone();
         if std::env::var_os("TELINHA_MOCK").is_some() {
-            return true; // screenshots and tests do not touch the real clipboard
+            // Screenshots and tests do not touch the real clipboard.
+            return std::env::var("TELINHA_MOCK_FALHA").as_deref() != Ok("copia");
         }
         if self.clipboard.is_none() {
             self.clipboard = arboard::Clipboard::new().map_err(|e| tracing::warn!("clipboard: {e}")).ok();
@@ -772,6 +790,9 @@ impl Controller {
                 self.config.server = Some(server);
                 self.config.save();
                 self.close_panel();
+                if self.flow.awaiting_channel() {
+                    self.begin_stream();
+                }
             }
             Event::Failed(msg) => {
                 tracing::warn!("failed: {msg}");
@@ -779,18 +800,28 @@ impl Controller {
                     self.session = Session::Idle;
                 }
                 self.joining = false;
+                if self.flow.failed() {
+                    self.send(Command::Leave);
+                }
                 self.tell("", &msg, NoteTone::Error);
             }
             Event::Viewers(v) => self.viewers = v,
             Event::Live(on) => {
                 let started = on && matches!(self.session, Session::Channel { live: false, .. });
+                if on {
+                    self.flow.on_air();
+                }
                 if let Session::Channel { live, .. } = &mut self.session {
                     *live = on;
                 }
                 // The invite is how friends get in: it is ready to paste as
                 // soon as the stream starts.
-                if started && self.copy_invite() {
-                    self.tell("Convite copiado", "É só colar no chat da galera.", NoteTone::Info);
+                if started {
+                    if self.copy_invite() {
+                        self.tell("Convite copiado", "É só colar no chat da galera.", NoteTone::Info);
+                    } else {
+                        self.tell("Transmitindo", "Não consegui copiar o convite. Clique na bolha e use Copiar convite.", NoteTone::Warn);
+                    }
                 }
                 self.tally.set_target(if on { 1.0 } else { 0.0 });
                 self.animate();
@@ -805,9 +836,13 @@ impl Controller {
             }
             Event::Notice(msg) => self.tell("", &msg, NoteTone::Warn),
             Event::Left => {
+                self.flow.left();
                 self.session = Session::Idle;
                 self.viewers.clear();
                 self.encoder = None;
+                // The next stream may capture something else.
+                self.screen = None;
+                self.sync_thumbs(true);
                 self.tally.set_target(0.0);
                 self.animate();
             }
@@ -817,8 +852,11 @@ impl Controller {
 
     /* ---------------- qualidade ---------------- */
 
+    /// Size of what is being captured. Until the capture reports it, the best
+    /// guess is the monitor under the bubble, in real pixels like the capture's.
     fn native(&self) -> (u32, u32) {
-        self.screen.or_else(|| self.monitor.map(|(w, h)| (w as u32, h as u32))).unwrap_or((1920, 1080))
+        let scale = self.ui.window().scale_factor();
+        self.screen.or_else(|| self.monitor.map(|(w, h)| ((w * scale).round() as u32, (h * scale).round() as u32))).unwrap_or((1920, 1080))
     }
 
     fn resolution_options(&self) -> Vec<Resolution> {
@@ -841,6 +879,19 @@ impl Controller {
         if !snap {
             self.animate();
         }
+    }
+}
+
+/// The note under the resolution. The size is only known once the capture
+/// reports it, so before that it promises a limit, not a number.
+fn screen_note(screen: Option<(u32, u32)>, q: Quality) -> String {
+    match (screen, q.resolution.height()) {
+        (Some(native), _) => {
+            let (w, h) = q.output_size(native);
+            format!("Sua tela: {}×{}. Saindo em {w}×{h}.", native.0, native.1)
+        }
+        (None, Some(h)) => format!("Saindo em até {h}p. O tamanho exato aparece ao transmitir."),
+        (None, None) => "Saindo no tamanho da tela. O tamanho exato aparece ao transmitir.".into(),
     }
 }
 
@@ -889,7 +940,28 @@ fn shots(dir: PathBuf) {
     type Step = (&'static str, u64, fn(&mut Controller));
     let steps: Vec<Step> = vec![
         ("bolha", 500, |_| {}),
-        ("menu", 700, |c| c.open_panel(Panel::Menu)),
+        ("menu", 1200, |c| c.open_panel(Panel::Menu)),
+        // Before any capture: the panel only knows the monitor.
+        ("qualidade-fora-do-canal", 800, |c| c.open_panel(Panel::Quality)),
+        // One click from outside a channel (the fake engine connects in 900 ms
+        // and its capture picker takes another 1000).
+        ("transmitir-conectando", 300, |c| c.begin_stream()),
+        ("transmitir-menu-conectando", 350, |c| {
+            c.open_panel(Panel::Menu);
+            c.begin_stream(); // a repeated click does nothing
+        }),
+        ("transmitir-no-canal", 400, |_| {}),
+        ("transmitir-menu-iniciando", 300, |c| c.open_panel(Panel::Menu)),
+        // On air with the invite copied (TELINHA_MOCK_FALHA shows the failures here).
+        ("transmitir-resultado", 1100, |c| c.close_panel()),
+        ("transmitir-menu-resultado", 700, |c| c.open_panel(Panel::Menu)),
+        // Stopping keeps the channel.
+        ("parou", 700, |c| c.stop_live()),
+        ("parou-menu", 700, |c| c.open_panel(Panel::Menu)),
+        ("saiu", 800, |c| {
+            c.send(Command::Leave);
+            c.close_panel();
+        }),
         ("entrar", 700, |c| {
             c.join_text = "4821".into();
             c.open_panel(Panel::Join);
@@ -899,11 +971,7 @@ fn shots(dir: PathBuf) {
         ("conectando-2", 250, |_| {}),
         ("no-canal", 1400, |_| {}),
         ("menu-canal", 700, |c| c.open_panel(Panel::Menu)),
-        ("ao-vivo", 1200, |c| {
-            let quality = c.config.quality;
-            c.send(Command::StartLive { quality });
-            c.close_panel();
-        }),
+        ("ao-vivo", 1800, |c| c.begin_stream()),
         // The invite toast closes on its own.
         ("aviso-sumiu", 4200, |_| {}),
         ("menu-ao-vivo", 700, |c| c.open_panel(Panel::Menu)),
@@ -942,4 +1010,18 @@ fn shots(dir: PathBuf) {
     }
     let dir = Rc::new(dir);
     slint::Timer::single_shot(Duration::from_millis(300), move || next(dir, steps, 0));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nota_da_tela_nao_inventa_tamanho_antes_da_captura() {
+        let original = Quality::default();
+        let p1080 = Quality { resolution: Resolution::P1080, ..original };
+        assert_eq!(screen_note(None, original), "Saindo no tamanho da tela. O tamanho exato aparece ao transmitir.");
+        assert_eq!(screen_note(None, p1080), "Saindo em até 1080p. O tamanho exato aparece ao transmitir.");
+        assert_eq!(screen_note(Some((2560, 1440)), p1080), "Sua tela: 2560×1440. Saindo em 1920×1080.");
+    }
 }

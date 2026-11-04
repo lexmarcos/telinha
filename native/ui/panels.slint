@@ -31,28 +31,28 @@ export component MenuPanel inherits VerticalLayout {
         tone: Tone.primary;
         clicked => { AppState.update(); }
     }
-    if AppState.session != 2: MenuItem {
-        icon: @image-url("icons/plus.svg"); label: "Abrir um canal novo"; tone: Tone.primary;
-        clicked => { AppState.create(); }
-    }
-    if AppState.session != 2: MenuItem {
-        icon: @image-url("icons/enter.svg"); label: "Entrar num canal";
-        clicked => { AppState.open(3); }
-    }
-    if AppState.session == 2 && !AppState.live: MenuItem {
-        icon: @image-url("icons/screen.svg"); label: "Transmitir a tela"; tone: Tone.primary;
+    if !AppState.live: MenuItem {
+        icon: @image-url("icons/screen.svg"); label: AppState.stream-label; tone: Tone.primary;
+        enabled: !AppState.stream-busy;
         clicked => { AppState.start-live(); }
     }
-    if AppState.session == 2 && AppState.live: MenuItem {
+    if AppState.live: MenuItem {
         icon: @image-url("icons/stop.svg"); label: "Parar de transmitir"; tone: Tone.danger;
         clicked => { AppState.stop-live(); }
     }
-    if AppState.session == 2: MenuItem {
+    if AppState.session != 2: MenuItem {
+        icon: @image-url("icons/enter.svg"); label: "Entrar num canal";
+        enabled: !AppState.stream-busy;
+        clicked => { AppState.open(3); }
+    }
+    MenuItem {
         icon: @image-url("icons/tune.svg"); label: "Qualidade da transmissão";
+        enabled: !AppState.stream-busy;
         clicked => { AppState.open(2); }
     }
     if AppState.session == 2: MenuItem {
         icon: @image-url("icons/link.svg"); label: "Copiar convite";
+        enabled: !AppState.stream-busy;
         clicked => { AppState.copy-invite(); }
     }
     Divider { }
@@ -62,6 +62,7 @@ export component MenuPanel inherits VerticalLayout {
     }
     if AppState.session == 2: MenuItem {
         icon: @image-url("icons/leave.svg"); label: "Sair do canal";
+        enabled: !AppState.stream-busy;
         clicked => { AppState.leave(); }
     }
     if AppState.session != 2: MenuItem {

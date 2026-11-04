@@ -9,6 +9,10 @@ export global AppState {
     in property <int> session; // 0 not in a channel, 1 connecting, 2 in a channel
     in property <string> code;
     in property <bool> live;
+    // The "Transmitir" item: its text, and whether a start is under way (what
+    // depends on the engine waits until it ends).
+    in property <string> stream-label;
+    in property <bool> stream-busy;
     in property <string> subtitle;
     in property <[DotData]> dots;
     in property <int> dots-extra;
@@ -46,7 +50,6 @@ export global AppState {
     callback open(int); // 1 menu, 2 quality, 3 join, 5 toast
     callback dismiss();
     callback update();
-    callback create();
     callback start-live();
     callback stop-live();
     callback copy-invite();

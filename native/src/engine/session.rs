@@ -294,7 +294,7 @@ fn parse_invite(input: &str, server: Option<String>) -> Result<(String, String),
 async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, code: Option<String>) -> Result<Session, String> {
     let _ = ui.send(Event::Connecting).await;
     let server = server.ok_or("Entre num canal pelo link de convite uma vez, para o app saber qual servidor usar.")?;
-    let ice = signaling::ice_servers(&server).await?;
+    let ice = signaling::ice_servers(&server).await.map_err(server_down)?;
     let (sig_tx, mut sig_rx) = mpsc::channel(256);
     let (peer_tx, peer_rx) = mpsc::channel(1024);
 
@@ -302,8 +302,8 @@ async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, c
     let (me, code, sig) = match code {
         Some(code) => {
             let me = format!("telinha-app-{:012x}", rand::random::<u64>() & 0xffff_ffff_ffff);
-            let sig = Signaling::connect(&server, &me, sig_tx.clone()).await?;
-            wait_open(&mut sig_rx).await?;
+            let sig = Signaling::connect(&server, &me, sig_tx.clone()).await.map_err(server_down)?;
+            wait_open(&mut sig_rx).await.map_err(server_down)?;
             (me, code, sig)
         }
         None => {
@@ -311,11 +311,11 @@ async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, c
             loop {
                 let code = rand::random_range(1000..10000u32).to_string();
                 let me = format!("{PREFIX}{code}");
-                let sig = Signaling::connect(&server, &me, sig_tx.clone()).await?;
+                let sig = Signaling::connect(&server, &me, sig_tx.clone()).await.map_err(server_down)?;
                 match wait_open(&mut sig_rx).await {
                     Ok(()) => break (me, code, sig),
                     Err(_) if attempt < 5 => attempt += 1,
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(server_down(e)),
                 }
             }
         }
@@ -356,6 +356,12 @@ async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, c
         s.role = Role::Guest { host: host_id, link };
     }
     Ok(s)
+}
+
+/// What the person reads when the server cannot be reached; the cause goes to the log.
+fn server_down(cause: String) -> String {
+    tracing::warn!("server: {cause}");
+    "Não consegui falar com o servidor do Telinha. Confira sua internet e tente de novo.".into()
 }
 
 async fn wait_open(rx: &mut mpsc::Receiver<Signal>) -> Result<(), String> {
