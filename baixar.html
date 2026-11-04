@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0d1430">
   <title>Baixar o Telinha</title>
-  <meta name="description" content="O Telinha para o computador: transmite com menos atraso, tem código aberto e não grava o que você transmite.">
+  <meta name="description" content="Baixe o Telinha para Windows e Linux. O código é aberto, e o Telinha não grava a transmissão.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='6' width='26' height='18' rx='5' fill='%23cfe0ff'/%3E%3Ccircle cx='24' cy='11' r='2.4' fill='%23ff4438'/%3E%3Crect x='11' y='26' width='10' height='2.4' rx='1.2' fill='%23cfe0ff'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -13,38 +13,39 @@
   <link rel="stylesheet" href="style.css">
   <style>
     body { overflow: auto; }
+    /* The same dark room as the home screen, lit by the bubble. Everything fits one screen:
+       the list of downloads opens over it, with a scroll of its own. */
     .download {
-      /* Everything fits one screen: the lists of downloads open over it, with a scroll of their own. */
-      --gap: clamp(0.75rem, 2.4dvh, 1.5rem);
+      --gap: clamp(0.875rem, 2.8dvh, 1.75rem);
       min-height: 100dvh; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; align-content: center; gap: var(--gap);
       padding: max(3.25rem, calc(env(safe-area-inset-top) + 2.75rem)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+      background: var(--room);
     }
     .back {
-      position: fixed; top: max(1rem, env(safe-area-inset-top)); left: max(1rem, env(safe-area-inset-left));
+      position: fixed; z-index: 1; top: max(1rem, env(safe-area-inset-top)); left: max(1rem, env(safe-area-inset-left));
       display: inline-flex; align-items: center; gap: 0.25rem;
-      min-height: 2.5rem; padding: 0 0.9rem 0 0.6rem; border-radius: 999px;
-      color: var(--muted); text-decoration: none; font-weight: 600; font-size: 0.9375rem;
+      min-height: 2.75rem; padding: 0 0.9rem 0 0.6rem; border-radius: 999px;
+      color: var(--muted); text-decoration: none; font-weight: 600; font-size: 0.875rem;
       transition: color 160ms ease, background-color 160ms ease, transform 120ms ease-out;
     }
-    .back:hover { color: var(--text); background: rgba(200, 212, 255, 0.1); }
+    .back:hover { color: var(--text); background: rgba(200, 212, 255, 0.08); }
     .back:active { transform: scale(0.96); transition-duration: 60ms; }
 
     /* The desktop app's bubble: a round tube that shows the version like a channel. */
     .bubble {
-      position: relative; width: clamp(5.5rem, 17dvh, 9rem); aspect-ratio: 1; border-radius: 50%;
+      position: relative; width: clamp(6rem, 20dvh, 10rem); aspect-ratio: 1; border-radius: 50%;
       display: grid; place-items: center;
       background: radial-gradient(70% 70% at 40% 35%, #1a2558 0%, #121a3d 100%);
       box-shadow:
         0 0 0 1.5px rgba(207, 224, 255, 0.45),
-        0 0 32px rgba(157, 184, 255, 0.22),
-        0 30px 60px -24px rgba(0, 0, 0, 0.8);
+        0 0 140px 24px rgba(92, 128, 255, 0.2);
       animation: power-on 900ms var(--ease-out) 120ms both;
     }
     .bubble::before {
       /* tally light: this is the version on air */
       content: ""; position: absolute; top: 9%; right: 9%;
-      width: 1.1rem; aspect-ratio: 1; border-radius: 50%;
-      background: var(--tally); box-shadow: 0 0 0 4px #121a3d, 0 0 14px rgba(255, 68, 56, 0.6);
+      width: 11%; aspect-ratio: 1; border-radius: 50%;
+      background: var(--tally); box-shadow: 0 0 0 3px #121a3d, 0 0 14px rgba(255, 68, 56, 0.6);
     }
     .tube {
       width: 81%; aspect-ratio: 1; border-radius: 50%; overflow: hidden;
@@ -56,7 +57,7 @@
     }
     .tube span {
       display: flex; align-items: baseline;
-      font: 900 clamp(1.125rem, 3.4dvh, 1.8rem)/1 var(--osd); letter-spacing: 0.02em; color: var(--phosphor);
+      font: 900 clamp(1.125rem, 3.8dvh, 2rem)/1 var(--osd); letter-spacing: 0.02em; color: var(--phosphor);
       text-shadow: 0 0 14px rgba(150, 190, 255, 0.55), 0 0 2px #fff;
     }
     /* Doto's period reads as a plus sign: the version's dots are drawn instead. */
@@ -65,68 +66,46 @@
       background: currentColor; box-shadow: 0 0 8px rgba(150, 190, 255, 0.7);
     }
 
-    .intro { text-align: center; max-width: 30rem; }
+    .intro { text-align: center; }
     .intro h1 { margin: 0; font-size: clamp(1.5rem, 4.4dvh, 2.25rem); line-height: 1.1; font-weight: 700; letter-spacing: -0.03em; }
-    .intro p { margin: 0.375rem 0 0; color: var(--muted); font-size: 1rem; letter-spacing: -0.01em; text-wrap: balance; }
 
-    .get { width: min(24rem, 100%); display: grid; gap: 0.5rem; justify-items: center; }
-    .get .btn-primary { width: 100%; text-decoration: none; }
-    .get .alt { color: var(--muted); font-size: 0.9375rem; text-decoration: none; padding: 0.25rem 0.5rem; border-radius: 8px; }
-    .get .alt:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
-    .get .size { font-weight: 400; opacity: 0.6; }
-    .note { margin: 0; color: var(--muted); text-align: center; font-size: 0.9375rem; max-width: 24rem; text-wrap: balance; }
+    .get { width: min(24rem, 100%); display: grid; gap: 0.25rem; justify-items: center; }
+    .get .get-app { width: 100%; margin-bottom: 0.25rem; }
+    .get .size { font-weight: 500; opacity: 0.65; }
+    .get .alt { min-height: 2.25rem; display: inline-flex; align-items: center; padding: 0 0.5rem; border-radius: 8px; color: var(--muted); font-size: 0.875rem; text-underline-offset: 3px; }
+    .get .alt:hover { color: var(--text); }
+    .note, .empty-state { margin: 0; color: var(--muted); text-align: center; font-size: 0.875rem; text-wrap: balance; }
 
-    /* Why it can be trusted: short title, one plain line. */
-    .trust {
-      width: min(30rem, 100%); display: grid; gap: 0.75rem; padding: 1rem 1.125rem;
-      border-radius: var(--r-lg); background: rgba(200, 212, 255, 0.05); box-shadow: 0 0 0 1px var(--line);
-    }
-    .trust h2 { margin: 0; font-size: 1.0625rem; font-weight: 700; letter-spacing: -0.02em; }
-    .points { margin: 0; padding: 0; list-style: none; display: grid; gap: 0.625rem; }
-    .point { display: grid; grid-template-columns: 1.125rem 1fr; column-gap: 0.625rem; line-height: 1.3; }
-    .point svg { width: 1.125rem; height: 1.125rem; color: var(--phosphor); }
-    .point b { font-size: 0.9375rem; font-weight: 600; letter-spacing: -0.01em; }
-    .point p { grid-column: 2; margin: 0.0625rem 0 0; color: var(--muted); font-size: 0.875rem; text-wrap: pretty; }
-    .source {
-      display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; min-height: 2.75rem; padding: 0 1rem;
-      border-radius: 999px; background: rgba(200, 212, 255, 0.1); color: var(--text);
-      text-decoration: none; font-size: 0.9375rem; font-weight: 600;
-      transition: background-color 160ms ease, transform 120ms ease-out;
-    }
-    .source svg { width: 1.125rem; height: 1.125rem; }
-    .source:hover { background: rgba(200, 212, 255, 0.18); }
-    .source:active { transform: scale(0.96); transition-duration: 60ms; }
+    .copy { width: min(30rem, 100%); display: grid; gap: 0.25rem; }
+    .copy p { margin: 0; color: var(--muted); font-size: 0.9375rem; text-align: center; text-wrap: balance; }
 
-    .more { position: relative; width: min(30rem, 100%); display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 0.5rem; }
-    .more details {
-      border-radius: var(--r-md); background: rgba(200, 212, 255, 0.05);
-      box-shadow: 0 0 0 1px var(--line);
-    }
+    .more { position: relative; width: min(30rem, 100%); display: grid; justify-items: center; margin-top: -0.5rem; }
     .more summary {
-      list-style: none; cursor: pointer; min-height: 2.75rem; padding: 0 0.875rem; border-radius: var(--r-md);
-      display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;
-      font-size: 0.875rem; font-weight: 600; color: var(--text); white-space: nowrap;
+      list-style: none; cursor: pointer; min-height: 2.75rem; padding: 0 0.75rem; border-radius: 999px;
+      display: flex; align-items: center; gap: 0.5rem;
+      font-size: 0.875rem; font-weight: 600; color: var(--muted);
+      transition: color 160ms ease, background-color 160ms ease;
     }
     .more summary::-webkit-details-marker { display: none; }
     .more summary::after {
-      content: ""; width: 0.5rem; height: 0.5rem; margin-right: 0.2rem;
-      border: solid var(--muted); border-width: 0 2px 2px 0; transform: rotate(45deg) translateY(-2px);
+      content: ""; width: 0.4rem; height: 0.4rem; margin-top: 0.15rem;
+      border: solid currentColor; border-width: 2px 0 0 2px; transform: rotate(45deg);
       transition: transform 220ms var(--ease-out);
     }
-    .more details[open] summary::after { transform: rotate(-135deg) translateY(-1px); }
-    .more summary:hover { background: rgba(200, 212, 255, 0.05); }
+    .more details[open] summary::after { margin-top: -0.15rem; transform: rotate(-135deg); }
+    .more summary:hover, .more details[open] summary { color: var(--text); background: rgba(200, 212, 255, 0.08); }
     .rows {
       position: absolute; z-index: 2; left: 0; right: 0; bottom: calc(100% + 0.5rem);
-      max-height: min(24rem, 62dvh); overflow-y: auto; overscroll-behavior: contain;
+      max-height: min(24rem, 50dvh); overflow-y: auto; overscroll-behavior: contain;
       margin: 0; padding: 0.3rem 0.6rem; list-style: none; display: grid; gap: 0.15rem;
       border-radius: var(--r-md); background: #141c44; box-shadow: 0 0 0 1px var(--line), 0 24px 50px -16px rgba(0, 0, 0, 0.8);
     }
     .row {
-      display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 0.75rem;
+      display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.5rem 0.75rem;
       padding: 0.55rem 0.5rem; border-top: 1px solid var(--line);
     }
     .row:first-child { border-top: 0; }
-    .row-name { display: grid; }
+    .row-name { display: grid; white-space: nowrap; }
     .row-name b { font-weight: 600; }
     .row-name small { color: var(--muted); font-size: 0.8125rem; }
     .row-links { display: flex; flex-wrap: wrap; gap: 0.35rem; justify-content: end; }
@@ -138,43 +117,30 @@
     }
     .chip:hover { background: rgba(200, 212, 255, 0.18); }
     .chip:active { transform: scale(0.95); transition-duration: 60ms; }
-
     @media (pointer: coarse) {
-      .back { min-height: 2.75rem; }
-      .chip { min-height: 2.75rem; }
-      .get .alt { padding: 0.4rem 0.75rem; }
+      .chip, .get .alt { min-height: 2.75rem; }
     }
-    .empty-state { text-align: center; color: var(--muted); max-width: 24rem; margin: 0; }
-    /* Room for two columns: what it is on one side, why trust it on the other. */
-    @media (min-width: 900px), (min-width: 620px) and (orientation: landscape) {
-      .download {
-        grid-template-columns: minmax(0, 26rem) minmax(0, 28rem); justify-content: center;
-        column-gap: clamp(1.5rem, 5vw, 4rem); padding-top: max(1rem, env(safe-area-inset-top));
-      }
-      .bubble, .intro, .get, .app-perks, .more { grid-column: 1; }
-      .trust { grid-column: 2; grid-row: 1 / span 5; align-self: center; }
-      .more { width: 100%; }
+
+    /* Short screens: the bubble only repeats the version, so it shrinks and then goes. */
+    @media (max-height: 700px) {
+      .bubble { width: 5.5rem; }
+      .tube span { font-size: 1.0625rem; }
     }
-    @media (max-width: 400px) {
-      .more summary { padding: 0 0.625rem; font-size: 0.8125rem; }
-    }
-    /* Short screens: the bubble only repeats the version, so it goes first. */
-    @media (max-height: 840px) and (max-width: 899px) and (orientation: portrait), (max-height: 620px) {
+    @media (max-height: 760px) and (max-width: 599px), (max-height: 600px) {
       .bubble { display: none; }
     }
-    @media (max-height: 620px) and (max-width: 480px) {
-      .intro p, .trust h2 { display: none; }
-      .back { top: 0.25rem; min-height: 2.5rem; }
-    }
-    @media (max-height: 500px) {
-      .download { --gap: 0.5rem; padding-block: max(0.5rem, env(safe-area-inset-top)) max(0.5rem, env(safe-area-inset-bottom)); }
-      .back { top: 0.25rem; }
-      .intro { padding-top: 1.75rem; } /* clear of "Voltar" */
-      .intro h1 { font-size: 1.375rem; }
-      .trust { gap: 0.5rem; padding: 0.625rem 0.875rem; }
-      .points { gap: 0.375rem; }
-      .source { min-height: 2.25rem; }
-      .more summary { padding: 0 0.625rem; font-size: 0.8125rem; }
+    /* A phone on its side: what it is on one side, what it does with your data on the other. */
+    @media (orientation: landscape) and (max-height: 600px) and (min-width: 620px) {
+      .download {
+        grid-template-columns: minmax(0, 20rem) minmax(0, 24rem); justify-content: center; align-items: center;
+        column-gap: clamp(1.5rem, 5vw, 3rem); padding-block: max(3.25rem, env(safe-area-inset-top)) max(0.5rem, env(safe-area-inset-bottom));
+      }
+      .intro, .get { grid-column: 1; }
+      .copy, .more { grid-column: 2; }
+      .intro { grid-row: 1; }
+      .get { grid-row: 2; }
+      .copy { grid-row: 1; }
+      .more { grid-row: 2; margin-top: 0; align-self: start; }
     }
     @media (prefers-reduced-motion: reduce) { .bubble { animation: fade 300ms ease both !important; } }
   </style>
@@ -186,43 +152,21 @@
     <div class="bubble" aria-hidden="true"><div class="tube"><span id="digits">----</span></div></div>
 
     <header class="intro">
-      <h1>Telinha no computador</h1>
-      <p>Transmita sua tela por uma bolha flutuante.</p>
+      <h1>Telinha para computador</h1>
     </header>
 
     <div class="get" id="get" aria-live="polite"></div>
 
-    <ul class="app-perks" id="gains" aria-label="O que o app traz">
-      <li><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Som do computador</li>
-      <li><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Menos atraso</li>
-      <li><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Mais qualidade</li>
-    </ul>
+    <div class="copy">
+      <p id="why">Menos atraso, mais qualidade e som do computador.</p>
+      <p>O código é aberto e o Telinha não grava a transmissão.</p>
+    </div>
 
-    <section class="trust" aria-labelledby="trustTitle">
-      <h2 id="trustTitle">Aberto e privado</h2>
-      <ul class="points">
-        <li class="point">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 8-4.5 4L9 16m6-8 4.5 4-4.5 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <b>Código aberto</b>
-          <p>Qualquer pessoa pode conferir o que ele faz.</p>
-        </li>
-        <li class="point">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="9.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          <b>Sua transmissão não é gravada</b>
-          <p>Imagem e som vão criptografados para quem assiste.</p>
-        </li>
-        <li class="point">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 20a7 7 0 0 1 14 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          <b>Sem conta e sem cadastro</b>
-          <p>Seu nome fica salvo só no seu aparelho. Entrar com o Discord é opcional e guarda só nome, foto e ID.</p>
-        </li>
-      </ul>
-      <a class="source" href="https://github.com/lexmarcos/telinha" target="_blank" rel="noopener noreferrer">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>Ver o código no GitHub
-      </a>
-    </section>
+    <section class="more" id="more" hidden aria-label="Outros downloads"></section>
 
-    <section class="more" id="more" hidden aria-label="Mais opções"></section>
+    <a class="source-link" href="https://github.com/lexmarcos/telinha" target="_blank" rel="noopener noreferrer">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>Código aberto no GitHub
+    </a>
   </main>
 
 <script type="module">
@@ -239,13 +183,13 @@ const OS = (() => {
 // What each package is, in plain words. The first one of a system is its main download.
 const PACKAGES = [
   { kind: "installer", os: "windows", label: "Baixar para Windows", short: "Windows" },
-  { kind: "windows", os: "windows", label: "Versão portátil para Windows, sem instalar", short: "Windows portátil" },
+  { kind: "windows", os: "windows", label: "Versão portátil, sem instalar", short: "Windows portátil" },
   { kind: "appimage", os: "linux", label: "Baixar para Linux", short: "Linux (AppImage)" },
   { kind: "deb", os: "linux", label: "Pacote .deb para Ubuntu, Debian e Zorin", short: "Linux (.deb)" },
 ];
 
 // On a phone the app is not an option, so what it adds would only get in the way.
-$("gains").hidden = OS === "phone";
+$("why").hidden = OS === "phone";
 
 const mb = (bytes) => `${Math.round(bytes / 1e6)} MB`;
 const day = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString("pt-BR", { day: "numeric", month: "long", year: "numeric" });
@@ -267,38 +211,32 @@ function render(versions) {
   const mine = PACKAGES.filter((p) => p.os === OS && latest.files[p.kind]);
 
   if (mine.length) {
-    get.append(link("btn btn-primary", mine[0].label, latest.files[mine[0].kind], true));
+    const main = link("get-app", mine[0].label, latest.files[mine[0].kind], true);
+    main.insertAdjacentHTML("afterbegin", '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+    get.append(main);
     for (const p of mine.slice(1)) get.append(link("alt", p.label, latest.files[p.kind]));
-    const note = document.createElement("p");
-    note.className = "note";
-    note.textContent = "Baixe uma vez. Depois ele se atualiza sozinho.";
-    get.append(note);
   } else {
     const note = document.createElement("p");
     note.className = "note";
     note.textContent = OS === "phone"
-      ? "No celular não precisa de app: é só abrir o site e entrar no canal."
+      ? "No celular você não precisa do app. Abra o site e entre no canal."
       : OS === "mac"
-        ? "Ainda não tem versão para Mac. Pelo navegador funciona do mesmo jeito."
-        : "Escolha o seu sistema abaixo.";
+        ? "Ainda não há versão para Mac. O site funciona no navegador."
+        : "Escolha o seu sistema na lista abaixo.";
     get.append(note);
   }
 
   const more = $("more");
-  const others = PACKAGES.filter((p) => p.os !== OS && latest.files[p.kind]);
-  if (others.length) more.append(group("Outros sistemas", [{ name: `Versão ${latest.version}`, sub: day(latest.date), links: others.map((p) => [p.short, latest.files[p.kind]]) }]));
-  if (versions.length > 1) {
-    more.append(group("Outras versões", versions.slice(1).map((v) => ({
-      name: `Versão ${v.version}`, sub: day(v.date),
-      links: PACKAGES.filter((p) => v.files[p.kind] && (p.os === OS || !mine.length)).map((p) => [p.short, v.files[p.kind]]),
-    }))));
-  }
+  const rows = versions.map((v, i) => ({
+    name: `Versão ${v.version}`, sub: day(v.date),
+    links: PACKAGES.filter((p) => v.files[p.kind] && (i === 0 ? p.kind !== mine[0]?.kind : p.os === OS || !mine.length)).map((p) => [p.short, v.files[p.kind]]),
+  })).filter((r) => r.links.length);
+  if (rows.length) more.append(group("Outros sistemas e versões", rows));
   more.hidden = !more.children.length;
 }
 
 function group(title, rows) {
   const d = document.createElement("details");
-  d.name = "downloads"; // one open at a time
   const s = document.createElement("summary");
   s.textContent = title;
   const ul = document.createElement("ul");
@@ -338,7 +276,7 @@ try {
   $("digits").textContent = "----";
   const p = document.createElement("p");
   p.className = "empty-state";
-  p.textContent = "Este servidor ainda não tem o app para baixar. Pelo navegador funciona do mesmo jeito.";
+  p.textContent = "Este servidor ainda não tem o app. O site funciona no navegador.";
   $("get").append(p);
 }
 </script>
