@@ -69,7 +69,11 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 # Self-update: unpacks the new version's zip (update.rs).
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Streaming priority: MMCSS, timer resolution, process priority (realtime.rs).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media", "Win32_System_Threading"] }
+# And the windows offered in the capture picker (capture/windows.rs).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+# The monitors in the capture picker: DXGI is COM, which windows-sys does not cover.
+# The version wasapi already pulls in.
+windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
 
 [build-dependencies]
 slint-build = "1.18"

@@ -2,13 +2,19 @@
 //! 10 ms frames, low-delay mode and constant bitrate, like Sunshine)
 //! and publishes the packets to the connections.
 //!
-//! Linux: each app's audio through PipeWire, except Discord.
-//! Windows: WASAPI loopback, without Discord when it is open (so people
-//! in the call do not hear their own voice back).
+//! Which sound depends on what is being captured (`plan`):
+//! - A whole monitor. Linux: each app's audio through PipeWire, except Discord.
+//!   Windows: WASAPI loopback, without Discord when it is open (so people in
+//!   the call do not hear their own voice back).
+//! - A window. Windows: process loopback in inclusion mode, on that window's
+//!   process tree. Linux: the portal does not say which process a window is, so
+//!   the person picks the app, and only that app is linked. Never the whole
+//!   computer: if that cannot be done, silence and a warning.
 
 pub mod chime;
 #[cfg(target_os = "linux")]
 mod linux;
+pub mod plan;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -16,12 +22,14 @@ use std::ffi::CString;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 
 use bytes::Bytes;
 use ffmpeg_sys_next as ff;
 use tokio::sync::broadcast;
+
+use plan::Plan;
 
 pub const RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
@@ -38,6 +46,17 @@ pub struct Audio {
     pub packets: broadcast::Sender<Arc<OpusPacket>>,
     /// Description for the log ("all audio except Discord").
     pub source: String,
+    /// Something the person has to hear about, from the capture thread.
+    problem: Problem,
+}
+
+/// A message from a capture thread, for the engine to pass on once.
+pub type Problem = Arc<Mutex<Option<String>>>;
+
+impl Audio {
+    pub fn take_problem(&self) -> Option<String> {
+        self.problem.lock().unwrap().take()
+    }
 }
 
 impl Drop for Audio {
@@ -46,21 +65,22 @@ impl Drop for Audio {
     }
 }
 
-pub fn start() -> Result<Audio, String> {
+pub fn start(plan: Plan) -> Result<Audio, String> {
     let stop = Arc::new(AtomicBool::new(false));
     // Short queues: anything that piles up here is delay (64 of each held
     // more than a second). 16 Opus packets = 160 ms; 8 capture chunks of
     // 10 to 21 ms each. Capture drops when full (try_send).
     let (packets, _) = broadcast::channel(16);
     let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(8);
+    let problem = Problem::default();
 
     #[cfg(target_os = "linux")]
-    let source = linux::start(tx, stop.clone())?;
+    let source = linux::start(tx, stop.clone(), plan)?;
     #[cfg(target_os = "windows")]
-    let source = windows::start(tx, stop.clone())?;
+    let source = windows::start(tx, stop.clone(), plan, problem.clone())?;
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     let source = {
-        drop(tx);
+        drop((tx, plan));
         return Err("captura de som não existe neste sistema".into());
     };
 
@@ -84,19 +104,19 @@ pub fn start() -> Result<Audio, String> {
         })
         .map_err(|e| e.to_string())?;
     tracing::info!(fonte = %source, "computer audio on");
-    Ok(Audio { stop, packets, source })
+    Ok(Audio { stop, packets, source, problem })
 }
 
 /// Records `secs` seconds of audio, without encoding (for tests).
-pub fn record(secs: u64) -> Result<Vec<f32>, String> {
+pub fn record(secs: u64, plan: Plan) -> Result<Vec<f32>, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(1024);
     #[cfg(target_os = "linux")]
-    linux::start(tx, stop.clone())?;
+    linux::start(tx, stop.clone(), plan)?;
     #[cfg(target_os = "windows")]
-    windows::start(tx, stop.clone())?;
+    windows::start(tx, stop.clone(), plan, Problem::default())?;
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    drop(tx);
+    drop((tx, plan));
     let deadline = std::time::Instant::now() + Duration::from_secs(secs);
     let mut out = Vec::new();
     while std::time::Instant::now() < deadline {

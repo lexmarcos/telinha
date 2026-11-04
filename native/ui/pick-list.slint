@@ -1,0 +1,129 @@
+// The panels that pick something from a list of unknown length: what to share
+// (Windows) and which app to hear (Linux). The panel measures itself by its
+// content, so the list is what scrolls once it passes its height.
+
+import { Palette, Space, Radius, Size, Type, Motion } from "tokens.slint";
+import { AppState, PickRow } from "state.slint";
+import { Header, Label } from "surface.slint";
+import { Note, NoteTone } from "note.slint";
+
+component Gap inherits Rectangle { in property <length> size; height: root.size; }
+
+// A row: icon + text cut with an ellipsis, and a check when it is the chosen one.
+component ListRow inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> chosen;
+    callback clicked();
+
+    property <color> fg: root.chosen ? Palette.phosphor : Palette.text;
+    height: Size.item-h;
+    border-radius: Radius.item;
+    background: touch.pressed ? Palette.phosphor.with-alpha(0.16) : touch.has-hover ? Palette.room-raised : Palette.room-raised.with-alpha(0);
+    animate background { duration: Motion.press; }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: Space.m - 2px;
+        padding-right: Space.m - 2px;
+        spacing: Space.m - 2px;
+        VerticalLayout {
+            alignment: center;
+            Image { source: root.icon; colorize: root.fg; width: Size.icon; height: Size.icon; }
+        }
+        Text {
+            text: root.label;
+            color: root.fg;
+            font-size: Type.body;
+            font-weight: root.chosen ? Type.semibold : Type.regular;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.chosen: VerticalLayout {
+            alignment: center;
+            Image { source: @image-url("icons/check.svg"); colorize: root.fg; width: Size.icon; height: Size.icon; }
+        }
+    }
+}
+
+// Scrolls past `Size.list-h`. The thin bar on the side only exists when it does.
+component ScrollList inherits Rectangle {
+    property <length> full: body.preferred-height;
+    height: min(root.full, Size.list-h);
+
+    flick := Flickable {
+        width: parent.width;
+        height: parent.height;
+        content-width: parent.width;
+        content-height: root.full;
+        body := VerticalLayout {
+            width: flick.width;
+            @children
+        }
+    }
+    if root.full > Size.list-h: Rectangle {
+        x: root.width - self.width;
+        y: -flick.content-y / root.full * root.height;
+        width: Size.scroll-bar;
+        height: root.height * root.height / root.full;
+        border-radius: self.width / 2;
+        background: Palette.rim;
+    }
+}
+
+export component SourcePanel inherits VerticalLayout {
+    Header { title: "O que transmitir"; back: true; go-back => { AppState.open(1); } }
+    Gap { size: Space.s; }
+    ScrollList {
+        Label { text: "Telas"; }
+        Gap { size: Space.xs; }
+        for row[i] in AppState.source-monitors: ListRow {
+            icon: @image-url("icons/monitor.svg");
+            label: row.label;
+            clicked => { AppState.pick-source(i); }
+        }
+        if AppState.source-windows.length > 0: Gap { size: Space.s; }
+        if AppState.source-windows.length > 0: Label { text: "Janelas"; }
+        if AppState.source-windows.length > 0: Gap { size: Space.xs; }
+        for row[i] in AppState.source-windows: ListRow {
+            icon: @image-url("icons/window.svg");
+            label: row.label;
+            clicked => { AppState.pick-source(AppState.source-monitors.length + i); }
+        }
+    }
+    if AppState.source-note != "": Gap { size: Space.s; }
+    if AppState.source-note != "": Note { text: AppState.source-note; tone: NoteTone.warn; }
+    if AppState.source-windows.length > 0: Gap { size: Space.s; }
+    if AppState.source-windows.length > 0: Note { text: "Com uma janela, só o som dela entra na transmissão."; }
+    if AppState.notice != "": Gap { size: Space.s; }
+    if AppState.notice != "": Note { text: AppState.notice; tone: AppState.notice-tone; }
+}
+
+export component AudioAppPanel inherits VerticalLayout {
+    Header { title: "De qual app vem o som?"; back: true; go-back => { AppState.open(1); } }
+    Gap { size: Space.s; }
+    Note { text: "O sistema não diz de qual app é a janela. Só o que você escolher aqui entra na transmissão."; }
+    Gap { size: Space.s; }
+    ScrollList {
+        ListRow {
+            icon: @image-url("icons/mute.svg");
+            label: "Sem som";
+            chosen: AppState.audio-none;
+            clicked => { AppState.pick-audio-app(-1); }
+        }
+        for row[i] in AppState.audio-apps: ListRow {
+            icon: @image-url("icons/sound.svg");
+            label: row.label;
+            chosen: row.chosen;
+            clicked => { AppState.pick-audio-app(i); }
+        }
+    }
+    if AppState.audio-apps.length == 0: Gap { size: Space.xs + 2px; }
+    if AppState.audio-apps.length == 0: Note { text: "Nenhum app tocando agora. Dê play e ele aparece aqui."; }
+    if AppState.notice != "": Gap { size: Space.s; }
+    if AppState.notice != "": Note { text: AppState.notice; tone: AppState.notice-tone; }
+}

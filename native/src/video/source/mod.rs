@@ -25,9 +25,14 @@ impl PixelFormat {
 pub enum Pixels {
     /// In memory, 4 bytes per pixel.
     Cpu(Vec<u8>),
-    /// On the GPU (Linux): a DMA-BUF buffer from the compositor, with no copy at all.
+    /// On the GPU (Linux): a DMA-BUF buffer from the compositor, with no copy at
+    /// all. The buffer can be larger than the frame: `buffer` is its size and
+    /// `corner` where the frame's picture starts in it.
     #[cfg(target_os = "linux")]
-    DmaBuf { fd: std::os::fd::OwnedFd, offset: u32, size: u32, modifier: u64 },
+    DmaBuf { fd: std::os::fd::OwnedFd, offset: u32, size: u32, modifier: u64, buffer: (u32, u32), corner: (u32, u32) },
+    /// On the GPU (Windows): a frame from Windows.Graphics.Capture.
+    #[cfg(target_os = "windows")]
+    D3d11(super::ffi::Frame),
 }
 
 impl Pixels {
@@ -49,6 +54,11 @@ pub struct CpuFrame {
 pub trait CpuSource: Send {
     /// Next frame, waiting at most `timeout`.
     fn next(&mut self, timeout: Duration) -> Option<CpuFrame>;
+
+    /// The source is gone for good (a window closed, say), and what to tell the person.
+    fn ended(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Frame buffers in memory, reused: a 4K frame is 33 MB, and a fresh one

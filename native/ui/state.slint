@@ -4,6 +4,12 @@
 import { NoteTone } from "note.slint";
 import { DotData } from "dots.slint";
 
+// A row in a panel's list.
+export struct PickRow {
+    label: string,
+    chosen: bool,
+}
+
 export global AppState {
     // Channel
     in property <int> session; // 0 not in a channel, 1 connecting, 2 in a channel
@@ -41,13 +47,22 @@ export global AppState {
     in property <NoteTone> encoder-tone;
     in property <string> upload-note;
 
+    // What to share (panel 6) and which app to hear (panel 7). `audio-label` is
+    // the menu line that leads back to the second: empty when there is no choice.
+    in property <[PickRow]> source-monitors;
+    in property <[PickRow]> source-windows;
+    in property <string> source-note;
+    in property <[PickRow]> audio-apps;
+    in property <bool> audio-none;
+    in property <string> audio-label;
+
     // Join a channel
     in-out property <string> join-text;
     in property <bool> join-digits;
     in-out property <string> name;
     in property <bool> joining;
 
-    callback open(int); // 1 menu, 2 quality, 3 join, 5 toast
+    callback open(int); // 1 menu, 2 quality, 3 join, 5 toast, 6 what to share, 7 which app to hear
     callback dismiss();
     callback update();
     callback start-live();
@@ -63,4 +78,6 @@ export global AppState {
     callback set-fps(int);
     callback set-priority(int);
     callback set-audio(int);
+    callback pick-source(int);
+    callback pick-audio-app(int);
 }

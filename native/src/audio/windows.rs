@@ -6,6 +6,10 @@
 //! up again every few seconds (on a thread of its own: a full process scan
 //! would stall the 10 ms capture loop), so opening or restarting it
 //! mid-stream works.
+//!
+//! Streaming a single window, the same API runs in inclusion mode on that window's
+//! process tree. Nothing else may be heard then: if that fails the stream goes on
+//! silent and says so (`plan`), instead of the default output as above.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -13,7 +17,8 @@ use std::sync::mpsc::SyncSender;
 
 use wasapi::{AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat, initialize_mta};
 
-use super::{CHANNELS, RATE};
+use super::plan::{self, OnFailure, Plan};
+use super::{CHANNELS, Problem, RATE};
 
 /// Discord's main executables. Helpers (overlay, updater) also start with
 /// "discord" but are not where the call's audio plays.
@@ -55,16 +60,29 @@ fn discord_pid() -> Option<u32> {
         .map(|(pid, _)| pid.as_u32())
 }
 
-pub fn start(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<String, String> {
+pub fn start(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, plan: Plan, problem: Problem) -> Result<String, String> {
+    let source = match &plan {
+        Plan::ProcessTree(_) => "só o som da janela",
+        _ => "todo o som do computador menos o Discord",
+    };
     std::thread::Builder::new()
         .name("telinha-wasapi".into())
         .spawn(move || {
-            if let Err(e) = run(tx, stop) {
+            let result = match &plan {
+                Plan::ProcessTree(pid) => run_tree(&tx, &stop, *pid),
+                Plan::AllButDiscord => run(&tx, &stop, &plan),
+                Plan::App { .. } => Err("picking an app by hand only exists on Linux".to_owned()),
+            };
+            if let Err(e) = result {
                 tracing::error!("WASAPI audio: {e}");
+                // Whichever way the capture failed, a window's stream stays silent.
+                if let OnFailure::Silence(note) = plan::on_isolation_failure(&plan) {
+                    *problem.lock().unwrap() = Some(note.to_owned());
+                }
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok("todo o som do computador menos o Discord".to_owned())
+    Ok(source.to_owned())
 }
 
 /// How often Discord is looked up again: opened, restarted or updated after
@@ -91,24 +109,34 @@ fn watch_discord(stop: Arc<AtomicBool>) -> Arc<AtomicU32> {
     pid
 }
 
-fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<(), String> {
+fn run(tx: &SyncSender<Vec<f32>>, stop: &Arc<AtomicBool>, plan: &Plan) -> Result<(), String> {
     let _boost = crate::realtime::boost(crate::realtime::Task::Audio);
     initialize_mta().ok().map_err(|e| format!("COM: {e:?}"))?;
     let discord = watch_discord(stop.clone());
     while !stop.load(Ordering::Relaxed) {
         let pid = discord.load(Ordering::Relaxed);
-        capture(&tx, &stop, (pid != 0).then_some(pid), &discord)?;
+        capture(tx, stop, plan, (pid != 0).then_some(pid), &discord)?;
     }
     Ok(())
 }
 
+/// Captures only a process and its children, until the stream stops.
+fn run_tree(tx: &SyncSender<Vec<f32>>, stop: &AtomicBool, pid: u32) -> Result<(), String> {
+    let _boost = crate::realtime::boost(crate::realtime::Task::Audio);
+    initialize_mta().ok().map_err(|e| format!("COM: {e:?}"))?;
+    // `true` is PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE (`false`, used
+    // below, excludes it). There is deliberately no fallback here.
+    let client = AudioClient::new_application_loopback_client(pid, true).map_err(|e| e.to_string())?;
+    tracing::info!(pid, "audio: only this window's process tree");
+    pump(client, tx, stop, false, || false)
+}
+
 /// Captures until the stream stops or Discord's process changes.
-fn capture(tx: &SyncSender<Vec<f32>>, stop: &AtomicBool, discord: Option<u32>, now: &AtomicU32) -> Result<(), String> {
-    let format = WaveFormat::new(32, 32, &SampleType::Float, RATE as usize, CHANNELS, None);
+fn capture(tx: &SyncSender<Vec<f32>>, stop: &AtomicBool, plan: &Plan, discord: Option<u32>, now: &AtomicU32) -> Result<(), String> {
     // Whether our own chimes reach the capture (then they are silenced).
     let mut hears_us = discord.is_some();
     let pid = discord.unwrap_or_else(std::process::id);
-    let mut client = match AudioClient::new_application_loopback_client(pid, false) {
+    let client = match AudioClient::new_application_loopback_client(pid, false) {
         Ok(c) => {
             match discord {
                 Some(d) => tracing::info!(discord_pid = d, "audio: everything except Discord's process tree"),
@@ -116,12 +144,28 @@ fn capture(tx: &SyncSender<Vec<f32>>, stop: &AtomicBool, discord: Option<u32>, n
             }
             c
         }
-        Err(e) => {
-            tracing::warn!("no process exclusion (old Windows?), Discord will be heard: {e}");
-            hears_us = true;
-            default_loopback()?
-        }
+        Err(e) => match plan::on_isolation_failure(plan) {
+            OnFailure::WholeOutput => {
+                tracing::warn!("no process exclusion (old Windows?), Discord will be heard: {e}");
+                hears_us = true;
+                default_loopback()?
+            }
+            OnFailure::Silence(_) => return Err(e.to_string()),
+        },
     };
+    let previous = discord.unwrap_or(0);
+    pump(client, tx, stop, hears_us, || {
+        let current = now.load(Ordering::Relaxed);
+        if current != previous {
+            tracing::info!(before = ?discord, now = current, "Discord changed; restarting the audio capture");
+        }
+        current != previous
+    })
+}
+
+/// Reads from an activated client until the stream stops or `restart` says so.
+fn pump(mut client: AudioClient, tx: &SyncSender<Vec<f32>>, stop: &AtomicBool, hears_us: bool, restart: impl Fn() -> bool) -> Result<(), String> {
+    let format = WaveFormat::new(32, 32, &SampleType::Float, RATE as usize, CHANNELS, None);
     let mode = StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: 100_000 };
     client.initialize_client(&format, &Direction::Capture, &mode).map_err(|e| e.to_string())?;
     let event = client.set_get_eventhandle().map_err(|e| e.to_string())?;
@@ -145,9 +189,7 @@ fn capture(tx: &SyncSender<Vec<f32>>, stop: &AtomicBool, discord: Option<u32>, n
                 let _ = tx.try_send(samples);
             }
         }
-        let current = now.load(Ordering::Relaxed);
-        if current != discord.unwrap_or(0) {
-            tracing::info!(before = ?discord, now = current, "Discord changed; restarting the audio capture");
+        if restart() {
             break;
         }
         if event.wait_for_event(200).is_err() {

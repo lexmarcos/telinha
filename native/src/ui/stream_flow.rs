@@ -30,6 +30,8 @@ pub enum Step {
 pub enum StreamFlow {
     #[default]
     Idle,
+    /// The app's own picker is open: nothing has started, not even a channel.
+    Choosing,
     /// The channel for this stream is being opened.
     Creating,
     /// The capture was asked for. `created`: the channel was opened by this flow.
@@ -39,6 +41,32 @@ pub enum StreamFlow {
 }
 
 impl StreamFlow {
+    /// The button was clicked where the app asks what to share. `true`: ask now.
+    pub fn choose(&mut self, place: Place) -> bool {
+        let asks = *self == Self::Idle && matches!(place, Place::Outside | Place::Channel);
+        if asks {
+            *self = Self::Choosing;
+        }
+        asks
+    }
+
+    /// Something was picked: `begin` takes it from here. `false` if the flow is
+    /// not waiting for that anymore (the channel it was in dropped, say).
+    pub fn chosen(&mut self) -> bool {
+        let waiting = *self == Self::Choosing;
+        if waiting {
+            *self = Self::Idle;
+        }
+        waiting
+    }
+
+    /// The picker closed without a pick. Nothing happened, so nothing to undo.
+    pub fn cancel_choice(&mut self) {
+        if *self == Self::Choosing {
+            *self = Self::Idle;
+        }
+    }
+
     /// The button was clicked, or the channel it asked for has just joined.
     pub fn begin(&mut self, place: Place) -> Step {
         let (next, step) = match (*self, place) {
@@ -61,7 +89,8 @@ impl StreamFlow {
         *self = Self::Idle;
     }
 
-    /// The engine reported a failure. `true`: leave the channel this flow opened.
+    /// The engine reported a failure, or the system's picker was cancelled.
+    /// `true`: leave the channel this flow opened.
     pub fn failed(&mut self) -> bool {
         match *self {
             Self::Starting { created: true } => {
@@ -90,6 +119,7 @@ impl StreamFlow {
     pub fn label(self, place: Place) -> &'static str {
         match self {
             Self::Starting { .. } => "Iniciando a transmissão…",
+            Self::Choosing => "Transmitir",
             Self::Leaving => "Saindo do canal…",
             Self::Creating => "Conectando…",
             Self::Idle if place == Place::Connecting => "Conectando…",
@@ -206,6 +236,70 @@ mod tests {
         assert_eq!(flow.begin(Place::Connecting), Step::Wait);
         assert_eq!(flow.begin(Place::Live), Step::Wait);
         assert_eq!(flow, StreamFlow::Idle);
+    }
+
+    #[test]
+    fn seletor_vem_antes_de_criar_a_sala() {
+        let mut flow = StreamFlow::default();
+        assert!(flow.choose(Place::Outside));
+        assert_eq!(flow, StreamFlow::Choosing);
+        assert_eq!(flow.begin(Place::Outside), Step::Wait, "no channel while choosing");
+        assert!(flow.busy(Place::Outside));
+        assert!(flow.chosen());
+        assert_eq!(flow.begin(Place::Outside), Step::Create);
+        // When the channel joins, straight to the capture: no second question.
+        assert!(!flow.choose(Place::Channel));
+        assert_eq!(flow.begin(Place::Channel), Step::Capture);
+        assert_eq!(flow, StreamFlow::Starting { created: true });
+    }
+
+    #[test]
+    fn cancelar_o_seletor_nao_deixa_nada_para_tras() {
+        for place in [Place::Outside, Place::Channel] {
+            let mut flow = StreamFlow::default();
+            assert!(flow.choose(place));
+            flow.cancel_choice();
+            assert_eq!(flow, StreamFlow::Idle);
+            assert!(!flow.failed(), "nothing to leave");
+            assert_eq!(flow.label(place), "Transmitir");
+            assert!(flow.choose(place), "can try again");
+        }
+    }
+
+    #[test]
+    fn seletor_em_sala_existente_nao_a_marca_como_criada() {
+        let mut flow = StreamFlow::default();
+        assert!(flow.choose(Place::Channel));
+        assert!(flow.chosen());
+        assert_eq!(flow.begin(Place::Channel), Step::Capture);
+        assert_eq!(flow, StreamFlow::Starting { created: false });
+        assert!(!flow.failed(), "the channel was already there");
+    }
+
+    #[test]
+    fn nao_abre_o_seletor_com_algo_em_andamento() {
+        for mut flow in [StreamFlow::Creating, StreamFlow::Starting { created: true }, StreamFlow::Leaving, StreamFlow::Choosing] {
+            let before = flow;
+            assert!(!flow.choose(Place::Channel), "{before:?}");
+            assert_eq!(flow, before);
+        }
+        let mut flow = StreamFlow::default();
+        assert!(!flow.choose(Place::Connecting));
+        assert!(!flow.choose(Place::Live));
+        assert_eq!(flow, StreamFlow::Idle);
+    }
+
+    #[test]
+    fn escolha_tardia_nao_inicia_nada() {
+        // The channel dropped while the picker was open.
+        let mut flow = StreamFlow::default();
+        flow.choose(Place::Channel);
+        assert!(!flow.failed());
+        assert!(!flow.chosen());
+        // Cancelling a choice that is not open changes nothing.
+        let mut starting = StreamFlow::Starting { created: true };
+        starting.cancel_choice();
+        assert_eq!(starting, StreamFlow::Starting { created: true });
     }
 
     #[test]

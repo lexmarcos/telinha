@@ -18,6 +18,9 @@ use super::signaling::{self, Signal, Signaling};
 use super::rtp;
 use super::turbo;
 use super::{Command, Event};
+use crate::audio::plan::{self, AudioApp, Decision, Plan, Selection};
+use crate::capture::{self, Opened};
+use crate::capture::target::{CaptureKind, CaptureTarget, OpenError};
 use crate::config::{Priority, Quality};
 use super::Viewer;
 use crate::video::{self, EncodedFrame, Settings};
@@ -115,8 +118,37 @@ struct Seen {
     keys: u64,
 }
 
+/// The capture is being opened, which may take as long as the person takes in
+/// the system's picker. The session keeps serving everyone else meanwhile.
+struct Opening {
+    id: u64,
+    /// Gives up on the picker.
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+/// The capture is open and the video thread is starting: until it has an encoder
+/// running, nobody is told the stream is on air.
+struct Starting {
+    id: u64,
+    kind: CaptureKind,
+    control: Arc<video::Control>,
+    frames: broadcast::Sender<Arc<EncodedFrame>>,
+    since: Instant,
+}
+
+/// How long a capture gets to send its first image. A window that stays minimized
+/// sends nothing on most compositors: better to say so than to wait in silence.
+const FIRST_FRAME: Duration = Duration::from_secs(15);
+
 struct Live {
     audio: Option<crate::audio::Audio>,
+    /// What is being captured, which decides what is heard (`audio::plan`).
+    kind: CaptureKind,
+    /// Which app the person chose to hear (a window on Linux). Outlives `audio`,
+    /// so turning the sound off and on keeps the choice.
+    selection: Selection,
+    /// Who was last playing, for the panel.
+    apps: Vec<AudioApp>,
     control: Arc<video::Control>,
     frames: broadcast::Sender<Arc<EncodedFrame>>,
     quality: Quality,
@@ -249,6 +281,13 @@ struct Session {
     /// Who was in the channel at the last roster (for the join and leave
     /// chimes). None until the first roster: that one is not news.
     heard: Option<std::collections::HashSet<String>>,
+    /// Where things that finish in the background report back to `serve`.
+    input: Option<mpsc::Sender<Input>>,
+    target: CaptureTarget,
+    opening: Option<Opening>,
+    starting: Option<Starting>,
+    /// Tells a late answer from a capture already given up on.
+    attempt: u64,
 }
 
 pub async fn run(mut cmds: mpsc::Receiver<Command>, ui: mpsc::Sender<Event>) {
@@ -343,6 +382,11 @@ async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, c
         relayed: Default::default(),
         no_hevc: Default::default(),
         heard: None,
+        input: None,
+        target: CaptureTarget::Default,
+        opening: None,
+        starting: None,
+        attempt: 0,
     };
     s.spawn_signal_forwarder(sig_rx, peer_rx);
 
@@ -384,12 +428,19 @@ async fn wait_open(rx: &mut mpsc::Receiver<Signal>) -> Result<(), String> {
 enum Input {
     Signal(Signal),
     Peer(PeerEvent),
+    /// The capture finished opening (or the person gave up).
+    Capture { id: u64, result: Result<Opened, OpenError> },
+    /// The video thread has an encoder running, or will not.
+    VideoUp { id: u64 },
+    /// Who is playing sound changed.
+    AudioApps(Vec<AudioApp>),
 }
 
 impl Session {
     /// Merges signaling and connection events into a single channel (`inputs`).
     fn spawn_signal_forwarder(&mut self, mut sig_rx: mpsc::Receiver<Signal>, mut peer_rx: mpsc::Receiver<PeerEvent>) {
         let (tx, rx) = mpsc::channel(1024);
+        self.input = Some(tx.clone());
         let t2 = tx.clone();
         tokio::spawn(async move {
             while let Some(s) = sig_rx.recv().await {
@@ -427,6 +478,9 @@ impl Session {
                     }
                     Some(Input::Signal(s)) => if self.on_signal(s).await.is_err() { return },
                     Some(Input::Peer(p)) => if self.on_peer(p).await.is_err() { return },
+                    Some(Input::Capture { id, result }) => self.on_capture(id, result).await,
+                    Some(Input::VideoUp { id }) => self.on_video_up(id).await,
+                    Some(Input::AudioApps(apps)) => self.on_audio_apps(apps).await,
                     None => return,
                 },
                 _ = tick.tick() => {
@@ -911,26 +965,28 @@ impl Session {
 
     async fn on_command(&mut self, cmd: Command) {
         match cmd {
-            Command::StartLive { quality } => {
+            Command::StartLive { quality, target } => {
                 self.quality = quality;
-                if let Err(e) = self.start_live().await {
-                    let _ = self.ui.send(Event::Failed(e)).await;
-                }
+                self.target = target;
+                self.open_capture();
             }
             Command::StopLive => self.stop_live().await,
+            Command::SetAudioApp { app } => {
+                if let Some(live) = &mut self.live {
+                    tracing::info!(?app, "the person chose what to hear");
+                    live.selection.set(app);
+                    let (apps, selected) = (live.apps.clone(), live.selection.get());
+                    let _ = self.ui.send(Event::AudioApps { apps, selected, ask: false }).await;
+                }
+            }
             Command::SetQuality { quality } => {
                 let audio_changed = quality.system_audio != self.quality.system_audio;
                 self.quality = quality;
-                if audio_changed && self.live.is_some() {
-                    // Toggling audio changes the tracks: restart the stream.
-                    self.stop_live().await;
-                    if let Err(e) = self.start_live().await {
-                        let _ = self.ui.send(Event::Failed(e)).await;
-                    }
-                    return;
-                }
                 if let Some(live) = &mut self.live {
                     live.quality = quality;
+                }
+                if audio_changed && self.live.is_some() {
+                    self.switch_audio().await;
                 }
                 if let (Some(bitrate), Some(live)) = (self.ceiling(), &self.live) {
                     live.bitrate.store(bitrate, Ordering::Relaxed);
@@ -941,24 +997,90 @@ impl Session {
         }
     }
 
-    async fn start_live(&mut self) -> Result<(), String> {
-        if self.live.is_some() {
-            return Ok(());
+    /// Step one of a stream: open the capture, away from this task, since the
+    /// system's picker takes as long as the person does and the channel has to go
+    /// on meanwhile (someone joining, connections being answered).
+    fn open_capture(&mut self) {
+        if self.live.is_some() || self.opening.is_some() || self.starting.is_some() {
+            return;
         }
-        let source = crate::capture::open(self.quality).await?;
-        let audio = if self.quality.system_audio {
-            crate::audio::start().map_err(|e| tracing::warn!("no computer audio: {e}")).ok()
-        } else {
-            None
+        let Some(input) = self.input.clone() else { return };
+        self.attempt += 1;
+        let id = self.attempt;
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        self.opening = Some(Opening { id, cancel: Some(cancel) });
+        let (quality, target) = (self.quality, self.target.clone());
+        tokio::spawn(async move {
+            let result = capture::open(quality, &target, cancelled).await;
+            let _ = input.send(Input::Capture { id, result }).await;
+        });
+    }
+
+    /// Step two: start the video on what was opened, with nobody told yet.
+    async fn on_capture(&mut self, id: u64, result: Result<Opened, OpenError>) {
+        if self.opening.as_ref().map(|o| o.id) != Some(id) {
+            return;
+        }
+        let given_up = self.opening.take().is_some_and(|o| o.cancel.is_none());
+        let Opened { source, kind } = match result {
+            Ok(_) if given_up => {
+                let _ = self.ui.send(Event::CaptureCancelled).await;
+                return;
+            }
+            Ok(opened) => opened,
+            Err(OpenError::Cancelled) => {
+                tracing::info!("capture cancelled in the picker");
+                let _ = self.ui.send(Event::CaptureCancelled).await;
+                return;
+            }
+            Err(OpenError::Failed(e)) => {
+                let _ = self.ui.send(Event::Failed(e)).await;
+                return;
+            }
         };
         let (frames, _) = broadcast::channel(8);
+        let control = video::start(source, self.quality, frames.clone());
+        self.starting = Some(Starting { id, kind, control: control.clone(), frames, since: Instant::now() });
+        // Whatever can still go wrong with the capture or the encoders shows up
+        // in the thread's first moments.
+        let Some(input) = self.input.clone() else { return };
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let st = control.stats();
+                let settled = st.encoder.is_some() || st.error.is_some() || st.ended.is_some();
+                if settled || control.stop.load(Ordering::Relaxed) {
+                    let _ = input.send(Input::VideoUp { id }).await;
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Step three: the video runs, so the stream is on air.
+    async fn on_video_up(&mut self, id: u64) {
+        if self.starting.as_ref().map(|s| s.id) != Some(id) {
+            return;
+        }
+        let Some(Starting { kind, control, frames, .. }) = self.starting.take() else { return };
+        let st = control.stats();
+        if let Some(e) = st.error.or(st.ended) {
+            control.stop.store(true, Ordering::Relaxed);
+            let _ = self.ui.send(Event::Failed(e)).await;
+            return;
+        }
+        let selection = Selection::default();
+        let (audio, audio_note) = self.start_audio(&kind, &selection);
         // The video thread starts at the ideal for the real screen size, which
         // capture reports on the first frame; until then (for the data channel
         // budget), the 1080p one.
         let bitrate = self.quality.bitrate((1920, 1080));
-        let control = video::start(source, self.quality, frames.clone());
+        let _ = self.ui.send(Event::Capturing { window: kind.is_window() }).await;
         self.live = Some(Live {
             audio,
+            kind,
+            selection,
+            apps: Vec::new(),
             control,
             frames,
             quality: self.quality,
@@ -974,13 +1096,117 @@ impl Session {
             outlier: None,
             codec: video::Codec::from_env(),
         });
+        self.ask_for_app().await;
         self.set_sharing(true).await;
         self.sync_viewers().await;
         let _ = self.ui.send(Event::Live(true)).await;
-        Ok(())
+        // After it: a warning about the sound cannot be replaced by the invite's toast.
+        if let Some(note) = audio_note {
+            let _ = self.ui.send(Event::Notice(note)).await;
+        }
+    }
+
+    /// Starts the sound `plan` says this capture gets, if any, and what the person
+    /// has to be told about it.
+    fn start_audio(&self, kind: &CaptureKind, selection: &Selection) -> (Option<crate::audio::Audio>, Option<String>) {
+        let plan = match plan::decide(self.quality.system_audio, kind) {
+            Decision::Off => return (None, None),
+            Decision::Silent(why) => {
+                tracing::warn!("{why}");
+                return (None, Some(why.to_owned()));
+            }
+            Decision::AllButDiscord => Plan::AllButDiscord,
+            Decision::ProcessTree(pid) => Plan::ProcessTree(pid),
+            Decision::AskApp => {
+                let input = self.input.clone();
+                let list: plan::AppList = Arc::new(move |apps| {
+                    if let Some(input) = &input {
+                        let _ = input.try_send(Input::AudioApps(apps));
+                    }
+                });
+                Plan::App { selection: selection.clone(), list: Some(list) }
+            }
+        };
+        match crate::audio::start(plan) {
+            Ok(audio) => (Some(audio), None),
+            Err(e) => {
+                tracing::warn!("no computer audio: {e}");
+                (None, kind.is_window().then(|| plan::CANNOT_ISOLATE.to_owned()))
+            }
+        }
+    }
+
+    /// With a window on Linux and the sound on, the person has to say which app
+    /// to hear. The stream does not wait for it: it goes on air silent.
+    async fn ask_for_app(&self) {
+        let Some(live) = &self.live else { return };
+        if plan::decide(self.quality.system_audio, &live.kind) == Decision::AskApp {
+            let selected = live.selection.get();
+            let ask = selected.is_none();
+            let _ = self.ui.send(Event::AudioApps { apps: live.apps.clone(), selected, ask }).await;
+        }
+    }
+
+    async fn on_audio_apps(&mut self, apps: Vec<AudioApp>) {
+        let Some(live) = &mut self.live else { return };
+        live.apps = apps.clone();
+        let selected = live.selection.get();
+        let _ = self.ui.send(Event::AudioApps { apps, selected, ask: false }).await;
+    }
+
+    /// The sound was turned on or off in the middle of a stream. The capture and
+    /// the video go on untouched: the portal would otherwise ask again what to
+    /// share, with viewers watching. Only the connections that carry sound change.
+    async fn switch_audio(&mut self) {
+        let Some(live) = &mut self.live else { return };
+        live.audio = None;
+        let (kind, selection) = (live.kind.clone(), live.selection.clone());
+        let (audio, note) = self.start_audio(&kind, &selection);
+        if let Some(note) = note {
+            let _ = self.ui.send(Event::Notice(note)).await;
+        }
+        let has_audio = audio.is_some();
+        let packets = audio.as_ref().map(|a| a.packets.clone());
+        if let Some(live) = &mut self.live {
+            live.audio = audio;
+        }
+        // Viewers on the data channel get their sound in a call of its own, which
+        // `sync_viewers` opens when there is sound. An RTP call has it in the same
+        // connection as the video: it keeps a track it already has (quiet while
+        // there is no sound), and only one without has to be made again.
+        let mut reopen = Vec::new();
+        for (id, c) in &mut self.conns {
+            if c.kind != Kind::Media {
+                continue;
+            }
+            if c.audio_only && !has_audio {
+                reopen.push(id.clone());
+            } else if let (Some(track), Some(packets)) = (c.audio_track.clone(), &packets) {
+                if c.open {
+                    c.audio_sender = Some(rtp::spawn_audio(track, packets.subscribe()));
+                }
+            } else if !c.audio_only && has_audio {
+                reopen.push(id.clone());
+            }
+        }
+        for id in reopen {
+            self.close_conn(&id).await;
+        }
+        self.sync_viewers().await;
+        self.ask_for_app().await;
     }
 
     async fn stop_live(&mut self) {
+        // Not on air yet: what was under way is given up on, and answers for itself.
+        if let Some(opening) = &mut self.opening {
+            if let Some(cancel) = opening.cancel.take() {
+                let _ = cancel.send(());
+            }
+        }
+        if let Some(starting) = self.starting.take() {
+            starting.control.stop.store(true, Ordering::Relaxed);
+            let _ = self.ui.send(Event::CaptureCancelled).await;
+        }
         let Some(live) = self.live.take() else { return };
         live.control.stop.store(true, Ordering::Relaxed);
         let turbo: Vec<String> = self.conns.iter().filter(|(_, c)| matches!(c.kind, Kind::Turbo | Kind::Media)).map(|(k, _)| k.clone()).collect();
@@ -1214,6 +1440,13 @@ impl Session {
     }
 
     async fn on_tick(&mut self) {
+        if self.starting.as_ref().is_some_and(|s| s.since.elapsed() >= FIRST_FRAME) {
+            if let Some(starting) = self.starting.take() {
+                starting.control.stop.store(true, Ordering::Relaxed);
+                let what = if starting.kind.is_window() { "A janela escolhida não mandou nenhuma imagem. Confira se ela está aberta, sem minimizar, e tente de novo." } else { "A tela escolhida não mandou nenhuma imagem. Tente de novo." };
+                let _ = self.ui.send(Event::Failed(what.to_owned())).await;
+            }
+        }
         let Some(live) = &mut self.live else { return };
         let st = live.control.stats();
         if video::NVENC_DRIVER_TOO_OLD.swap(false, Ordering::Relaxed) {
@@ -1231,6 +1464,15 @@ impl Session {
             self.stop_live().await;
             let _ = self.ui.send(Event::Failed(msg)).await;
             return;
+        }
+        // What was being shared is gone (a window closed): the channel stays.
+        if let Some(why) = st.ended.clone() {
+            self.stop_live().await;
+            let _ = self.ui.send(Event::Notice(why)).await;
+            return;
+        }
+        if let Some(why) = live.audio.as_ref().and_then(crate::audio::Audio::take_problem) {
+            let _ = self.ui.send(Event::Notice(why)).await;
         }
         // The video thread starts (and restarts, when the screen changes size)
         // at the ideal bitrate for the real size: follow it.

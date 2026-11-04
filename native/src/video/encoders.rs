@@ -15,12 +15,22 @@ pub enum SourceKind {
     Prime,
     /// Windows desktop capture inside FFmpeg itself (ddagrab).
     Desktop,
+    /// BGRA frames already on the GPU, from a window's capture (Windows). Goes
+    /// through the same chains as `Desktop`, only without the capture in them.
+    D3d11,
 }
 
 pub struct Ctx {
     pub native: (u32, u32),
     pub out: (u32, u32),
     pub fps: u32,
+    /// The filter that captures, when the chain itself does (`ddagrab`).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub capture: Option<String>,
+    /// With a DMA-BUF: the part of the buffer with the picture, once it is in
+    /// memory (x, y). VAAPI's own converter reads it from the frame itself.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub corner: (u32, u32),
 }
 
 impl Ctx {
@@ -123,13 +133,19 @@ fn cpu_convert(c: &Ctx, format: &str) -> String {
 #[cfg(target_os = "linux")]
 const VAAPI_BT709: &str = "out_color_matrix=bt709:out_color_primaries=bt709:out_color_transfer=bt709:out_range=tv";
 
+/// Cuts a downloaded DMA-BUF down to its picture. `c.native` is the picture's size.
+#[cfg(target_os = "linux")]
+fn cpu_crop(c: &Ctx) -> String {
+    format!("crop={}:{}:{}:{}", c.native.0, c.native.1, c.corner.0, c.corner.1)
+}
+
 fn join(parts: &[String]) -> String {
     parts.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join(",")
 }
 
 #[cfg(target_os = "windows")]
 fn desktop(c: &Ctx) -> String {
-    format!("ddagrab=output_idx=0:framerate={}:draw_mouse=1", c.fps)
+    c.capture.clone().unwrap_or_default()
 }
 
 #[cfg(target_os = "windows")]
@@ -270,7 +286,7 @@ pub fn candidates() -> Vec<Candidate> {
             hardware: true,
             device: None,
             source: SourceKind::Prime,
-            chain: |c| join(&["hwdownload".into(), "format=bgr0".into(), cpu_scale(c)]),
+            chain: |c| join(&["hwdownload".into(), "format=bgr0".into(), cpu_crop(c), cpu_scale(c)]),
             options: nvenc_opts,
         });
         v.push(Candidate {
@@ -280,7 +296,7 @@ pub fn candidates() -> Vec<Candidate> {
             hardware: false,
             device: None,
             source: SourceKind::Prime,
-            chain: |c| join(&["hwdownload".into(), "format=bgr0".into(), cpu_convert(c, "yuv420p")]),
+            chain: |c| join(&["hwdownload".into(), "format=bgr0".into(), cpu_crop(c), cpu_convert(c, "yuv420p")]),
             options: openh264_opts,
         });
     }

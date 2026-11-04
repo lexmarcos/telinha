@@ -17,6 +17,7 @@ use bytes::Bytes;
 use ffmpeg_sys_next as ff;
 use tokio::sync::broadcast;
 
+use crate::capture::target::{self, DesktopOutput, Resize};
 use crate::config::Quality;
 use crate::engine::EncoderInfo;
 use encoders::{Candidate, Ctx, SourceKind};
@@ -105,6 +106,8 @@ pub struct Stats {
     pub encoder: Option<EncoderInfo>,
     pub native: Option<(u32, u32)>,
     pub error: Option<String>,
+    /// The source went away (a window closed): what to tell the person.
+    pub ended: Option<String>,
 }
 
 /// How long each stage took per frame (ms) since the last read, for the
@@ -197,8 +200,9 @@ impl Control {
 
 pub enum Source {
     Cpu(Box<dyn CpuSource>),
+    /// A monitor, captured inside the pipeline's own graph.
     #[cfg(target_os = "windows")]
-    Desktop,
+    Desktop(DesktopOutput),
 }
 
 /// Starts streaming. Frames come out on `out`; `Control` changes quality,
@@ -248,15 +252,54 @@ fn open_encoder(cand: &Candidate, graph: &Graph, ctx: &Ctx, bitrate: u32) -> ffi
     })
 }
 
+/// What a pipeline needs to know about where its frames come from, beyond the
+/// shape of each frame.
+#[derive(Default)]
+struct Origin {
+    /// The monitor (with `SourceKind::Desktop`).
+    output: DesktopOutput,
+    /// The context of frames that arrive on the GPU (with `SourceKind::D3d11`).
+    gpu_frames: Option<HwFrames>,
+    /// Where the picture sits in its buffer, when that is larger than the
+    /// picture (a window's DMA-BUF): the buffer's size and the picture's corner.
+    layout: Layout,
+}
+
+/// See `Origin::layout`.
+type Layout = Option<((u32, u32), (u32, u32))>;
+
+fn layout_of(f: &CpuFrame) -> Layout {
+    #[cfg(target_os = "linux")]
+    if let source::Pixels::DmaBuf { buffer, corner, .. } = &f.data {
+        return Some((*buffer, *corner));
+    }
+    let _ = f;
+    None
+}
+
+impl Origin {
+    /// The device `ddagrab` opens its monitor on: it only reaches the outputs of
+    /// that one adapter, and by default it picks the first.
+    fn desktop_device(&self) -> ffi::Result<Option<HwDevice>> {
+        if self.output.adapter == 0 {
+            return Ok(None);
+        }
+        HwDevice::create(ff::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA, Some(&self.output.adapter.to_string())).map(Some)
+    }
+}
+
 /// Tries candidates in order; the first that builds the graph and opens the
 /// encoder wins. `start_at` skips the ones that already failed.
 /// `pixel` is the pixel format (BGRX/RGBX), even when the pixels are on the GPU.
-fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Settings, start_at: usize) -> ffi::Result<(Pipeline, Encoder)> {
+fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Settings, start_at: usize, origin: &Origin) -> ffi::Result<(Pipeline, Encoder)> {
     let out = s.quality.output_size(native);
-    let ctx = Ctx { native, out, fps: s.quality.fps };
+    let capture = (kind == SourceKind::Desktop).then(|| target::ddagrab_filter(origin.output, s.quality.fps));
+    let corner = origin.layout.map_or((0, 0), |(_, corner)| corner);
+    let ctx = Ctx { native, out, fps: s.quality.fps, capture, corner };
+    let chains = if kind == SourceKind::D3d11 { SourceKind::Desktop } else { kind };
     let mut last = ffi::Error("nenhum codificador disponível".into());
     for (i, cand) in encoders::candidates().iter().enumerate().skip(start_at) {
-        if cand.source != kind || cand.codec != s.codec {
+        if cand.source != chains || cand.codec != s.codec {
             continue;
         }
         let attempt = || -> ffi::Result<(Pipeline, Encoder)> {
@@ -264,21 +307,33 @@ fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Set
                 #[cfg(target_os = "linux")]
                 (SourceKind::Prime, _) => Some(HwDevice::create(ff::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM, Some(&render_node()))?),
                 (_, Some((t, d))) => Some(HwDevice::create(t, d)?),
+                (SourceKind::Desktop, None) => origin.desktop_device()?,
                 _ => None,
             };
             #[cfg(target_os = "linux")]
             let frames = match (kind, device.as_ref()) {
-                (SourceKind::Prime, Some(dev)) => Some(HwFrames::drm_prime(dev, pixel, native.0, native.1)?),
+                (SourceKind::Prime, Some(dev)) => {
+                    let (w, h) = origin.layout.map_or(native, |(buffer, _)| buffer);
+                    Some(HwFrames::drm_prime(dev, pixel, w, h)?)
+                }
                 _ => None,
             };
             #[cfg(not(target_os = "linux"))]
             let frames: Option<HwFrames> = None;
+            let (in_w, in_h) = origin.layout.filter(|_| kind == SourceKind::Prime).map_or(native, |(buffer, _)| buffer);
             let input = (kind != SourceKind::Desktop).then(|| InputSpec {
-                width: native.0,
-                height: native.1,
-                pix_fmt: if frames.is_some() { ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME } else { pixel },
+                width: in_w,
+                height: in_h,
+                pix_fmt: match kind {
+                    SourceKind::D3d11 => ff::AVPixelFormat::AV_PIX_FMT_D3D11,
+                    _ if frames.is_some() => ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME,
+                    _ => pixel,
+                },
                 fps: s.quality.fps,
-                hw_frames: frames.as_ref(),
+                hw_frames: frames.as_ref().or(origin.gpu_frames.as_ref()),
+                // How gfxcapture labels its frames: told up front, like the graph
+                // of a `ddagrab` knows it from the filter.
+                color: if kind == SourceKind::D3d11 { D3D11_COLOR } else { "" },
             });
             // With DMA-BUF the device comes from the frames themselves (hwmap).
             let graph_device = if frames.is_some() { None } else { device.as_ref() };
@@ -305,6 +360,9 @@ fn build(kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, s: &Set
     Err(last)
 }
 
+/// The `buffer` options that match gfxcapture's frames (sRGB, full range).
+const D3D11_COLOR: &str = ":colorspace=gbr:range=pc";
+
 /// First GPU render node (the same one VAAPI opens by default).
 #[cfg(target_os = "linux")]
 pub(crate) fn render_node() -> String {
@@ -314,14 +372,14 @@ pub(crate) fn render_node() -> String {
 /// Rebuilds everything for `next`. The old pipeline goes first (NVENC
 /// allows only a few sessions per GPU, and with the old one open the build
 /// could settle for a worse encoder); if `next` fails, back to `current`.
-fn rebuild(pipe: Pipeline, stage: &EncodeStage, kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, current: Settings, next: Settings) -> ffi::Result<(Pipeline, Settings)> {
+fn rebuild(pipe: Pipeline, stage: &EncodeStage, kind: SourceKind, native: (u32, u32), pixel: ff::AVPixelFormat, current: Settings, next: Settings, origin: &Origin) -> ffi::Result<(Pipeline, Settings)> {
     drop(stage.remove());
     drop(pipe);
-    let (pipe, encoder, settings) = match build(kind, native, pixel, &next, 0) {
+    let (pipe, encoder, settings) = match build(kind, native, pixel, &next, 0, origin) {
         Ok((p, e)) => (p, e, next),
         Err(e) => {
             tracing::warn!("new quality failed ({e}); keeping the previous one");
-            let (p, e) = build(kind, native, pixel, &current, 0)?;
+            let (p, e) = build(kind, native, pixel, &current, 0, origin)?;
             (p, e, current)
         }
     };
@@ -339,7 +397,7 @@ fn set_bitrate(pipe: &Pipeline, encoder: &mut Encoder, native: (u32, u32), s: &S
         encoder.set_bitrate(bitrate);
         return Ok(bitrate);
     }
-    let ctx = Ctx { native, out: pipe.out, fps: s.quality.fps };
+    let ctx = Ctx { native, out: pipe.out, fps: s.quality.fps, capture: None, corner: (0, 0) };
     encoder.close();
     match open_encoder(cand, &pipe.graph, &ctx, bitrate) {
         Ok(e) => {
@@ -359,10 +417,14 @@ fn graph_out(g: &Graph) -> (u32, u32) {
 }
 
 fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast::Sender<Arc<EncodedFrame>>) -> ffi::Result<()> {
+    let mut origin = Origin::default();
     let (kind, mut cpu) = match source {
         Source::Cpu(s) => (SourceKind::Cpu, Some(s)),
         #[cfg(target_os = "windows")]
-        Source::Desktop => (SourceKind::Desktop, None),
+        Source::Desktop(output) => {
+            origin.output = output;
+            (SourceKind::Desktop, None)
+        }
     };
 
     // Native size: from the first frame (CPU) or from the graph itself (Desktop).
@@ -372,19 +434,26 @@ fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast:
             if control.stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            if let Some(f) = src.next(Duration::from_millis(500)) {
+            if let Some(why) = src.ended() {
+                control.stats.lock().unwrap().ended = Some(why);
+                return Ok(());
+            }
+            if let Some(f) = src.next(Duration::from_millis(100)) {
                 let n = (frame_kind(&f), (f.width, f.height), f.pixel.av());
                 first = Some(f);
                 break n;
             }
         },
-        None => (kind, desktop_size(quality.fps)?, ff::AVPixelFormat::AV_PIX_FMT_BGRA),
+        None => (kind, desktop_size(quality.fps, &origin)?, ff::AVPixelFormat::AV_PIX_FMT_BGRA),
     };
+    let mut frames_ctx = first.as_ref().map_or(0, frame_context);
+    follow_gpu_frames(&mut origin, first.as_ref());
+    origin.layout = first.as_ref().and_then(layout_of);
     control.stats.lock().unwrap().native = Some(native);
 
     // Sized for the real screen from the start: no encoder reopen a second in.
     let mut settings = Settings { quality, bitrate: quality.bitrate(native), codec: Codec::from_env() };
-    let (mut pipe, encoder) = build(kind, native, pixel, &settings, 0)?;
+    let (mut pipe, encoder) = build(kind, native, pixel, &settings, 0, &origin)?;
     // Declared after the pipeline so it goes first: its thread stops and the
     // encoder closes before the graph and devices do.
     let stage = EncodeStage::start(control.clone(), out.clone());
@@ -402,6 +471,9 @@ fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast:
     let mut early: Option<CpuFrame> = None;
     // When the last input went into the graph (for the conversion time).
     let mut convert_from: Option<Instant> = None;
+    // A window being dragged: the newest frame at the new size, until it settles.
+    let mut resize = Resize::default();
+    let mut resized: Option<CpuFrame> = None;
 
     loop {
         if control.stop.load(Ordering::Relaxed) {
@@ -415,7 +487,7 @@ fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast:
                     || next.quality.fps != settings.quality.fps
                     || next.codec != settings.codec;
                 if rebuild_all {
-                    (pipe, settings) = rebuild(pipe, &stage, kind, native, pixel, settings, next)?;
+                    (pipe, settings) = rebuild(pipe, &stage, kind, native, pixel, settings, next, &origin)?;
                     last_input = None;
                 } else {
                     if let Some(encoder) = stage.encoder().as_mut() {
@@ -434,6 +506,11 @@ fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast:
         // Input: CPU frame pushed into the graph, or the graph captures on its own.
         let mut got_input = true;
         if let Some(src) = cpu.as_mut() {
+            if let Some(why) = src.ended() {
+                tracing::info!("capture source ended: {why}");
+                control.stats.lock().unwrap().ended = Some(why);
+                return Ok(());
+            }
             let period = Duration::from_secs_f64(1.0 / settings.quality.fps.max(1) as f64);
             // Wakes up for the held frame's turn or for the next repeat, and at
             // least every 50 ms to see stop and quality requests.
@@ -461,24 +538,52 @@ fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast:
                 // Nothing newer came in time: the held frame goes out.
                 frame = early.take();
             }
+            // Only the size changed, as on every frame of a window being dragged:
+            // that waits until it settles (the repeats below keep the viewers
+            // going meanwhile, and a window that stops sends nothing more, so the
+            // newest frame is held to go out then).
+            if let Some(f) = frame.take() {
+                let same_but_size = frame_kind(&f) == kind && f.pixel.av() == pixel && frame_context(&f) == frames_ctx;
+                if same_but_size && ((f.width, f.height) != native || layout_of(&f) != origin.layout) {
+                    resize.saw((f.width, f.height), now);
+                    resized = Some(f);
+                } else {
+                    if same_but_size {
+                        resize.clear();
+                        resized = None;
+                    }
+                    frame = Some(f);
+                }
+            }
+            if resize.due(now) {
+                resize.clear();
+                frame = resized.take().or(frame);
+            }
             match frame {
                 Some(f) => {
                     // The screen changed size (monitor or window switch) or
                     // PipeWire switched from DMA-BUF to memory: rebuild everything.
                     let shape = (frame_kind(&f), (f.width, f.height), f.pixel.av());
-                    if shape != (kind, native, pixel) {
+                    if shape != (kind, native, pixel) || frame_context(&f) != frames_ctx || layout_of(&f) != origin.layout {
                         tracing::info!(w = f.width, h = f.height, gpu = f.data.on_gpu(), "capture changed; rebuilding video");
                         (kind, native, pixel) = shape;
+                        frames_ctx = frame_context(&f);
+                        follow_gpu_frames(&mut origin, Some(&f));
+                        origin.layout = layout_of(&f);
                         control.stats.lock().unwrap().native = Some(native);
                         // The ideal bitrate for the new size (the session follows).
                         let next = Settings { quality: settings.quality, bitrate: settings.quality.bitrate(native), codec: settings.codec };
                         drop(stage.remove());
                         drop(pipe);
                         let encoder;
-                        (pipe, encoder) = build(kind, native, pixel, &next, 0)?;
+                        (pipe, encoder) = build(kind, native, pixel, &next, 0, &origin)?;
                         stage.install(encoder);
                         settings = next;
-                        last_input = None;
+                        // Read on the way out of the DMA-BUF arm below, the only one that can skip.
+                        #[cfg_attr(target_os = "windows", allow(unused_assignments))]
+                        {
+                            last_input = None;
+                        }
                         control.gop.lock().unwrap().clear();
                         control.request_key();
                         publish_encoder(control, &pipe, native);
@@ -490,9 +595,14 @@ fn run(source: Source, quality: Quality, control: &Arc<Control>, out: broadcast:
                     let mut av = match f.data {
                         source::Pixels::Cpu(data) => Frame::from_cpu(data, f.width, f.height, f.stride, pixel, pts),
                         #[cfg(target_os = "linux")]
-                        source::Pixels::DmaBuf { fd, offset, size, modifier } => {
+                        source::Pixels::DmaBuf { fd, offset, size, modifier, buffer, corner } => {
                             let Some(frames) = pipe.frames.as_ref() else { continue };
-                            Frame::from_dmabuf(fd, size, offset, f.stride, modifier, pixel, frames, native, pts)
+                            Frame::from_dmabuf(fd, size, offset, f.stride, modifier, pixel, frames, buffer, (corner, native), pts)
+                        }
+                        #[cfg(target_os = "windows")]
+                        source::Pixels::D3d11(mut av) => {
+                            av.set_pts(pts);
+                            av
                         }
                     };
                     last_input = av.share();
@@ -679,7 +789,32 @@ pub(crate) mod pace {
 use pace::Pacer;
 
 fn frame_kind(f: &CpuFrame) -> SourceKind {
+    #[cfg(target_os = "windows")]
+    if matches!(f.data, source::Pixels::D3d11(_)) {
+        return SourceKind::D3d11;
+    }
     if f.data.on_gpu() { SourceKind::Prime } else { SourceKind::Cpu }
+}
+
+/// Which GPU frames context a frame belongs to (0 for none). A window's capture
+/// reopened at another size has its own device: a pipeline built for the old one
+/// cannot use these frames, whatever their size.
+fn frame_context(f: &CpuFrame) -> usize {
+    #[cfg(target_os = "windows")]
+    if let source::Pixels::D3d11(av) = &f.data {
+        return unsafe { (*av.0).hw_frames_ctx.as_ref().map_or(0, |r| r.data as usize) };
+    }
+    let _ = f;
+    0
+}
+
+/// The context the next pipeline takes its frames from.
+fn follow_gpu_frames(origin: &mut Origin, f: Option<&CpuFrame>) {
+    #[cfg(target_os = "windows")]
+    if let Some(source::Pixels::D3d11(av)) = f.map(|f| &f.data) {
+        origin.gpu_frames = HwFrames::of(av);
+    }
+    let _ = (origin, f);
 }
 
 fn publish_encoder(control: &Control, pipe: &Pipeline, _native: (u32, u32)) {
@@ -693,13 +828,14 @@ fn publish_encoder(control: &Control, pipe: &Pipeline, _native: (u32, u32)) {
 }
 
 #[cfg(target_os = "windows")]
-fn desktop_size(fps: u32) -> ffi::Result<(u32, u32)> {
-    let g = Graph::new(&format!("ddagrab=output_idx=0:framerate={fps}"), None, None)?;
+fn desktop_size(fps: u32, origin: &Origin) -> ffi::Result<(u32, u32)> {
+    let device = origin.desktop_device()?;
+    let g = Graph::new(&target::ddagrab_filter(origin.output, fps), None, device.as_ref())?;
     Ok(g.out_size())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn desktop_size(_: u32) -> ffi::Result<(u32, u32)> {
+fn desktop_size(_: u32, _: &Origin) -> ffi::Result<(u32, u32)> {
     Err(ffi::Error("captura da área de trabalho só existe no Windows".into()))
 }
 
@@ -782,6 +918,166 @@ mod tests {
         g.push(&f(6, false, GOP_MAX_BYTES + 1));
         g.push(&f(7, false, 10));
         assert!(g.replay(|_, _| true).is_none());
+    }
+
+    /// A source like a captured window: frames only when it wants, any size.
+    struct Janela {
+        /// (when to send, from the start; size)
+        frames: std::collections::VecDeque<(Duration, (u32, u32))>,
+        start: Instant,
+        ended_at: Option<Duration>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Janela {
+        fn new(frames: Vec<(u64, (u32, u32))>, ended_at: Option<u64>) -> (Self, Arc<AtomicBool>) {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let frames = frames.into_iter().map(|(ms, size)| (Duration::from_millis(ms), size)).collect();
+            (Self { frames, start: Instant::now(), ended_at: ended_at.map(Duration::from_millis), dropped: dropped.clone() }, dropped)
+        }
+    }
+
+    impl CpuSource for Janela {
+        fn next(&mut self, timeout: Duration) -> Option<CpuFrame> {
+            let elapsed = self.start.elapsed();
+            let due = self.frames.front().is_some_and(|(at, _)| *at <= elapsed);
+            if !due {
+                std::thread::sleep(timeout.min(Duration::from_millis(5)));
+                return None;
+            }
+            let (_, (width, height)) = self.frames.pop_front()?;
+            let data = source::Pixels::Cpu(vec![128; (width * height * 4) as usize]);
+            Some(CpuFrame { data, width, height, stride: width * 4, pixel: source::PixelFormat::Bgrx, captured: Instant::now() })
+        }
+
+        fn ended(&self) -> Option<String> {
+            self.ended_at.filter(|at| self.start.elapsed() >= *at).map(|_| "fechou".to_owned())
+        }
+    }
+
+    impl Drop for Janela {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Everything that came out in `ms`, keeping an eye on the thread's error.
+    /// `None` when this machine has no encoder to try it on.
+    fn saida(control: &Control, rx: &mut broadcast::Receiver<Arc<EncodedFrame>>, ms: u64) -> Option<Vec<Arc<EncodedFrame>>> {
+        let until = Instant::now() + Duration::from_millis(ms);
+        let mut out = Vec::new();
+        while Instant::now() < until {
+            match rx.try_recv() {
+                Ok(f) => out.push(f),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+            if let Some(e) = control.stats().error {
+                eprintln!("no encoder here, skipping: {e}");
+                return None;
+            }
+        }
+        Some(out)
+    }
+
+    fn espera(what: &AtomicBool, ms: u64) -> bool {
+        let until = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < until {
+            if what.load(Ordering::Relaxed) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    fn qualidade() -> Quality {
+        Quality { fps: 30, ..Quality::default() }
+    }
+
+    #[test]
+    fn janela_parada_continua_viva_e_para_quando_pedem() {
+        let (janela, dropped) = Janela::new(vec![(0, (320, 240)), (30, (320, 240))], None);
+        let (tx, mut rx) = broadcast::channel(256);
+        let control = start(Source::Cpu(Box::new(janela)), qualidade(), tx);
+        // Nothing new from the source after the first moments: viewers still get
+        // repeats, without which they would freeze.
+        let Some(out) = saida(&control, &mut rx, 1500) else { return };
+        assert!(out.len() >= 5, "only {} frames from a still window", out.len());
+        let tail = saida(&control, &mut rx, 800).unwrap_or_default();
+        assert!(!tail.is_empty(), "the repeats stopped");
+        // Someone joins: a keyframe, with no new image from the window.
+        control.request_key();
+        let after = saida(&control, &mut rx, 800).unwrap_or_default();
+        assert!(after.iter().any(|f| f.key), "no keyframe from a still window");
+        // The stop request is seen with no frame to wake the loop.
+        control.stop.store(true, Ordering::Relaxed);
+        assert!(espera(&dropped, 1000), "the video thread did not stop");
+    }
+
+    #[test]
+    fn janela_fechada_encerra_com_aviso() {
+        let (janela, dropped) = Janela::new(vec![(0, (320, 240))], Some(300));
+        let (tx, mut rx) = broadcast::channel(256);
+        let control = start(Source::Cpu(Box::new(janela)), qualidade(), tx);
+        if saida(&control, &mut rx, 200).is_none() {
+            return;
+        }
+        assert!(espera(&dropped, 1000), "the video thread did not end");
+        assert_eq!(control.stats().ended.as_deref(), Some("fechou"));
+        assert_eq!(control.stats().error, None, "ending is not a failure");
+    }
+
+    #[test]
+    fn janela_que_fecha_antes_do_primeiro_quadro_tambem_avisa() {
+        let (janela, dropped) = Janela::new(vec![], Some(50));
+        let (tx, _rx) = broadcast::channel(16);
+        let control = start(Source::Cpu(Box::new(janela)), qualidade(), tx);
+        assert!(espera(&dropped, 1000));
+        assert_eq!(control.stats().ended.as_deref(), Some("fechou"));
+    }
+
+    #[test]
+    fn arrastar_a_janela_nao_reabre_a_cada_pixel() {
+        // A size per frame for 600 ms, odd ones included, then the window stops:
+        // no frame comes after the last size.
+        let mut frames = vec![(0, (320, 240))];
+        frames.extend((0..40u32).map(|k| (100 + k as u64 * 15, (321 + k * 3, 241 + k))));
+        let last = *frames.last().unwrap();
+        let (janela, _dropped) = Janela::new(frames, None);
+        let (tx, mut rx) = broadcast::channel(256);
+        let control = start(Source::Cpu(Box::new(janela)), qualidade(), tx);
+        let Some(out) = saida(&control, &mut rx, 1600) else { return };
+        let mut sizes: Vec<(u32, u32)> = Vec::new();
+        for f in &out {
+            if sizes.last() != Some(&(f.width, f.height)) {
+                sizes.push((f.width, f.height));
+            }
+        }
+        let wanted = qualidade().output_size(last.1);
+        assert_eq!(sizes, [(320, 240), wanted], "reopened once, for the size it settled on");
+        assert!(sizes.iter().all(|(w, h)| w % 2 == 0 && h % 2 == 0));
+        assert_eq!(control.stats().native, Some(last.1));
+        control.stop.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn janela_minuscula_e_de_tamanho_impar_abre_o_codificador() {
+        let (janela, _dropped) = Janela::new(vec![(0, (37, 21)), (40, (37, 21))], None);
+        let (tx, mut rx) = broadcast::channel(64);
+        let control = start(Source::Cpu(Box::new(janela)), qualidade(), tx);
+        let Some(out) = saida(&control, &mut rx, 800) else { return };
+        let f = out.first().expect("a frame");
+        assert_eq!((f.width, f.height), qualidade().output_size((37, 21)));
+        control.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// The options a window's frames are announced with have to exist in the
+    /// `buffer` filter: on Windows a wrong name would fail every candidate at once.
+    #[test]
+    fn opcoes_de_cor_da_entrada_existem() {
+        let input = InputSpec { width: 64, height: 64, pix_fmt: ff::AVPixelFormat::AV_PIX_FMT_BGR0, fps: 30, hw_frames: None, color: D3D11_COLOR };
+        assert!(Graph::new("", Some(&input), None).is_ok());
     }
 
     #[test]

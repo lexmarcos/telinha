@@ -73,6 +73,8 @@ Labels in sentence case, never all caps.
 - **Panel:** width 264, radius 20, inner padding 14. Sits 10 away from the
   bubble, aligned to its top.
 - **Menu item:** height 36, radius 10, 16 icon on the left.
+- **List in a panel:** scrolls past `list_h` 252 (seven rows), with a bar of `scroll_bar` 3 in `rim`
+  on the side that only exists when it scrolls.
 - **Segmented control:** height 32, radius 11 on the track and 9 on the thumb.
 - **Button:** height 36, pill shape.
 
@@ -163,6 +165,23 @@ the system's capture picker. If the capture is cancelled or fails in a channel o
 way, the app leaves it: the bubble goes back to the start and the error appears. A
 channel the person was already in stays.
 
+### What to share (`pick-list`, panel 6)
+Windows only: the system has no picker to offer, so **Transmitir** opens this panel first, before
+any channel exists. "Telas" and "Janelas", with a monitor or window icon, in one list that
+scrolls; titles too long for the panel end in an ellipsis. Picking one starts everything. `Esc`,
+the bubble or the back arrow give up, and that leaves nothing behind. Where windows cannot be
+captured (before Windows 10 2004) the group is not there, and a warning note says why. With
+`TELINHA_MOCK_SELETOR=1` it also shows on Linux, with the fake engine's sources.
+
+On Linux the system's own picker does this job, on every stream.
+
+### Which app to hear (`pick-list`, panel 7)
+"De qual app vem o som?": Linux only, when the system's picker returned a window, since it does
+not say whose process that is. "Sem som" and the apps playing now, in a list that follows them
+live, the chosen one in `phosphor` with a check. The stream goes on air without waiting for this:
+until someone chooses, nothing is heard. While streaming, a menu item leads back here
+("Escolher o som", "Som: Firefox").
+
 ### Segmented control (`segmented`)
 `room_raised` track with a thumb that slides with `spring_ui` to the chosen
 option. The thumb has the same top light as the material, in miniature.
@@ -190,3 +209,4 @@ UI copy stays in Brazilian Portuguese; the examples below are the actual strings
   número com quem te convidou."
 - No decorative ellipses (only on something in progress, "Conectando…"), no
   exclamation marks, no emoji.
+- The size note says what is being captured: "Sua tela: 2560×1440", "Sua janela: 1280×800".

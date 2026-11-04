@@ -9,6 +9,8 @@ pub mod session;
 pub mod signaling;
 pub mod turbo;
 
+pub use crate::audio::plan::AudioApp;
+pub use crate::capture::target::CaptureTarget;
 use crate::config::Quality;
 
 /// Someone watching (the dots below the bubble).
@@ -26,9 +28,12 @@ pub enum Command {
     /// Joins a channel by number or invite link.
     Join { input: String, name: String, server: Option<String> },
     /// Starts streaming, open to anyone with the link.
-    StartLive { quality: Quality },
+    /// `target`: what to capture (`Default` when the system's own picker chooses).
+    StartLive { quality: Quality, target: CaptureTarget },
     StopLive,
     SetQuality { quality: Quality },
+    /// Which app to hear while streaming a window on Linux (`None`: none).
+    SetAudioApp { app: Option<String> },
     Leave,
 }
 
@@ -48,6 +53,13 @@ pub enum Event {
     Failed(String),
     Viewers(Vec<Viewer>),
     Live(bool),
+    /// The system's picker was cancelled: nothing started, and nothing to report.
+    CaptureCancelled,
+    /// What is being captured, right before `Live(true)`.
+    Capturing { window: bool },
+    /// Who can be heard while streaming a window on Linux, and who was chosen.
+    /// `ask`: nothing is chosen and the person should be asked now.
+    AudioApps { apps: Vec<AudioApp>, selected: Option<String>, ask: bool },
     Encoder(EncoderInfo),
     /// Size of the screen to be captured (for the resolution options).
     Screen { width: u32, height: u32 },

@@ -2,13 +2,16 @@
 //! joining a channel, people arriving, and the stream. Enabled with TELINHA_MOCK=1.
 //! TELINHA_MOCK_FALHA makes one part fail: `servidor` (no known server), `conexao`
 //! (opening a channel), `captura` (starting the stream) or `copia` (the clipboard,
-//! which the app checks).
+//! which the app checks). TELINHA_MOCK_PORTAL=janela plays the Linux portal
+//! answering with a window; `cancelar` cancelling. Sources and apps for the
+//! panels of what to share and what to hear are made up here too.
 
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::{Command, EncoderInfo, Event, Viewer};
+use super::{AudioApp, CaptureTarget, Command, EncoderInfo, Event, Viewer};
+use crate::capture::target::{DesktopOutput, MonitorEntry, SourceList, WindowEntry};
 
 pub async fn run(mut rx: mpsc::Receiver<Command>, out: mpsc::Sender<Event>) {
     let send = async |e: Event| {
@@ -36,14 +39,26 @@ pub async fn run(mut rx: mpsc::Receiver<Command>, out: mpsc::Sender<Event>) {
                 send(Event::Screen { width: 2560, height: 1440 }).await;
                 send(Event::Viewers(demo_viewers())).await;
             }
-            Command::StartLive { .. } if in_channel => {
-                // The capture picker: commands wait behind it, as in the real engine.
+            Command::StartLive { target, .. } if in_channel => {
+                // The capture opening, or the system's picker.
                 tokio::time::sleep(Duration::from_millis(1000)).await;
                 if fail == "captura" {
-                    send(Event::Failed("A captura foi cancelada no seletor de tela.".into())).await;
+                    send(Event::Failed("Não consegui abrir a captura da tela.".into())).await;
                     continue;
                 }
-                send(Event::Encoder(EncoderInfo { name: "NVENC".into(), hardware: true, width: 2560, height: 1440 })).await;
+                let portal = std::env::var("TELINHA_MOCK_PORTAL").unwrap_or_default();
+                if portal == "cancelar" {
+                    send(Event::CaptureCancelled).await;
+                    continue;
+                }
+                let window = matches!(target, CaptureTarget::Window { .. }) || portal == "janela";
+                let (width, height) = if window { (1281, 801) } else { (2560, 1440) };
+                send(Event::Capturing { window }).await;
+                send(Event::Screen { width, height }).await;
+                send(Event::Encoder(EncoderInfo { name: "NVENC".into(), hardware: true, width: width & !1, height: height & !1 })).await;
+                if portal == "janela" {
+                    send(Event::AudioApps { apps: audio_apps(), selected: None, ask: true }).await;
+                }
                 send(Event::Live(true)).await;
             }
             Command::StopLive if in_channel => send(Event::Live(false)).await,
@@ -51,8 +66,40 @@ pub async fn run(mut rx: mpsc::Receiver<Command>, out: mpsc::Sender<Event>) {
                 in_channel = false;
                 send(Event::Left).await;
             }
+            Command::SetAudioApp { app } => send(Event::AudioApps { apps: audio_apps(), selected: app, ask: false }).await,
             Command::StartLive { .. } | Command::StopLive | Command::SetQuality { .. } | Command::Leave => {}
         }
+    }
+}
+
+/// Apps playing sound, for the "De qual app vem o som?" panel.
+pub fn audio_apps() -> Vec<AudioApp> {
+    [("firefox", "Firefox"), ("spotify", "Spotify"), ("mpv", "mpv")].map(|(id, label)| AudioApp { id: id.into(), label: label.into() }).into()
+}
+
+/// Monitors and windows, for the panel that picks what to share. Enough windows
+/// for the list to scroll, and a title too long to fit.
+pub fn sources() -> SourceList {
+    let monitor = |n: u32, label: &str| MonitorEntry { label: label.into(), target: CaptureTarget::Monitor(DesktopOutput { adapter: 0, output: n }) };
+    let titles = [
+        "Mozilla Firefox",
+        "relatorio-final-versao-revisada-pelo-pessoal-do-financeiro.xlsx - Excel",
+        "Visual Studio Code",
+        "Spotify Premium",
+        "Bloco de notas",
+        "Explorador de Arquivos",
+        "Calculadora",
+        "Prompt de Comando",
+        "Paint",
+    ];
+    SourceList {
+        monitors: vec![monitor(0, "Tela 1 (principal), 2560×1440"), monitor(1, "Tela 2, 1920×1080")],
+        windows: titles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| WindowEntry { title: (*t).to_owned(), target: CaptureTarget::Window { hwnd: i as u64 + 1, title: (*t).to_owned() } })
+            .collect(),
+        no_windows: None,
     }
 }
 

@@ -8,6 +8,8 @@
 
 slint::include_modules!();
 
+mod picker;
+
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -40,6 +42,10 @@ enum Panel {
     Join = 3,
     /// A short message beside the bubble that closes on its own.
     Toast = 5,
+    /// What to share (app/picker.rs).
+    Source = 6,
+    /// Which app to hear (app/picker.rs).
+    AudioApp = 7,
 }
 
 impl Panel {
@@ -48,6 +54,8 @@ impl Panel {
             2 => Self::Quality,
             3 => Self::Join,
             5 => Self::Toast,
+            6 => Self::Source,
+            7 => Self::AudioApp,
             _ => Self::Menu,
         }
     }
@@ -66,6 +74,7 @@ struct Controller {
     session: Session,
     /// How far the "Transmitir" click got (ui/stream_flow.rs).
     flow: StreamFlow,
+    picks: picker::Picks,
     viewers: Vec<Viewer>,
     encoder: Option<EncoderInfo>,
     screen: Option<(u32, u32)>,
@@ -141,6 +150,7 @@ pub fn run() {
         ui: ui.clone_strong(),
         session: Session::Idle,
         flow: StreamFlow::default(),
+        picks: picker::Picks::default(),
         viewers: Vec::new(),
         encoder: None,
         screen: None,
@@ -201,6 +211,8 @@ impl Controller {
         let st = ui.global::<AppState>();
         st.on_open(|i| with(|c| c.open_panel(Panel::from_index(i))));
         st.on_start_live(|| with(|c| c.begin_stream()));
+        st.on_pick_source(|i| with(|c| c.pick_source(i as usize)));
+        st.on_pick_audio_app(|i| with(|c| c.pick_audio_app(i)));
         st.on_stop_live(|| with(|c| c.stop_live()));
         st.on_copy_invite(|| {
             with(|c| {
@@ -300,6 +312,9 @@ impl Controller {
     /* ---------------- painel ---------------- */
 
     fn open_panel(&mut self, kind: Panel) {
+        if kind != Panel::Source {
+            self.cancel_source();
+        }
         let was_closed = self.panel.is_none() || self.open.target() == 0.0;
         let switched = self.panel.is_some_and(|p| p != kind);
         self.panel = Some(kind);
@@ -326,6 +341,9 @@ impl Controller {
         }
         self.render();
         self.animate();
+        if matches!(kind, Panel::Source | Panel::AudioApp) {
+            self.ui.invoke_focus_keys();
+        }
     }
 
     /// Tells the person something: inside the open panel, or in a toast
@@ -356,6 +374,7 @@ impl Controller {
     }
 
     fn close_panel(&mut self) {
+        self.cancel_source();
         if self.panel.is_none() {
             return;
         }
@@ -521,7 +540,7 @@ impl Controller {
         st.set_prio_sel(i32::from(q.priority == Priority::Nitidez));
         st.set_audio_sel(i32::from(q.system_audio));
         let native = self.native();
-        st.set_screen_note(screen_note(self.screen, q).into());
+        st.set_screen_note(screen_note(self.screen, q, self.picks.window).into());
         st.set_prio_note(
             if q.priority == Priority::Fluidez { "Mantém o movimento suave. Bom pra jogos e vídeos." } else { "Mantém a imagem nítida. Bom pra texto e código." }.into(),
         );
@@ -539,6 +558,8 @@ impl Controller {
             _ => format!("Até {} Mb/s de upload por pessoa assistindo.", br(mbps)),
         };
         st.set_upload_note(upload.into());
+
+        self.render_picks();
 
         // Join
         if st.get_join_text().as_str() != self.join_text {
@@ -624,6 +645,7 @@ impl Controller {
     }
 
     fn hide(&mut self) {
+        self.cancel_source();
         self.config.position = Some(self.bubble_position());
         self.config.save();
         // Hide at once: whoever asks to hide doesn't want to watch the panel close.
@@ -720,13 +742,16 @@ impl Controller {
     /// channel that click opened joins. Anything that has to happen before the
     /// capture opens belongs in the `Step::Capture` arm.
     fn begin_stream(&mut self) {
+        if self.ask_source() {
+            return;
+        }
         match self.flow.begin(self.stream_place()) {
             Step::Wait => return,
             Step::Create => {
                 let (name, server) = (self.config.name.clone(), self.config.server.clone());
                 self.send(Command::Create { name, server });
             }
-            Step::Capture => self.send(Command::StartLive { quality: self.config.quality }),
+            Step::Capture => self.send(Command::StartLive { quality: self.config.quality, target: self.picks.target.clone() }),
         }
         self.close_panel();
         self.render();
@@ -805,6 +830,16 @@ impl Controller {
                 }
                 self.tell("", &msg, NoteTone::Error);
             }
+            // Giving up is not a failure to report, but a channel opened only for
+            // this stream goes away the same way.
+            Event::CaptureCancelled => {
+                if self.flow.failed() {
+                    self.send(Command::Leave);
+                }
+                self.picks.target = Default::default();
+            }
+            Event::Capturing { window } => self.picks.window = window,
+            Event::AudioApps { apps, selected, ask } => self.audio_apps(apps, selected, ask),
             Event::Viewers(v) => self.viewers = v,
             Event::Live(on) => {
                 let started = on && matches!(self.session, Session::Channel { live: false, .. });
@@ -816,12 +851,20 @@ impl Controller {
                 }
                 // The invite is how friends get in: it is ready to paste as
                 // soon as the stream starts.
+                tracing::info!(on, started, "stream on air changed");
                 if started {
                     if self.copy_invite() {
+                        tracing::info!("invite copied");
                         self.tell("Convite copiado", "É só colar no chat da galera.", NoteTone::Info);
                     } else {
                         self.tell("Transmitindo", "Não consegui copiar o convite. Clique na bolha e use Copiar convite.", NoteTone::Warn);
                     }
+                }
+                if !on {
+                    self.forget_stream_picks();
+                    // The next stream may capture something else.
+                    self.screen = None;
+                    self.sync_thumbs(true);
                 }
                 self.tally.set_target(if on { 1.0 } else { 0.0 });
                 self.animate();
@@ -837,6 +880,7 @@ impl Controller {
             Event::Notice(msg) => self.tell("", &msg, NoteTone::Warn),
             Event::Left => {
                 self.flow.left();
+                self.forget_stream_picks();
                 self.session = Session::Idle;
                 self.viewers.clear();
                 self.encoder = None;
@@ -884,11 +928,12 @@ impl Controller {
 
 /// The note under the resolution. The size is only known once the capture
 /// reports it, so before that it promises a limit, not a number.
-fn screen_note(screen: Option<(u32, u32)>, q: Quality) -> String {
+fn screen_note(screen: Option<(u32, u32)>, q: Quality, window: bool) -> String {
     match (screen, q.resolution.height()) {
         (Some(native), _) => {
             let (w, h) = q.output_size(native);
-            format!("Sua tela: {}×{}. Saindo em {w}×{h}.", native.0, native.1)
+            let what = if window { "Sua janela" } else { "Sua tela" };
+            format!("{what}: {}×{}. Saindo em {w}×{h}.", native.0, native.1)
         }
         (None, Some(h)) => format!("Saindo em até {h}p. O tamanho exato aparece ao transmitir."),
         (None, None) => "Saindo no tamanho da tela. O tamanho exato aparece ao transmitir.".into(),
@@ -980,6 +1025,15 @@ fn shots(dir: PathBuf) {
             c.config.quality.priority = Priority::Nitidez;
             c.quality_changed();
         }),
+        // Sound off and on while streaming: the capture and the video go on.
+        ("som-desligado", 1500, |c| {
+            c.config.quality.system_audio = false;
+            c.quality_changed();
+        }),
+        ("som-religado", 1500, |c| {
+            c.config.quality.system_audio = true;
+            c.quality_changed();
+        }),
         ("atualizacao", 900, |c| {
             c.close_panel();
             c.update_found(crate::update::Release::sample("0.3.0"));
@@ -988,6 +1042,74 @@ fn shots(dir: PathBuf) {
         ("meio-da-troca", 90, |c| c.open_panel(Panel::Menu)),
         ("fechado", 900, |c| c.close_panel()),
         ("abrindo", 70, |c| c.open_panel(Panel::Menu)),
+        // What to share, from a clean start: the panel, its list scrolled, and
+        // the ways out, which must leave nothing started.
+        ("seletor-preparar", 900, |c| {
+            c.close_panel();
+            c.send(Command::StopLive);
+            c.send(Command::Leave);
+        }),
+        ("seletor", 900, |c| {
+            assert!(c.flow.choose(c.stream_place()));
+            c.show_sources();
+        }),
+        ("seletor-rolado", 500, |c| {
+            use slint::platform::WindowEvent;
+            let x = if c.side_left { SHADOW_ROOM } else { SHADOW_ROOM + BUBBLE + PANEL_GAP } + PANEL_W / 2.0;
+            let position = slint::LogicalPosition::new(x, SHADOW_ROOM + 120.0);
+            c.ui.window().dispatch_event(WindowEvent::PointerMoved { position });
+            c.ui.window().dispatch_event(WindowEvent::PointerScrolled { position, delta_x: 0.0, delta_y: -220.0 });
+        }),
+        ("seletor-esc", 900, |c| {
+            use slint::platform::{Key, WindowEvent};
+            // From outside `with`, like a real key: its handler goes back in there.
+            let ui = c.ui.clone_strong();
+            slint::Timer::single_shot(Duration::from_millis(1), move || {
+                let text: slint::SharedString = Key::Escape.into();
+                ui.window().dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+                ui.window().dispatch_event(WindowEvent::KeyReleased { text });
+            });
+        }),
+        ("seletor-voltar", 700, |c| {
+            tracing::info!(flow = ?c.flow, panel = ?c.panel, session = ?c.session, "after Esc in the picker");
+            assert_eq!(c.flow, StreamFlow::Idle, "Esc cancels");
+            assert!(c.panel.is_none(), "Esc closes");
+            assert_eq!(c.session, Session::Idle, "no channel from cancelling");
+            assert!(c.flow.choose(c.stream_place()));
+            c.show_sources();
+        }),
+        ("seletor-menu", 700, |c| {
+            // The back arrow.
+            c.open_panel(Panel::Menu);
+            assert_eq!(c.flow, StreamFlow::Idle, "going back cancels");
+        }),
+        ("seletor-sem-janela", 800, |c| {
+            assert!(c.flow.choose(c.stream_place()));
+            c.show_sources();
+            c.picks.set_sources_for_shot(crate::capture::target::SourceList {
+                windows: Vec::new(),
+                no_windows: Some("Transmitir uma janela só funciona no Windows 10 versão 2004 ou mais novo. Dá para transmitir a tela inteira.".into()),
+                ..crate::capture::sources()
+            });
+            c.render();
+        }),
+        ("seletor-escolhe-janela", 2600, |c| {
+            c.picks.set_sources_for_shot(crate::capture::sources());
+            c.render();
+            // The third row: the first window. The channel only opens now, and the
+            // stream starts on it (the fake engine takes 900 ms and then 1000).
+            c.pick_source(2);
+        }),
+        ("janela-qualidade", 800, |c| c.open_panel(Panel::Quality)),
+        // A window from the Linux portal: nothing heard until someone says what.
+        ("som-pergunta", 900, |c| {
+            c.on_engine(Event::AudioApps { apps: crate::engine::mock::audio_apps(), selected: None, ask: true });
+        }),
+        ("som-escolhido", 800, |c| c.pick_audio_app(1)),
+        ("som-menu", 800, |c| c.open_panel(Panel::Menu)),
+        ("som-ninguem-tocando", 800, |c| {
+            c.on_engine(Event::AudioApps { apps: Vec::new(), selected: None, ask: true });
+        }),
     ];
     let steps = Rc::new(steps);
     fn next(dir: Rc<PathBuf>, steps: Rc<Vec<Step>>, i: usize) {
@@ -1020,8 +1142,13 @@ mod tests {
     fn nota_da_tela_nao_inventa_tamanho_antes_da_captura() {
         let original = Quality::default();
         let p1080 = Quality { resolution: Resolution::P1080, ..original };
-        assert_eq!(screen_note(None, original), "Saindo no tamanho da tela. O tamanho exato aparece ao transmitir.");
-        assert_eq!(screen_note(None, p1080), "Saindo em até 1080p. O tamanho exato aparece ao transmitir.");
-        assert_eq!(screen_note(Some((2560, 1440)), p1080), "Sua tela: 2560×1440. Saindo em 1920×1080.");
+        assert_eq!(screen_note(None, original, false), "Saindo no tamanho da tela. O tamanho exato aparece ao transmitir.");
+        assert_eq!(screen_note(None, p1080, false), "Saindo em até 1080p. O tamanho exato aparece ao transmitir.");
+        assert_eq!(screen_note(Some((2560, 1440)), p1080, false), "Sua tela: 2560×1440. Saindo em 1920×1080.");
+    }
+
+    #[test]
+    fn nota_diz_janela_quando_e_janela() {
+        assert_eq!(screen_note(Some((1280, 800)), Quality::default(), true), "Sua janela: 1280×800. Saindo em 1280×800.");
     }
 }

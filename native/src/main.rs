@@ -22,9 +22,19 @@ fn main() {
     }
 
     // Audio test: records N seconds (f32 stereo 48 kHz) to teste-som.raw.
+    // --so-do-app NAME hears only that app, as when streaming a window on Linux.
     if let Some(i) = std::env::args().position(|a| a == "--teste-som") {
         let secs: u64 = std::env::args().nth(i + 1).and_then(|s| s.parse().ok()).unwrap_or(5);
-        match audio::record(secs) {
+        let plan = match std::env::args().skip_while(|a| a != "--so-do-app").nth(1) {
+            Some(app) => {
+                let selection = audio::plan::Selection::default();
+                selection.set((app != "-").then_some(app));
+                let list: audio::plan::AppList = std::sync::Arc::new(|apps| println!("playing: {apps:?}"));
+                audio::plan::Plan::App { selection, list: Some(list) }
+            }
+            None => audio::plan::Plan::AllButDiscord,
+        };
+        match audio::record(secs, plan) {
             Ok(s) => {
                 let bytes: Vec<u8> = s.iter().flat_map(|v| v.to_le_bytes()).collect();
                 std::fs::write("teste-som.raw", bytes).expect("file");
@@ -63,7 +73,7 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(1500));
             audio::chime::play(audio::chime::Chime::Leave);
         });
-        match audio::record(5) {
+        match audio::record(5, audio::plan::Plan::AllButDiscord) {
             Ok(s) => println!("stream audio peak while chiming: {:.4}", s.iter().fold(0f32, |m, v| m.max(v.abs()))),
             Err(e) => println!("audio failed: {e}"),
         }
@@ -124,15 +134,17 @@ fn video_test(secs: u64) {
     let (tx, mut rx) = tokio::sync::broadcast::channel(64);
     // --captura uses the real screen (system portal); otherwise, the test
     // pattern (TELINHA_FONTE_TESTE=image.png for a static desktop).
+    let open = |rt: &tokio::runtime::Runtime| rt.block_on(capture::open(quality, &capture::target::CaptureTarget::Default, tokio::sync::oneshot::channel().1));
     let source = if std::env::args().any(|a| a == "--captura") {
         let rt = tokio::runtime::Runtime::new().expect("tokio");
-        match rt.block_on(capture::open(quality)) {
+        match open(&rt) {
             Ok(s) => {
+                println!("captured: {:?}", s.kind);
                 std::mem::forget(rt);
-                s
+                s.source
             }
             Err(e) => {
-                println!("capture failed: {e}");
+                println!("capture failed: {e:?}");
                 return;
             }
         }
@@ -140,10 +152,10 @@ fn video_test(secs: u64) {
         video::Source::Cpu(Box::new(video::source::test::TestPattern::start(1280, 720, quality.fps)))
     } else {
         let rt = tokio::runtime::Runtime::new().expect("tokio");
-        match rt.block_on(capture::open(quality)) {
-            Ok(s) => s,
+        match open(&rt) {
+            Ok(s) => s.source,
             Err(e) => {
-                println!("test source failed: {e}");
+                println!("test source failed: {e:?}");
                 return;
             }
         }
@@ -184,8 +196,8 @@ fn video_test(secs: u64) {
     let st = control.stats();
     let secs_f = start.elapsed().as_secs_f64();
     println!(
-        "encoder: {:?}\nframes: {frames} ({:.1} fps), keyframes: {keys}, bitrate: {:.1} Mb/s\nencoding: {:.1} ms per frame, captured {}, error: {:?}",
-        st.encoder, frames as f64 / secs_f, bytes as f64 * 8.0 / secs_f / 1e6, st.encode_ms.unwrap_or(0.0), st.captured, st.error
+        "encoder: {:?}\nframes: {frames} ({:.1} fps), keyframes: {keys}, bitrate: {:.1} Mb/s\nencoding: {:.1} ms per frame, captured {}, error: {:?}, ended: {:?}",
+        st.encoder, frames as f64 / secs_f, bytes as f64 * 8.0 / secs_f / 1e6, st.encode_ms.unwrap_or(0.0), st.captured, st.error, st.ended
     );
 }
 
@@ -206,7 +218,24 @@ async fn headless(link: Option<String>, server: Option<String>, secs: u64) {
                 println!("event: {e:?}");
                 match e {
                     Event::Joined { .. } => {
-                        let _ = cmd_tx.send(Command::StartLive { quality: config::Quality::default() }).await;
+                        let _ = cmd_tx.send(Command::StartLive { quality: config::Quality::default(), target: Default::default() }).await;
+                    }
+                    // TELINHA_ALTERNA_SOM=N turns the sound off and on every N seconds, as
+                    // the quality panel does, to test that the stream goes on through it.
+                    Event::Live(true) => {
+                        if let Some(n) = std::env::var("TELINHA_ALTERNA_SOM").ok().and_then(|v| v.parse::<u64>().ok()) {
+                            let cmds = cmd_tx.clone();
+                            tokio::spawn(async move {
+                                let mut quality = config::Quality::default();
+                                loop {
+                                    tokio::time::sleep(std::time::Duration::from_secs(n)).await;
+                                    quality.system_audio = !quality.system_audio;
+                                    if cmds.send(Command::SetQuality { quality }).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            });
+                        }
                     }
                     Event::Failed(_) | Event::Left => return,
                     _ => {}

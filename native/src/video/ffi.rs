@@ -90,6 +90,13 @@ impl HwFrames {
         }
     }
 
+    /// The context of frames already on the GPU (Windows.Graphics.Capture's).
+    #[cfg(target_os = "windows")]
+    pub fn of(frame: &Frame) -> Option<Self> {
+        let r = unsafe { ff::av_buffer_ref((*frame.0).hw_frames_ctx) };
+        (!r.is_null()).then_some(Self(r))
+    }
+
     pub fn as_ptr(&self) -> *mut ff::AVBufferRef {
         self.0
     }
@@ -153,6 +160,7 @@ impl Frame {
         sw_format: ff::AVPixelFormat,
         frames: &HwFrames,
         (width, height): (u32, u32),
+        ((left, top), (shown_w, shown_h)): ((u32, u32), (u32, u32)),
         pts: i64,
     ) -> Self {
         use std::os::fd::IntoRawFd;
@@ -184,6 +192,12 @@ impl Frame {
             f.format = ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as i32;
             f.width = width as i32;
             f.height = height as i32;
+            // Only this part is the picture. VAAPI's converter takes its source
+            // region from these (vaapi_vpp.c), so nothing has to be copied.
+            f.crop_left = left as usize;
+            f.crop_top = top as usize;
+            f.crop_right = width.saturating_sub(left + shown_w) as usize;
+            f.crop_bottom = height.saturating_sub(top + shown_h) as usize;
             f.pts = pts;
             f.data[0] = d as *mut u8;
             f.buf[0] = ff::av_buffer_create(d as *mut u8, std::mem::size_of::<ff::AVDRMFrameDescriptor>(), Some(free_desc), ptr::null_mut(), 0);
@@ -230,8 +244,19 @@ pub struct InputSpec<'a> {
     pub height: u32,
     pub pix_fmt: ff::AVPixelFormat,
     pub fps: u32,
-    /// Frames that already arrive on the GPU (DMA-BUF).
+    /// Frames that already arrive on the GPU (DMA-BUF, D3D11).
     pub hw_frames: Option<&'a HwFrames>,
+    /// Extra `buffer` options for what these frames say about themselves.
+    pub color: &'static str,
+}
+
+/// What a capture filter's output has for the moment.
+#[cfg(target_os = "windows")]
+pub enum Pulled {
+    Frame,
+    Nothing,
+    /// It will never produce another (the window closed).
+    End,
 }
 
 pub struct Graph {
@@ -256,8 +281,8 @@ impl Graph {
 
             if let Some(i) = input {
                 let args = cstr(&format!(
-                    "video_size={}x{}:pix_fmt={}:time_base=1/1000000:pixel_aspect=1/1:frame_rate={}/1",
-                    i.width, i.height, i.pix_fmt as i32, i.fps
+                    "video_size={}x{}:pix_fmt={}:time_base=1/1000000:pixel_aspect=1/1:frame_rate={}/1{}",
+                    i.width, i.height, i.pix_fmt as i32, i.fps, i.color
                 ));
                 // GPU input: the frames context must be set before initializing.
                 me.src = ff::avfilter_graph_alloc_filter(graph, ff::avfilter_get_by_name(c"buffer".as_ptr()), c"in".as_ptr());
@@ -341,6 +366,22 @@ impl Graph {
         }
         check(ret, "tirar quadro")?;
         Ok(true)
+    }
+
+    /// Like `pull`, telling the end of the source from nothing yet. With a source
+    /// that only produces on change (`gfxcapture`) this can block for as long as
+    /// the source stays still: see capture/windows.rs.
+    #[cfg(target_os = "windows")]
+    pub fn pull_source(&mut self, out: &mut Frame) -> Result<Pulled> {
+        let ret = unsafe { ff::av_buffersink_get_frame(self.sink, out.0) };
+        if ret == EAGAIN {
+            return Ok(Pulled::Nothing);
+        }
+        if ret == ff::AVERROR_EOF {
+            return Ok(Pulled::End);
+        }
+        check(ret, "tirar quadro")?;
+        Ok(Pulled::Frame)
     }
 
     pub fn out_format(&self) -> ff::AVPixelFormat {

@@ -45,6 +45,10 @@ export component MenuPanel inherits VerticalLayout {
         enabled: !AppState.stream-busy;
         clicked => { AppState.open(3); }
     }
+    if AppState.live && AppState.audio-label != "": MenuItem {
+        icon: @image-url("icons/sound.svg"); label: AppState.audio-label;
+        clicked => { AppState.open(7); }
+    }
     MenuItem {
         icon: @image-url("icons/tune.svg"); label: "Qualidade da transmissão";
         enabled: !AppState.stream-busy;

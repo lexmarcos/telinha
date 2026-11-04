@@ -5,14 +5,15 @@
 
 import "../assets/fonts/Doto-Black.ttf";
 import { Palette, Size, Space, Radius, Motion } from "tokens.slint";
-import { AppState } from "state.slint";
+import { AppState, PickRow } from "state.slint";
 import { Bubble, Face } from "bubble.slint";
 import { Dots, DotData } from "dots.slint";
 import { Surface } from "surface.slint";
 import { MenuPanel, QualityPanel, JoinPanel, ToastPanel } from "panels.slint";
+import { SourcePanel, AudioAppPanel } from "pick-list.slint";
 import { NoteTone } from "note.slint";
 
-export { AppState, Motion, DotData, NoteTone, Face, Palette }
+export { AppState, Motion, DotData, NoteTone, Face, Palette, PickRow }
 
 export component Bolha inherits Window {
     in property <string> window-title: "Telinha";
@@ -37,6 +38,9 @@ export component Bolha inherits Window {
     callback bubble-drag();
     callback bubble-click();
     callback escape();
+    // A panel with no field of its own: Esc has to reach the scope below, which
+    // does not get the focus just from the panel opening.
+    public function focus-keys() { keys.focus(); }
 
     title: root.window-title;
     no-frame: true;
@@ -115,6 +119,8 @@ export component Bolha inherits Window {
                         if root.panel-kind == 2: QualityPanel { }
                         if root.panel-kind == 3: JoinPanel { }
                         if root.panel-kind == 5: ToastPanel { }
+                        if root.panel-kind == 6: SourcePanel { }
+                        if root.panel-kind == 7: AudioAppPanel { }
                     }
                 }
             }

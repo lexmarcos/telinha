@@ -49,13 +49,25 @@ impl Default for Quality {
     }
 }
 
+/// The smallest output: NVENC refuses anything under 145x49 for H.264 and 129x33
+/// for HEVC, and other encoders have limits of their own around 16 to 32.
+const MIN_OUTPUT: (u32, u32) = (160, 90);
+/// The largest side: H.264 hardware encoders stop at 4096 (a few at more). A
+/// window spread over two monitors can pass it.
+const MAX_OUTPUT: u32 = 4096;
+
 impl Quality {
     /// Output size, never upscaling past the screen and keeping the aspect ratio.
+    /// A window can be any size at all, so this is also what keeps it within what
+    /// the encoders take: even on both sides and between `MIN_OUTPUT` and
+    /// `MAX_OUTPUT`. Only a window too narrow for that loses its proportions.
     pub fn output_size(&self, native: (u32, u32)) -> (u32, u32) {
-        let (w, h) = native;
-        let target = self.resolution.height().map_or(h, |t| t.min(h));
-        let tw = ((target as f64 * w as f64 / h as f64) / 2.0).round() as u32 * 2;
-        (tw, target & !1)
+        let (w, h) = (native.0.max(1), native.1.max(1));
+        let th = (self.resolution.height().map_or(h, |t| t.min(h)) & !1).max(2) as f64;
+        let tw = th * w as f64 / h as f64;
+        let grow = (MIN_OUTPUT.0 as f64 / tw).max(MIN_OUTPUT.1 as f64 / th).max(1.0);
+        let even = |v: f64| (((v * grow / 2.0).round() as u32) * 2).min(MAX_OUTPUT);
+        (even(tw), even(th))
     }
 
     /// Same formula as the site: ~0.08 bits per pixel (0.1 in Nitidez, where
@@ -87,14 +99,11 @@ pub struct Config {
     pub server: Option<String>,
     #[serde(default)]
     pub position: Option<(f32, f32)>,
-    /// Capture portal token (Linux) so it does not ask again.
-    #[serde(default)]
-    pub capture_token: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { quality: Quality::default(), name: String::new(), server: None, position: None, capture_token: None }
+        Self { quality: Quality::default(), name: String::new(), server: None, position: None }
     }
 }
 
@@ -156,6 +165,44 @@ fn whoami() -> String {
 mod tests {
     use super::*;
 
+    fn q(resolution: Resolution) -> Quality {
+        Quality { resolution, fps: 60, priority: Priority::Fluidez, system_audio: false }
+    }
+
+    #[test]
+    fn tamanhos_de_tela_nao_mudam() {
+        let o = q(Resolution::Original);
+        assert_eq!(o.output_size((1920, 1080)), (1920, 1080));
+        assert_eq!(o.output_size((3840, 2160)), (3840, 2160));
+        assert_eq!(o.output_size((2560, 1440)), (2560, 1440));
+        assert_eq!(q(Resolution::P720).output_size((1920, 1080)), (1280, 720));
+        assert_eq!(q(Resolution::P1080).output_size((3840, 2160)), (1920, 1080));
+        assert_eq!(q(Resolution::P1440).output_size((1920, 1080)), (1920, 1080));
+    }
+
+    #[test]
+    fn janela_sai_sempre_par_e_dentro_dos_limites() {
+        let o = q(Resolution::Original);
+        // Odd sizes round to even.
+        assert_eq!(o.output_size((801, 601)), (800, 600));
+        assert_eq!(o.output_size((1367, 769)), (1366, 768));
+        // Small windows grow to the minimum, keeping the proportions.
+        assert_eq!(o.output_size((100, 60)), (160, 96));
+        assert_eq!(o.output_size((1, 1)), (160, 160));
+        // Nothing divides by zero while a window has no size yet.
+        assert_eq!(o.output_size((0, 0)), (160, 160));
+        // Absurd proportions stop at the largest side.
+        assert_eq!(o.output_size((6000, 400)).0, 4096);
+        assert_eq!(o.output_size((3000, 10)), (4096, 90));
+        for (w, h) in [(3, 7), (640, 481), (1921, 1081), (5000, 300), (161, 91), (160, 90), (333, 1000), (17, 4000)] {
+            for r in [Resolution::Original, Resolution::P720, Resolution::P1080, Resolution::P1440] {
+                let (ow, oh) = q(r).output_size((w, h));
+                assert!(ow % 2 == 0 && oh % 2 == 0, "{w}x{h} {r:?}: {ow}x{oh}");
+                assert!((160..=4096).contains(&ow) && (90..=4096).contains(&oh), "{w}x{h} {r:?}: {ow}x{oh}");
+            }
+        }
+    }
+
     #[test]
     fn taxa_cresce_com_a_resolucao() {
         let q = |fps, priority| Quality { resolution: Resolution::Original, fps, priority, system_audio: false };
@@ -186,7 +233,6 @@ mod tests {
         assert_eq!(c.name, "Ana");
         assert_eq!(c.server.as_deref(), Some("exemplo.test"));
         assert_eq!(c.position, Some((10.0, 20.0)));
-        assert_eq!(c.capture_token.as_deref(), Some("token"));
         let saved = serde_json::to_value(&c).unwrap();
         assert!(saved.get("discord_session").is_none() && saved.get("discord_name").is_none() && saved.get("call_only").is_none());
     }

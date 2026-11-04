@@ -51,6 +51,28 @@ node summarize.mjs novo.jsonl
 * **Mac:** needs a virtual device such as BlackHole.
 * The desktop app captures computer audio by itself and leaves Discord out.
 
+## What the desktop app shares
+
+The person picks a whole monitor or a single window, on every stream. On Windows that is a panel of the app's own, shown before any channel exists, so giving up leaves nothing behind. On Linux it is the system's own picker, and nothing is remembered between streams.
+
+| | Monitor | Window |
+|---|---|---|
+| **Windows, image** | `ddagrab`, inside the encoder's filter graph | `gfxcapture` (Windows.Graphics.Capture), on a thread of its own |
+| **Windows, sound** | Everything but Discord | Process loopback in inclusion mode, on the window's process tree |
+| **Linux, image** | Portal and PipeWire | Portal and PipeWire |
+| **Linux, sound** | Every app but Discord | Only the app the person chooses in a panel, by name |
+
+**A window's stream never sends the whole computer's sound.** If the sound cannot be isolated, the stream goes on silent and says so. "Sem som" in the quality panel is above all of this. Linux has that panel because the portal says a window was picked but not whose process it is; until the person chooses, nothing is heard. The choice is kept by the app's identity, not a node or a process, since browsers play from child processes and their streams end and come back with each song.
+
+Things a window does that a monitor does not, and what happens:
+
+* **It stops sending frames when nothing changes**, and stops altogether when minimized. The last image is re-encoded so viewers keep receiving (`Repeats`), and the loop keeps seeing stop and quality requests. On FFmpeg 9, `av_buffersink_get_frame` does not return while `gfxcapture` has no frame, which is why that filter is not in the encoder's graph: a blocked reader only costs its own thread.
+* **It changes size**, on every frame while being dragged. A new size is acted on once it has held for 250 ms, or after 1.5 s of continuous dragging, since each reopening costs a keyframe. Sizes stay even and within what the encoders take (`Quality::output_size`).
+* **It does not fill its buffer on GNOME**, which sends a buffer as big as the monitor and says where the window is on every frame (`SPA_META_VideoCrop`). VAAPI crops on the GPU, with no copy; other paths crop on the CPU. The window's shadow is part of the picture, as black margins.
+* **It closes.** The stream ends with a warning and the channel stays. On Linux nothing reports this by itself: the PipeWire stream just goes idle, so the capture watches for its node going away.
+
+The stream only counts as on air once the video thread has an encoder running, so a capture that fails does not copy an invite first. Turning the sound on or off mid-stream touches only the connections that carry sound: the capture and the video go on, the system's picker does not reappear, and the invite is not copied again.
+
 ## Limits
 
 * Each viewer gets their own copy of the video, so the streamer's upload speed limits the group. 4 or 5 people work well.

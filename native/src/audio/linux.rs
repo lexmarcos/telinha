@@ -8,7 +8,12 @@
 //! us. This is what Windows does with "process loopback" and what Vesktop does
 //! in its own screen share.
 //!
-//! TELINHA_SOM_TUDO=1 goes back to the old way: the whole default output.
+//! While streaming a single window only the app the person chose is linked. The
+//! choice is by the app's identity (see `plan::identity`), so its streams can end
+//! and come back, from any of its processes, and be picked up again on their own.
+//!
+//! TELINHA_SOM_TUDO=1 goes back to the old way: the whole default output. Only
+//! for a whole monitor: a window's stream never records the whole output.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -22,6 +27,7 @@ use pipewire as pw;
 use pw::spa;
 use pw::types::ObjectType;
 
+use super::plan::{self, AudioApp, Plan, Selection};
 use super::{CHANNELS, RATE};
 
 /// Name of our capture node, with the PID so it is not confused with another open Telinha.
@@ -37,20 +43,25 @@ fn chime_node_name() -> String {
 /// Name fragments that identify Discord and its alternative clients.
 const DISCORD: [&str; 7] = ["discord", "vesktop", "vencord", "webcord", "armcord", "legcord", "equibop"];
 
-pub fn start(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>) -> Result<String, String> {
-    let everything = std::env::var_os("TELINHA_SOM_TUDO").is_some();
+pub fn start(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, plan: Plan) -> Result<String, String> {
+    let everything = plan::whole_output(std::env::var_os("TELINHA_SOM_TUDO").is_some(), &plan);
+    let source = match &plan {
+        _ if everything => "saída de som padrão (PipeWire)",
+        Plan::App { .. } => "só o app escolhido (PipeWire)",
+        _ => "todo o som do computador menos o Discord (PipeWire)",
+    };
     std::thread::Builder::new()
         .name("telinha-pw-som".into())
         .spawn(move || {
-            if let Err(e) = run(tx, stop, everything) {
+            if let Err(e) = run(tx, stop, everything, plan) {
                 tracing::error!("PipeWire audio: {e}");
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok(if everything { "saída de som padrão (PipeWire)" } else { "todo o som do computador menos o Discord (PipeWire)" }.into())
+    Ok(source.into())
 }
 
-fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, everything: bool) -> Result<(), String> {
+fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, everything: bool, plan: Plan) -> Result<(), String> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| e.to_string())?;
     let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| e.to_string())?;
@@ -105,9 +116,20 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, everything: bool) -> Res
 
     // Tracks the apps that play audio and links each one to our input.
     let registry = core.get_registry_rc().map_err(|e| e.to_string())?;
-    let graph = Rc::new(RefCell::new(Graph::default()));
+    let (selection, list) = match plan {
+        Plan::App { selection, list } => (Some(selection), list),
+        _ => (None, None),
+    };
+    let graph = Rc::new(RefCell::new(Graph { filter: Filter::from_selection(selection.as_ref()), ..Default::default() }));
+    let report = move |g: &mut Graph| {
+        if let (Some(list), Some(now)) = (&list, g.list_if_changed()) {
+            list(now);
+        }
+    };
+    let report_rm = report.clone();
     let _registry_listener = (!everything).then(|| {
         let (g_add, g_rm, core) = (graph.clone(), graph.clone(), core.clone());
+        let core_rm = core.clone();
         registry
             .add_listener_local()
             .global(move |obj| {
@@ -115,15 +137,30 @@ fn run(tx: SyncSender<Vec<f32>>, stop: Arc<AtomicBool>, everything: bool) -> Res
                 if g.learn(obj) {
                     g.reconcile(&core);
                 }
+                report(&mut g);
             })
-            .global_remove(move |id| g_rm.borrow_mut().forget(id))
+            .global_remove(move |id| {
+                let mut g = g_rm.borrow_mut();
+                g.forget(id);
+                g.reconcile(&core_rm);
+                report_rm(&mut g);
+            })
             .register()
     });
 
     let ml = mainloop.clone();
+    let (g_timer, core_timer) = (graph.clone(), core.clone());
     let timer = mainloop.loop_().add_timer(move |_| {
         if stop.load(Ordering::Relaxed) {
             ml.quit();
+        }
+        // The person changed which app to hear.
+        let wanted = Filter::from_selection(selection.as_ref());
+        let mut g = g_timer.borrow_mut();
+        if wanted != g.filter {
+            tracing::info!(?wanted, "audio: following the app the person chose");
+            g.filter = wanted;
+            g.reconcile(&core_timer);
         }
     });
     timer.update_timer(Some(Duration::from_millis(100)), Some(Duration::from_millis(100))).into_result().map_err(|e| e.to_string())?;
@@ -216,15 +253,52 @@ struct Port {
     channel: String,
 }
 
+/// Which app outputs go into the stream.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum Filter {
+    /// Everything but Discord (a whole monitor).
+    #[default]
+    AllButDiscord,
+    /// Only this app. `None`: nothing was chosen yet, or "Sem som".
+    Only(Option<String>),
+}
+
+impl Filter {
+    fn from_selection(selection: Option<&Selection>) -> Self {
+        selection.map_or(Self::AllButDiscord, |s| Self::Only(s.get()))
+    }
+
+    fn includes(&self, app: &Stream) -> bool {
+        if app.own {
+            return false;
+        }
+        match self {
+            Self::AllButDiscord => !app.discord,
+            Self::Only(chosen) => !app.discord && chosen.as_deref() == Some(app.app.id.as_str()),
+        }
+    }
+}
+
+/// An app's audio output.
+struct Stream {
+    app: AudioApp,
+    discord: bool,
+    /// Our own chimes (viewers already play theirs).
+    own: bool,
+}
+
 #[derive(Default)]
 struct Graph {
     /// Our capture node.
     me: Option<u32>,
-    /// App audio outputs: id → included in the stream?
-    apps: HashMap<u32, bool>,
+    filter: Filter,
+    /// App audio outputs.
+    apps: HashMap<u32, Stream>,
     ports: HashMap<u32, Port>,
     /// Links we created (app output, our input). They live as long as the proxy lives.
     links: HashMap<(u32, u32), pw::link::Link>,
+    /// The list last reported.
+    listed: Option<Vec<AudioApp>>,
 }
 
 impl Graph {
@@ -239,18 +313,7 @@ impl Graph {
                     return true;
                 }
                 if class == "Stream/Output/Audio" {
-                    // Our own chimes stay out (viewers already play theirs).
-                    if props.get("node.name") == Some(chime_node_name().as_str()) {
-                        tracing::info!("audio left out (Telinha's own chimes)");
-                        self.apps.insert(obj.id, false);
-                        return false;
-                    }
-                    let names = ["application.process.binary", "application.name", "application.id", "node.name"].map(|k| props.get(k).unwrap_or("").to_lowercase());
-                    let discord = names.iter().any(|n| DISCORD.iter().any(|d| n.contains(d)));
-                    let who = props.get("application.name").or(props.get("node.name")).unwrap_or("?");
-                    tracing::info!(app = who, "{}", if discord { "audio left out (Discord)" } else { "audio included in the stream" });
-                    self.apps.insert(obj.id, !discord);
-                    return !discord;
+                    return self.add_stream(obj.id, |k| props.get(k).map(str::to_owned));
                 }
                 false
             }
@@ -267,6 +330,34 @@ impl Graph {
         }
     }
 
+    /// An app started playing. `true` if it goes into the stream.
+    fn add_stream(&mut self, id: u32, get: impl Fn(&str) -> Option<String>) -> bool {
+        let own = get("node.name").as_deref() == Some(chime_node_name().as_str());
+        let names = ["application.process.binary", "application.name", "application.id", "node.name"].map(|k| get(k).unwrap_or_default().to_lowercase());
+        let discord = names.iter().any(|n| DISCORD.iter().any(|d| n.contains(d)));
+        let stream = Stream { app: plan::identity(&get), discord, own };
+        let included = self.filter.includes(&stream);
+        let why = if own { "Telinha's own chimes" } else if discord { "Discord" } else { "not the chosen app" };
+        if included {
+            tracing::info!(app = stream.app.label, "audio included in the stream");
+        } else {
+            tracing::info!(app = stream.app.label, why, "audio left out");
+        }
+        self.apps.insert(id, stream);
+        included
+    }
+
+    /// The apps the person can choose from, if that changed since the last call.
+    /// Not Discord (the people in the call would hear themselves) nor Telinha.
+    fn list_if_changed(&mut self) -> Option<Vec<AudioApp>> {
+        let now = plan::app_list(self.apps.values().filter(|s| !s.own && !s.discord).map(|s| s.app.clone()));
+        if self.listed.as_ref() == Some(&now) {
+            return None;
+        }
+        self.listed = Some(now.clone());
+        Some(now)
+    }
+
     fn forget(&mut self, id: u32) {
         if self.me == Some(id) {
             self.me = None;
@@ -276,17 +367,18 @@ impl Graph {
         self.links.retain(|(out, inp), _| *out != id && *inp != id);
     }
 
-    /// Links every allowed app output to our input, channel by channel
+    /// The links there should be right now: (app node, its output port, our
+    /// input port). Every allowed app output to our input, channel by channel
     /// (mono and center go to both sides).
-    fn reconcile(&mut self, core: &pw::core::CoreRc) {
-        let Some(me) = self.me else { return };
+    fn wanted(&self) -> Vec<(u32, u32, u32)> {
+        let Some(me) = self.me else { return Vec::new() };
         let ours: HashMap<&str, u32> = self.ports.iter().filter(|(_, p)| p.node == me && !p.output).map(|(id, p)| (p.channel.as_str(), *id)).collect();
         if ours.is_empty() {
-            return;
+            return Vec::new();
         }
         let mut wanted = Vec::new();
         for (id, p) in &self.ports {
-            if !p.output || self.apps.get(&p.node) != Some(&true) {
+            if !p.output || !self.apps.get(&p.node).is_some_and(|s| self.filter.includes(s)) {
                 continue;
             }
             let sides: &[&str] = match p.channel.as_str() {
@@ -301,6 +393,14 @@ impl Graph {
                 }
             }
         }
+        wanted
+    }
+
+    /// Makes the links match `wanted`: an app no longer chosen is unlinked here.
+    fn reconcile(&mut self, core: &pw::core::CoreRc) {
+        let wanted = self.wanted();
+        self.links.retain(|(out, input), _| wanted.iter().any(|(_, o, i)| o == out && i == input));
+        let Some(me) = self.me else { return };
         for (node, out, input) in wanted {
             if self.links.contains_key(&(out, input)) {
                 continue;
@@ -319,5 +419,132 @@ impl Graph {
                 Err(e) => tracing::warn!("linking an app's audio: {e}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A graph with our input (FL, FR) as node 1, ports 10 and 11.
+    fn graph(filter: Filter) -> Graph {
+        let mut g = Graph { me: Some(1), filter, ..Default::default() };
+        g.ports.insert(10, Port { node: 1, output: false, channel: "FL".into() });
+        g.ports.insert(11, Port { node: 1, output: false, channel: "FR".into() });
+        g
+    }
+
+    /// Adds an app stream with stereo output ports `node*10` and `node*10+1`.
+    fn play(g: &mut Graph, node: u32, binary: &str, name: &str) -> bool {
+        let included = g.add_stream(node, |k| match k {
+            "application.process.binary" => Some(binary.to_owned()),
+            "application.name" => Some(name.to_owned()),
+            "node.name" => Some(format!("{name}-{node}")),
+            _ => None,
+        });
+        g.ports.insert(node * 10, Port { node, output: true, channel: "FL".into() });
+        g.ports.insert(node * 10 + 1, Port { node, output: true, channel: "FR".into() });
+        included
+    }
+
+    fn linked_nodes(g: &Graph) -> Vec<u32> {
+        let mut nodes: Vec<u32> = g.wanted().iter().map(|(n, _, _)| *n).collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
+    }
+
+    #[test]
+    fn sem_escolha_nenhum_som_sai() {
+        let mut g = graph(Filter::Only(None));
+        assert!(!play(&mut g, 5, "firefox", "Firefox"));
+        assert!(!play(&mut g, 6, "spotify", "Spotify"));
+        assert_eq!(linked_nodes(&g), [] as [u32; 0]);
+    }
+
+    #[test]
+    fn so_o_app_escolhido_entra() {
+        let mut g = graph(Filter::Only(Some("firefox".into())));
+        assert!(play(&mut g, 5, "firefox", "Firefox"));
+        assert!(!play(&mut g, 6, "spotify", "Spotify"));
+        assert_eq!(linked_nodes(&g), [5]);
+        // Both channels, to the matching side.
+        let mut links = g.wanted();
+        links.sort_unstable();
+        assert_eq!(links, [(5, 50, 10), (5, 51, 11)]);
+    }
+
+    #[test]
+    fn stream_que_some_e_volta_religa_sozinho() {
+        let mut g = graph(Filter::Only(Some("firefox".into())));
+        play(&mut g, 5, "firefox", "Firefox");
+        g.forget(5);
+        g.forget(50);
+        g.forget(51);
+        assert_eq!(linked_nodes(&g), [] as [u32; 0]);
+        // The next song: a new node, even from another process of the same app.
+        assert!(play(&mut g, 9, "firefox", "Firefox"));
+        assert_eq!(linked_nodes(&g), [9]);
+    }
+
+    #[test]
+    fn varios_streams_do_mesmo_app_entram_juntos() {
+        let mut g = graph(Filter::Only(Some("chrome".into())));
+        play(&mut g, 5, "chrome", "Google Chrome");
+        play(&mut g, 6, "chrome", "Google Chrome");
+        play(&mut g, 7, "mpv", "mpv");
+        assert_eq!(linked_nodes(&g), [5, 6]);
+    }
+
+    #[test]
+    fn trocar_a_escolha_troca_os_links() {
+        let mut g = graph(Filter::Only(Some("firefox".into())));
+        play(&mut g, 5, "firefox", "Firefox");
+        play(&mut g, 6, "spotify", "Spotify");
+        g.filter = Filter::Only(Some("spotify".into()));
+        assert_eq!(linked_nodes(&g), [6]);
+        g.filter = Filter::Only(None);
+        assert_eq!(linked_nodes(&g), [] as [u32; 0]);
+    }
+
+    #[test]
+    fn monitor_inteiro_inclui_tudo_menos_o_discord() {
+        let mut g = graph(Filter::AllButDiscord);
+        assert!(play(&mut g, 5, "firefox", "Firefox"));
+        assert!(!play(&mut g, 6, "Discord", "Discord"));
+        assert!(!play(&mut g, 7, "electron", "Vesktop"));
+        assert_eq!(linked_nodes(&g), [5]);
+    }
+
+    #[test]
+    fn discord_nao_entra_mesmo_escolhido() {
+        let mut g = graph(Filter::Only(Some("discord".into())));
+        assert!(!play(&mut g, 6, "discord", "Discord"));
+        assert_eq!(linked_nodes(&g), [] as [u32; 0]);
+    }
+
+    #[test]
+    fn avisos_do_proprio_telinha_nao_entram() {
+        let mut g = graph(Filter::AllButDiscord);
+        let name = chime_node_name();
+        assert!(!g.add_stream(8, |k| (k == "node.name").then(|| name.clone())));
+        assert_eq!(linked_nodes(&g), [] as [u32; 0]);
+    }
+
+    #[test]
+    fn lista_viva_so_avisa_quando_muda() {
+        let mut g = graph(Filter::Only(None));
+        play(&mut g, 5, "firefox", "Firefox");
+        let first = g.list_if_changed().expect("first list");
+        assert_eq!(first, [AudioApp { id: "firefox".into(), label: "Firefox".into() }]);
+        assert_eq!(g.list_if_changed(), None, "unchanged");
+        // Another stream of the same app is not news.
+        play(&mut g, 6, "firefox", "Firefox");
+        assert_eq!(g.list_if_changed(), None);
+        // Discord is not offered.
+        play(&mut g, 7, "discord", "Discord");
+        assert_eq!(g.list_if_changed(), None);
+        play(&mut g, 8, "mpv", "mpv");
+        assert_eq!(g.list_if_changed().map(|l| l.len()), Some(2));
     }
 }
