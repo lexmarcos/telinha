@@ -72,13 +72,16 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .icon-btn-leave:hover { background: var(--tally-soft); color: #ffb3ad; }
 
 /* ---------- Entry ---------- */
+/* A dark room lit by the TV. The only other lit surface is the download link. */
 .lobby {
-  --gap: 2rem;
+  --gap: 1.75rem;
+  --bezel: 11px; /* the TV's frame is box-shadow, drawn outside its box */
   height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain;
   display: flex; flex-direction: column; align-items: center; gap: var(--gap);
   padding:
     max(1.5rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
     max(1.5rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+  background: var(--room);
 }
 /* The spacers centre the content when it fits and let it scroll from the top when it does not
    (the negative margins cancel the flex gap next to them). */
@@ -87,27 +90,33 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .lobby::after { margin-top: calc(var(--gap) * -1); }
 .lobby.leaving { opacity: 0; transition: opacity 260ms ease; pointer-events: none; }
 
-.brand { text-align: center; max-width: 32rem; }
+/* One column of the same width; the side wrapper only matters for a phone on its side. */
+.brand, .controls, .app-offer { width: min(28rem, 100%); }
+.lobby-side { display: contents; }
+
+.brand { text-align: center; }
 .brand h1 {
-  margin: 0; font-size: clamp(2rem, 6vw, 2.75rem); line-height: 1.05;
-  font-weight: 700; letter-spacing: -0.035em;
+  margin: 0; font: 900 clamp(2.5rem, 11vw, 3.25rem)/1 var(--osd);
+  letter-spacing: -0.05em; color: var(--phosphor);
 }
-.brand p { margin: 0.5rem 0 0; color: var(--muted); font-size: 1.0625rem; letter-spacing: -0.01em; }
 
 /* The little screen: the channel number shows on it */
 .tv {
-  position: relative; width: min(34rem, 100%); aspect-ratio: 16 / 10;
+  --tv-edge: var(--line);
+  --tv-light: rgba(92, 128, 255, 0.2);
+  position: relative; flex: none;
+  width: min(28rem - 2 * var(--bezel), 100% - 2 * var(--bezel)); margin: var(--bezel); aspect-ratio: 16 / 10;
   border-radius: var(--r-lg); overflow: hidden;
   background: radial-gradient(80% 80% at 50% 45%, #10183a 0%, var(--screen) 100%);
   box-shadow:
-    0 0 0 1px var(--line),
+    0 0 0 1px var(--tv-edge),
     0 0 0 10px rgba(10, 15, 38, 0.9),
     0 0 0 11px var(--line),
-    0 40px 120px -20px rgba(80, 120, 255, 0.35),
-    0 30px 60px -30px rgba(0, 0, 0, 0.8);
+    0 0 160px 24px var(--tv-light);
   display: grid; place-items: center; align-content: center; gap: 0.75rem;
   animation: power-on 900ms var(--ease-out) 120ms both;
   cursor: text;
+  transition: box-shadow 300ms ease;
 }
 @keyframes power-on {
   0%   { transform: scale(0.72, 0.006); filter: brightness(3); opacity: 0; }
@@ -117,96 +126,141 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 }
 .tv-static {
   position: absolute; inset: 0; width: 100%; height: 100%;
-  image-rendering: pixelated; opacity: 0.16; mix-blend-mode: screen;
+  image-rendering: pixelated; opacity: 0.08; mix-blend-mode: screen;
   transition: opacity 500ms ease;
 }
-.tv.tuned .tv-static { opacity: 0.04; }
+.tv.tuned { --tv-light: rgba(120, 155, 255, 0.34); }
+.tv.tuned .tv-static { opacity: 0.03; }
 .tv-glass {
   position: absolute; inset: 0; pointer-events: none;
   background:
     repeating-linear-gradient(to bottom, rgba(255,255,255,0.025) 0 1px, transparent 1px 3px),
-    radial-gradient(120% 70% at 30% 0%, rgba(255,255,255,0.08), transparent 55%);
+    radial-gradient(120% 70% at 30% 0%, rgba(255,255,255,0.07), transparent 55%),
+    radial-gradient(90% 90% at 50% 50%, transparent 55%, rgba(3, 5, 16, 0.55) 100%);
 }
 
 .osd { position: relative; display: grid; justify-items: center; cursor: text; }
 .osd-word {
   font: 700 clamp(1rem, 3.4vw, 1.375rem)/1 var(--osd);
-  color: var(--phosphor); opacity: 0.7; letter-spacing: 0.04em;
+  color: var(--phosphor); opacity: 0.75; letter-spacing: 0.04em;
 }
 .osd-digits {
   width: 4.6ch; padding: 0; border: 0; background: none; outline: none;
   text-align: center; caret-color: var(--tally);
-  font: 900 clamp(4.5rem, 19vw, 8.5rem)/1 var(--osd);
+  font: 900 clamp(4.5rem, 19vw, 6.5rem)/1 var(--osd);
   letter-spacing: 0.06em; color: var(--phosphor);
   text-shadow: 0 0 18px rgba(150, 190, 255, 0.55), 0 0 2px #fff;
 }
-.osd-digits::placeholder { color: var(--phosphor); opacity: 0.18; text-shadow: none; }
-.tv:focus-within { box-shadow:
-    0 0 0 1px rgba(207, 224, 255, 0.5),
-    0 0 0 10px rgba(10, 15, 38, 0.9),
-    0 0 0 11px var(--line),
-    0 40px 120px -20px rgba(80, 120, 255, 0.45),
-    0 30px 60px -30px rgba(0, 0, 0, 0.8); }
+/* The placeholder is the display with every dot off, like an unlit panel. */
+.osd-digits::placeholder { color: var(--phosphor); opacity: 0.13; text-shadow: none; }
+.tv:focus-within { --tv-edge: rgba(207, 224, 255, 0.6); }
 .tv .osd-digits:focus-visible { outline: none; }
+.osd-digits::selection { background: transparent; } /* selected only so the next digit replaces it */
 .tv-hint {
-  position: relative; margin: 0; padding: 0 1.25rem; text-align: center;
+  position: relative; margin: 0; padding: 0 0.75rem; text-align: center;
   color: var(--muted); font-size: 0.9375rem;
 }
 .tv.tuned .tv-hint { color: var(--phosphor); }
+/* A failed attempt: the screen turns red and says why, in the hint's place. */
+.tv.failed, .tv.failed:focus-within {
+  --tv-edge: rgba(255, 140, 130, 0.6);
+  --tv-light: rgba(255, 70, 60, 0.24);
+  background: radial-gradient(80% 80% at 50% 45%, #3a1522 0%, #1d0b18 100%);
+}
+.tv.failed .osd-word, .tv.failed .osd-digits { color: #ffd3ce; }
+.tv.failed .osd-digits { text-shadow: 0 0 18px rgba(255, 120, 110, 0.55), 0 0 2px #fff; }
+.tv-error { position: relative; margin: 0; padding: 0 0.75rem; text-align: center; color: #ffcfcb; font-size: 0.9375rem; text-wrap: balance; }
 
-.controls { width: min(26rem, 100%); display: grid; gap: 1rem; }
+.controls { display: grid; gap: 1rem; }
 .field { display: grid; gap: 0.375rem; }
-.field span { font-size: 0.875rem; font-weight: 600; color: var(--muted); padding-left: 0.25rem; }
+.field span { font-size: 0.875rem; font-weight: 600; color: var(--muted); }
 .field input {
   height: 3rem; padding: 0 1rem; border-radius: var(--r-md);
   border: 1px solid var(--line); background: rgba(10, 15, 38, 0.6);
   font-size: 1.0625rem; outline: none;
   transition: border-color 160ms ease, background-color 160ms ease;
 }
-.field input::placeholder { color: rgba(140, 149, 189, 0.6); }
-.field input:focus { border-color: rgba(207, 224, 255, 0.55); background: rgba(10, 15, 38, 0.85); }
+.field input::placeholder { color: rgba(140, 149, 189, 0.8); }
+.field input:focus { border-color: var(--phosphor); background: rgba(10, 15, 38, 0.85); }
 .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.625rem; }
-.error {
-  margin: 0; padding: 0.75rem 1rem; border-radius: var(--r-md);
-  background: var(--tally-soft); color: #ffcfcb; font-size: 0.9375rem;
-}
-.footnote { margin: 0; max-width: 26rem; text-align: center; color: var(--muted); font-size: 0.875rem; }
+/* "Sintonizar" stays dark until there is a channel to tune to: then it lights up. */
+.lobby .btn-primary:disabled { opacity: 1; background: none; box-shadow: inset 0 0 0 1px var(--line); color: var(--muted); }
+.lobby .btn { padding-inline: 0.75rem; }
+
 /* Only shows when this server publishes the desktop app (app.js checks). */
+.app-offer { display: grid; gap: 0.75rem; animation: fade 400ms ease both; }
+.app-offer p { margin: 0; color: var(--muted); font-size: 0.875rem; text-align: center; text-wrap: balance; }
 .get-app {
-  position: fixed; top: max(1rem, env(safe-area-inset-top)); right: 1rem;
-  display: inline-flex; align-items: center; gap: 0.45rem;
-  min-height: 2.25rem; padding: 0 0.9rem; border-radius: 999px;
+  display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+  min-height: 3rem; padding: 0.5rem 1.25rem; border-radius: 999px;
+  background: var(--phosphor); color: var(--room); font-weight: 700; text-decoration: none; text-align: center;
+  box-shadow: 0 0 36px rgba(157, 184, 255, 0.26);
+  transition: background-color 160ms ease, box-shadow 200ms ease, transform 120ms ease-out;
+}
+.get-app:hover { background: #e4edff; box-shadow: 0 0 44px rgba(157, 184, 255, 0.4); }
+.get-app:active { transform: scale(0.98); transition-duration: 60ms; }
+.app-perks {
+  display: flex; flex-wrap: wrap; justify-content: center; gap: 0.25rem 1rem;
+  margin: 0; padding: 0; list-style: none; color: var(--muted); font-size: 0.8125rem;
+}
+.app-perks li { display: flex; align-items: center; gap: 0.25rem; }
+.app-perks svg { width: 0.875rem; height: 0.875rem; color: var(--phosphor); }
+
+/* In the column on phones; in the corner where there is room, so it costs the column no height. */
+.source-link {
+  display: inline-flex; align-items: center; gap: 0.5rem; flex: none;
+  min-height: 2.75rem; padding: 0 1rem; border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--line);
   color: var(--muted); font-size: 0.875rem; font-weight: 600; text-decoration: none;
-  animation: fade 400ms ease both;
   transition: color 160ms ease, background-color 160ms ease, transform 120ms ease-out;
 }
-.get-app svg { width: 1.05rem; height: 1.05rem; }
-.get-app:hover { color: var(--text); background: rgba(200, 212, 255, 0.08); }
-.get-app:active { transform: scale(0.96); transition-duration: 60ms; }
+.source-link svg { width: 1.125rem; height: 1.125rem; }
+.source-link:hover { color: var(--text); background: rgba(200, 212, 255, 0.08); }
+.source-link:active { transform: scale(0.96); transition-duration: 60ms; }
+@media (min-width: 600px) {
+  .source-link { position: fixed; top: max(1rem, env(safe-area-inset-top)); right: max(1rem, env(safe-area-inset-right)); }
+}
 
-/* Short screens: the entry gets tighter, and a phone on its side puts the TV next to the form. */
+/* Narrow: the two buttons don't fit side by side. */
+@media (max-width: 480px) {
+  .actions { grid-template-columns: 1fr; }
+}
+/* Short screens: the entry gets tighter. */
 @media (max-height: 700px) {
   .lobby { --gap: 1.25rem; }
   .tv { aspect-ratio: 16 / 9; }
-  .osd-digits { font-size: clamp(3.75rem, 17vw, 8.5rem); }
+  .osd-digits { font-size: clamp(3.75rem, 17vw, 6rem); }
 }
+/* Laptops with little height: a flatter TV keeps the download link in view. */
+@media (max-height: 700px) and (min-width: 600px) {
+  .lobby { --gap: 1rem; }
+  .tv { aspect-ratio: 12 / 5; gap: 0.5rem; }
+  .osd-digits { font-size: 5rem; }
+}
+/* The smallest phones: a taller TV, so the two-line hint doesn't push the channel into the frame. */
+@media (max-width: 360px) {
+  .tv { aspect-ratio: 3 / 2; gap: 0.375rem; }
+}
+/* A phone on its side: the TV next to everything else. */
 @media (orientation: landscape) and (max-height: 520px) {
   .lobby {
-    --gap: 1rem;
-    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 22rem);
-    grid-template-areas: "tv brand" "tv controls" "tv foot";
-    column-gap: 2rem; row-gap: 0.75rem; justify-items: center;
+    --gap: 0.75rem;
+    display: grid; align-items: center;
+    grid-template-columns: minmax(0, 1fr) minmax(0, min(24rem, 54vw));
+    grid-template-rows: minmax(0, 1fr) auto auto minmax(0, 1fr);
+    grid-template-areas: ". ." "tv brand" "tv side" ". .";
+    column-gap: 1.5rem; row-gap: var(--gap);
+    padding-block: max(0.75rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-bottom));
   }
   .lobby::before, .lobby::after { display: none; }
+  .brand, .controls, .app-offer { width: auto; }
   .brand { grid-area: brand; align-self: end; }
-  .brand h1 { font-size: 1.75rem; }
-  .brand p { margin-top: 0.25rem; font-size: 0.9375rem; }
-  .tv { grid-area: tv; align-self: center; aspect-ratio: 4 / 3; gap: 0.5rem; }
+  .brand h1 { font-size: 2rem; }
+  .tv { grid-area: tv; width: calc(100% - 2 * var(--bezel)); aspect-ratio: 4 / 3; gap: 0.5rem; }
   .osd-digits { font-size: clamp(3.25rem, 17vh, 5.5rem); }
-  .tv-hint { font-size: 0.8125rem; }
-  .controls { grid-area: controls; align-self: center; gap: 0.75rem; }
-  .actions { grid-template-columns: 1fr 1fr; }
-  .footnote { grid-area: foot; align-self: start; font-size: 0.8125rem; }
+  .tv-hint, .tv-error { font-size: 0.8125rem; }
+  .lobby-side { grid-area: side; align-self: start; display: grid; gap: var(--gap); }
+  .controls { gap: 0.625rem; }
 }
 
 /* ---------- Room ---------- */
@@ -498,7 +552,6 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   .volume input { display: none; }
   .dock-share span { display: none; }
   .dock-share { width: 3rem; padding: 0; }
-  .actions { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) and (orientation: landscape) {
   .room { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }

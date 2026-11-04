@@ -119,9 +119,8 @@ if (isDiscordAvatar(passIdentity.a)) safeSet("telinha:avatar", passIdentity.a);
 const myAvatar = isDiscordAvatar(safeGet("telinha:avatar")) ? safeGet("telinha:avatar") : "";
 if (hashCode.length === 4) {
   ui.code.value = hashCode;
-  // Channel in the link and a name already known: straight into the channel.
-  if (ui.name.value.trim()) setTimeout(() => join(hashCode), 0);
-  else setTimeout(() => ui.name.focus(), 950);
+  // Channel in the link: straight into it, with a funny name if there is none yet.
+  setTimeout(() => join(hashCode), 0);
 }
 if (opening) setTimeout(() => host(), 0);
 syncLobby();
@@ -142,8 +141,8 @@ ui.tv.addEventListener("pointerdown", (e) => {
 ui.code.addEventListener("input", () => {
   ui.code.value = ui.code.value.replace(/\D/g, "").slice(0, 4);
   syncLobby();
-  // The number pad has no "go" key: once the number is complete, carry on to the name.
-  if (ui.code.value.length === 4 && !ui.name.value.trim() && ui.code === document.activeElement) ui.name.focus();
+  // The number complete: try it right away. If that channel is not on air, the error says so.
+  if (ui.code.value.length === 4) join(ui.code.value);
 });
 ui.name.addEventListener("input", syncLobby);
 // A phone keyboard slides up over the form: bring the field being typed in back into view.
@@ -167,14 +166,20 @@ ui.controls.addEventListener("submit", (e) => {
 });
 ui.create.addEventListener("click", () => host());
 
+// Whoever enters without a name gets one of these, kept on entering like a typed name so it can be changed later.
+const FUNNY_ANIMALS = ["Capivara", "Tatu", "Jabuti", "Quati", "Lhama", "Preguiça", "Tucano", "Sagui", "Tamanduá", "Ornitorrinco", "Pinguim", "Coruja", "Lontra", "Guaxinim", "Suricato", "Arara", "Jacaré", "Polvo", "Pato", "Ouriço"];
+const FUNNY_TRAITS = ["de Chinelo", "sem Wi-Fi", "com Lag", "de Pijama", "em Reunião", "de Férias", "de Óculos", "de Boné", "no Mudo", "sem Café", "de Terno", "de Patins", "com Sono", "de Pantufa"];
+const pick = (list) => list[Math.floor(Math.random() * list.length)];
+
 function displayName() {
   const n = ui.name.value.trim().replace(/\s+/g, " ");
   if (n) safeSet("telinha:name", n);
-  return n || "Alguém";
+  return n || `${pick(FUNNY_ANIMALS)} ${pick(FUNNY_TRAITS)}`;
 }
 
 function setBusy(btn, text) {
   ui.tune.disabled = ui.create.disabled = !!btn;
+  ui.code.readOnly = !!btn; // the number being tried stays put
   if (btn) { btn.dataset.label = btn.textContent; btn.textContent = text; }
   else {
     for (const b of [ui.tune, ui.create]) if (b.dataset.label) { b.textContent = b.dataset.label; delete b.dataset.label; }
@@ -184,10 +189,16 @@ function setBusy(btn, text) {
 
 function showLobbyError(msg) {
   ui.lobbyError.textContent = msg;
-  ui.lobbyError.hidden = false;
-  ui.lobbyError.scrollIntoView({ block: "nearest", behavior: reducedMotion.matches ? "auto" : "smooth" }); // short screens
+  setLobbyFailed(true);
+  ui.tv.scrollIntoView({ block: "nearest", behavior: reducedMotion.matches ? "auto" : "smooth" }); // short screens
 }
-function hideLobbyError() { ui.lobbyError.hidden = true; }
+function hideLobbyError() { setLobbyFailed(false); }
+// The error takes the hint's place on the screen, which turns red.
+function setLobbyFailed(failed) {
+  ui.lobbyError.hidden = !failed;
+  ui.tvHint.hidden = failed;
+  ui.tv.classList.toggle("failed", failed);
+}
 
 /* ---------------- Open channel (host) ---------------- */
 
@@ -269,8 +280,9 @@ async function join(code) {
     peer?.destroy();
     setBusy(null);
     showLobbyError(err?.type !== "peer-unavailable" ? peerErrorText(err)
-      : state.fallback ? `Não consegui falar com o servidor do Telinha, então não dá pra achar o canal ${code}. Confira sua internet e tente de novo.`
-      : `O canal ${code} não está no ar. Confira o número com quem te convidou.`);
+      : state.fallback ? "Sem contato com o servidor. Confira sua internet e tente de novo."
+      : `O canal ${code} não está no ar. Confira o número.`);
+    if (document.activeElement === ui.code) ui.code.select(); // ready to type it again
   }
 }
 
@@ -326,13 +338,13 @@ function peerErrorText(err) {
     case "server-error":
     case "socket-error":
     case "socket-closed":
-      return "Não deu pra falar com o servidor de sinalização. Confira sua internet e tente de novo.";
+      return "Sem contato com o servidor. Confira sua internet e tente de novo.";
     case "browser-incompatible":
-      return "Este navegador não suporta WebRTC. Use Chrome, Edge, Firefox ou Safari atualizados.";
+      return "Este navegador não tem WebRTC. Use Chrome, Edge, Firefox ou Safari.";
     case "timeout":
-      return "O canal demorou demais pra responder. Tente de novo em alguns segundos.";
+      return "O canal demorou pra responder. Tente de novo.";
     case "unavailable-id":
-      return "Não achei um número de canal livre. Tente de novo.";
+      return "Não achei um canal livre. Tente de novo.";
     default:
       return "Algo deu errado na conexão. Tente de novo.";
   }
@@ -1432,14 +1444,33 @@ const AVATAR_COLORS = ["#cfe0ff", "#ffd9a8", "#bff0d4", "#f5c6ff", "#ffe48a", "#
 const narrow = matchMedia("(max-width: 480px)");
 narrow.addEventListener("change", () => { if (state.peer) renderPeople(); });
 
-function avatarFor(el, id, m) {
-  el.textContent = initials(m.name);
-  el.style.background = AVATAR_COLORS[hash(m.name + id) % AVATAR_COLORS.length];
-  if (m.avatar) {
-    // Discord photo instead of the initials.
-    el.textContent = "";
-    el.style.background = `center / cover no-repeat url("${m.avatar}")`;
+// A face drawn from the name's hash, the same for everyone in the channel. Loaded on the way
+// into a channel; until then, or if the file fails, the initials stay. Names come from other
+// people: they only seed the drawing, and it shows as an image, where an SVG cannot run scripts.
+let makeFace = null;
+const faces = new Map();
+function loadFaces() {
+  if (makeFace) return;
+  import("./avatars.js").then((m) => {
+    makeFace = m.face;
+    if (state.peer) renderPeople();
+  }).catch(() => {});
+}
+function faceFor(name) {
+  if (!makeFace) return "";
+  if (!faces.has(name)) {
+    let face = "";
+    try { face = makeFace(name.slice(0, 24)); } catch {}
+    faces.set(name, face);
   }
+  return faces.get(name);
+}
+
+function avatarFor(el, id, m) {
+  // Discord photo first, then the face, then the initials.
+  const picture = m.avatar || faceFor(m.name);
+  el.textContent = picture ? "" : initials(m.name);
+  el.style.background = picture ? `center / cover no-repeat url("${picture}")` : AVATAR_COLORS[hash(m.name + id) % AVATAR_COLORS.length];
   return el;
 }
 
@@ -1504,6 +1535,9 @@ function hash(s) { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) 
 /* ---------------- Join / leave room ---------------- */
 
 function enterRoom() {
+  loadFaces();
+  if (!ui.name.value.trim()) { ui.name.value = state.name; safeSet("telinha:name", state.name); }
+  document.activeElement?.blur(); // the number pad goes away with the lobby
   state.inRoom = true;
   safeSession("telinha:watching", "visible");
   history.replaceState(null, "", "#" + state.code);
