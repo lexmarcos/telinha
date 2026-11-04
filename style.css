@@ -221,6 +221,29 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
   .source-link { position: fixed; top: max(1rem, env(safe-area-inset-top)); right: max(1rem, env(safe-area-inset-right)); }
 }
 
+/* The site's footer: under the source link on phones, at the bottom of the page where there is room. */
+.credit {
+  display: flex; align-items: center; flex: none; min-height: 2.75rem; margin: -0.75rem 0 0;
+  color: var(--muted); font-size: 0.875rem; white-space: pre;
+}
+.credit a {
+  display: inline-flex; align-items: center; min-height: 2.75rem;
+  color: var(--text); font-weight: 600; text-decoration: none;
+  transition: color 160ms ease;
+}
+.credit a:hover { color: var(--phosphor); text-decoration: underline; text-underline-offset: 3px; }
+@media (min-width: 600px) {
+  .credit { position: fixed; margin: 0; bottom: max(0.25rem, env(safe-area-inset-bottom)); right: max(1rem, env(safe-area-inset-right)); }
+}
+/* Tall enough to clear the centered column: in the middle, under it. */
+@media (min-width: 600px) and (min-height: 800px) {
+  .credit { right: auto; left: 50%; translate: -50% 0; }
+}
+/* No desktop app on a phone, whatever its browser says it is. */
+@media (max-width: 600px), (pointer: coarse) and (max-height: 520px) {
+  .app-offer { display: none; }
+}
+
 /* Narrow: the two buttons don't fit side by side. */
 @media (max-width: 480px) {
   .actions { grid-template-columns: 1fr; }
@@ -240,6 +263,14 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 /* The smallest phones: a taller TV, so the two-line hint doesn't push the channel into the frame. */
 @media (max-width: 360px) {
   .tv { aspect-ratio: 3 / 2; gap: 0.375rem; }
+}
+/* Short phones: a flatter TV keeps the footer in view. */
+@media (max-height: 700px) and (max-width: 480px) {
+  .lobby { --gap: 0.875rem; padding-block: max(1rem, env(safe-area-inset-top)) max(0.25rem, env(safe-area-inset-bottom)); }
+  .tv { aspect-ratio: 2 / 1; gap: 0.375rem; }
+}
+@media (max-height: 600px) and (max-width: 360px) {
+  .tv { aspect-ratio: 16 / 9; }
 }
 /* A phone on its side: the TV next to everything else. */
 @media (orientation: landscape) and (max-height: 520px) {
