@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0d1430">
   <title>Baixar o Telinha</title>
-  <meta name="description" content="O Telinha para o computador: transmite com menos atraso e se atualiza sozinho.">
+  <meta name="description" content="O Telinha para o computador: transmite com menos atraso, tem código aberto e não grava o que você transmite.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='6' width='26' height='18' rx='5' fill='%23cfe0ff'/%3E%3Ccircle cx='24' cy='11' r='2.4' fill='%23ff4438'/%3E%3Crect x='11' y='26' width='10' height='2.4' rx='1.2' fill='%23cfe0ff'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -14,8 +14,10 @@
   <style>
     body { overflow: auto; }
     .download {
-      min-height: 100dvh; display: grid; justify-items: center; align-content: center; gap: 2rem;
-      padding: max(4.5rem, calc(env(safe-area-inset-top) + 3.5rem)) max(1rem, env(safe-area-inset-right)) max(2.5rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+      /* Everything fits one screen: the lists of downloads open over it, with a scroll of their own. */
+      --gap: clamp(0.75rem, 2.4dvh, 1.5rem);
+      min-height: 100dvh; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; align-content: center; gap: var(--gap);
+      padding: max(3.25rem, calc(env(safe-area-inset-top) + 2.75rem)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
     }
     .back {
       position: fixed; top: max(1rem, env(safe-area-inset-top)); left: max(1rem, env(safe-area-inset-left));
@@ -29,7 +31,7 @@
 
     /* The desktop app's bubble: a round tube that shows the version like a channel. */
     .bubble {
-      position: relative; width: 10.5rem; aspect-ratio: 1; border-radius: 50%;
+      position: relative; width: clamp(5.5rem, 17dvh, 9rem); aspect-ratio: 1; border-radius: 50%;
       display: grid; place-items: center;
       background: radial-gradient(70% 70% at 40% 35%, #1a2558 0%, #121a3d 100%);
       box-shadow:
@@ -54,7 +56,7 @@
     }
     .tube span {
       display: flex; align-items: baseline;
-      font: 900 2.1rem/1 var(--osd); letter-spacing: 0.02em; color: var(--phosphor);
+      font: 900 clamp(1.125rem, 3.4dvh, 1.8rem)/1 var(--osd); letter-spacing: 0.02em; color: var(--phosphor);
       text-shadow: 0 0 14px rgba(150, 190, 255, 0.55), 0 0 2px #fff;
     }
     /* Doto's period reads as a plus sign: the version's dots are drawn instead. */
@@ -64,25 +66,46 @@
     }
 
     .intro { text-align: center; max-width: 30rem; }
-    .intro h1 { margin: 0; font-size: clamp(1.75rem, 5vw, 2.25rem); line-height: 1.1; font-weight: 700; letter-spacing: -0.03em; }
-    .intro p { margin: 0.6rem 0 0; color: var(--muted); font-size: 1.0625rem; letter-spacing: -0.01em; text-wrap: balance; }
+    .intro h1 { margin: 0; font-size: clamp(1.5rem, 4.4dvh, 2.25rem); line-height: 1.1; font-weight: 700; letter-spacing: -0.03em; }
+    .intro p { margin: 0.375rem 0 0; color: var(--muted); font-size: 1rem; letter-spacing: -0.01em; text-wrap: balance; }
 
-    .get { width: min(24rem, 100%); display: grid; gap: 0.75rem; justify-items: center; }
+    .get { width: min(24rem, 100%); display: grid; gap: 0.5rem; justify-items: center; }
     .get .btn-primary { width: 100%; text-decoration: none; }
     .get .alt { color: var(--muted); font-size: 0.9375rem; text-decoration: none; padding: 0.25rem 0.5rem; border-radius: 8px; }
     .get .alt:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
     .get .size { font-weight: 400; opacity: 0.6; }
     .note { margin: 0; color: var(--muted); text-align: center; font-size: 0.9375rem; max-width: 24rem; text-wrap: balance; }
 
-    .more { width: min(30rem, 100%); display: grid; gap: 0.5rem; }
+    /* Why it can be trusted: short title, one plain line. */
+    .trust {
+      width: min(30rem, 100%); display: grid; gap: 0.75rem; padding: 1rem 1.125rem;
+      border-radius: var(--r-lg); background: rgba(200, 212, 255, 0.05); box-shadow: 0 0 0 1px var(--line);
+    }
+    .trust h2 { margin: 0; font-size: 1.0625rem; font-weight: 700; letter-spacing: -0.02em; }
+    .points { margin: 0; padding: 0; list-style: none; display: grid; gap: 0.625rem; }
+    .point { display: grid; grid-template-columns: 1.125rem 1fr; column-gap: 0.625rem; line-height: 1.3; }
+    .point svg { width: 1.125rem; height: 1.125rem; color: var(--phosphor); }
+    .point b { font-size: 0.9375rem; font-weight: 600; letter-spacing: -0.01em; }
+    .point p { grid-column: 2; margin: 0.0625rem 0 0; color: var(--muted); font-size: 0.875rem; text-wrap: pretty; }
+    .source {
+      display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; min-height: 2.75rem; padding: 0 1rem;
+      border-radius: 999px; background: rgba(200, 212, 255, 0.1); color: var(--text);
+      text-decoration: none; font-size: 0.9375rem; font-weight: 600;
+      transition: background-color 160ms ease, transform 120ms ease-out;
+    }
+    .source svg { width: 1.125rem; height: 1.125rem; }
+    .source:hover { background: rgba(200, 212, 255, 0.18); }
+    .source:active { transform: scale(0.96); transition-duration: 60ms; }
+
+    .more { position: relative; width: min(30rem, 100%); display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 0.5rem; }
     .more details {
       border-radius: var(--r-md); background: rgba(200, 212, 255, 0.05);
       box-shadow: 0 0 0 1px var(--line);
     }
     .more summary {
-      list-style: none; cursor: pointer; padding: 0.85rem 1.1rem; border-radius: var(--r-md);
-      display: flex; justify-content: space-between; align-items: center;
-      font-weight: 600; color: var(--text);
+      list-style: none; cursor: pointer; min-height: 2.75rem; padding: 0 0.875rem; border-radius: var(--r-md);
+      display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;
+      font-size: 0.875rem; font-weight: 600; color: var(--text); white-space: nowrap;
     }
     .more summary::-webkit-details-marker { display: none; }
     .more summary::after {
@@ -92,7 +115,12 @@
     }
     .more details[open] summary::after { transform: rotate(-135deg) translateY(-1px); }
     .more summary:hover { background: rgba(200, 212, 255, 0.05); }
-    .rows { margin: 0; padding: 0 0.6rem 0.6rem; list-style: none; display: grid; gap: 0.15rem; }
+    .rows {
+      position: absolute; z-index: 2; left: 0; right: 0; bottom: calc(100% + 0.5rem);
+      max-height: min(24rem, 62dvh); overflow-y: auto; overscroll-behavior: contain;
+      margin: 0; padding: 0.3rem 0.6rem; list-style: none; display: grid; gap: 0.15rem;
+      border-radius: var(--r-md); background: #141c44; box-shadow: 0 0 0 1px var(--line), 0 24px 50px -16px rgba(0, 0, 0, 0.8);
+    }
     .row {
       display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 0.75rem;
       padding: 0.55rem 0.5rem; border-top: 1px solid var(--line);
@@ -114,9 +142,40 @@
     @media (pointer: coarse) {
       .back { min-height: 2.75rem; }
       .chip { min-height: 2.75rem; }
-      .get .alt { padding: 0.6rem 0.75rem; }
+      .get .alt { padding: 0.4rem 0.75rem; }
     }
     .empty-state { text-align: center; color: var(--muted); max-width: 24rem; margin: 0; }
+    /* Room for two columns: what it is on one side, why trust it on the other. */
+    @media (min-width: 900px), (min-width: 620px) and (orientation: landscape) {
+      .download {
+        grid-template-columns: minmax(0, 26rem) minmax(0, 28rem); justify-content: center;
+        column-gap: clamp(1.5rem, 5vw, 4rem); padding-top: max(1rem, env(safe-area-inset-top));
+      }
+      .bubble, .intro, .get, .app-perks, .more { grid-column: 1; }
+      .trust { grid-column: 2; grid-row: 1 / span 5; align-self: center; }
+      .more { width: 100%; }
+    }
+    @media (max-width: 400px) {
+      .more summary { padding: 0 0.625rem; font-size: 0.8125rem; }
+    }
+    /* Short screens: the bubble only repeats the version, so it goes first. */
+    @media (max-height: 840px) and (max-width: 899px) and (orientation: portrait), (max-height: 620px) {
+      .bubble { display: none; }
+    }
+    @media (max-height: 620px) and (max-width: 480px) {
+      .intro p, .trust h2 { display: none; }
+      .back { top: 0.25rem; min-height: 2.5rem; }
+    }
+    @media (max-height: 500px) {
+      .download { --gap: 0.5rem; padding-block: max(0.5rem, env(safe-area-inset-top)) max(0.5rem, env(safe-area-inset-bottom)); }
+      .back { top: 0.25rem; }
+      .intro { padding-top: 1.75rem; } /* clear of "Voltar" */
+      .intro h1 { font-size: 1.375rem; }
+      .trust { gap: 0.5rem; padding: 0.625rem 0.875rem; }
+      .points { gap: 0.375rem; }
+      .source { min-height: 2.25rem; }
+      .more summary { padding: 0 0.625rem; font-size: 0.8125rem; }
+    }
     @media (prefers-reduced-motion: reduce) { .bubble { animation: fade 300ms ease both !important; } }
   </style>
 </head>
@@ -128,10 +187,40 @@
 
     <header class="intro">
       <h1>Telinha no computador</h1>
-      <p>A bolha flutuante que transmite a sua tela com menos atraso, usando a placa de vídeo.</p>
+      <p>Transmita sua tela por uma bolha flutuante.</p>
     </header>
 
     <div class="get" id="get" aria-live="polite"></div>
+
+    <ul class="app-perks" id="gains" aria-label="O que o app traz">
+      <li><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Som do computador</li>
+      <li><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Menos atraso</li>
+      <li><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Mais qualidade</li>
+    </ul>
+
+    <section class="trust" aria-labelledby="trustTitle">
+      <h2 id="trustTitle">Aberto e privado</h2>
+      <ul class="points">
+        <li class="point">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 8-4.5 4L9 16m6-8 4.5 4-4.5 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <b>Código aberto</b>
+          <p>Qualquer pessoa pode conferir o que ele faz.</p>
+        </li>
+        <li class="point">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="9.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <b>Sua transmissão não é gravada</b>
+          <p>Imagem e som vão criptografados para quem assiste.</p>
+        </li>
+        <li class="point">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 20a7 7 0 0 1 14 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <b>Sem conta e sem cadastro</b>
+          <p>Seu nome fica salvo só no seu aparelho. Entrar com o Discord é opcional e guarda só nome, foto e ID.</p>
+        </li>
+      </ul>
+      <a class="source" href="https://github.com/lexmarcos/telinha" target="_blank" rel="noopener noreferrer">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>Ver o código no GitHub
+      </a>
+    </section>
 
     <section class="more" id="more" hidden aria-label="Mais opções"></section>
   </main>
@@ -154,6 +243,9 @@ const PACKAGES = [
   { kind: "appimage", os: "linux", label: "Baixar para Linux", short: "Linux (AppImage)" },
   { kind: "deb", os: "linux", label: "Pacote .deb para Ubuntu, Debian e Zorin", short: "Linux (.deb)" },
 ];
+
+// On a phone the app is not an option, so what it adds would only get in the way.
+$("gains").hidden = OS === "phone";
 
 const mb = (bytes) => `${Math.round(bytes / 1e6)} MB`;
 const day = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString("pt-BR", { day: "numeric", month: "long", year: "numeric" });
@@ -179,7 +271,7 @@ function render(versions) {
     for (const p of mine.slice(1)) get.append(link("alt", p.label, latest.files[p.kind]));
     const note = document.createElement("p");
     note.className = "note";
-    note.textContent = "Você baixa uma vez. Depois o app se atualiza sozinho.";
+    note.textContent = "Baixe uma vez. Depois ele se atualiza sozinho.";
     get.append(note);
   } else {
     const note = document.createElement("p");
@@ -194,9 +286,9 @@ function render(versions) {
 
   const more = $("more");
   const others = PACKAGES.filter((p) => p.os !== OS && latest.files[p.kind]);
-  if (others.length) more.append(group("Outros sistemas", [{ name: `Versão ${latest.version}`, sub: day(latest.date), links: others.map((p) => [p.short, latest.files[p.kind]]) }], !mine.length));
+  if (others.length) more.append(group("Outros sistemas", [{ name: `Versão ${latest.version}`, sub: day(latest.date), links: others.map((p) => [p.short, latest.files[p.kind]]) }]));
   if (versions.length > 1) {
-    more.append(group("Versões anteriores", versions.slice(1).map((v) => ({
+    more.append(group("Outras versões", versions.slice(1).map((v) => ({
       name: `Versão ${v.version}`, sub: day(v.date),
       links: PACKAGES.filter((p) => v.files[p.kind] && (p.os === OS || !mine.length)).map((p) => [p.short, v.files[p.kind]]),
     }))));
@@ -204,9 +296,9 @@ function render(versions) {
   more.hidden = !more.children.length;
 }
 
-function group(title, rows, open = false) {
+function group(title, rows) {
   const d = document.createElement("details");
-  d.open = open;
+  d.name = "downloads"; // one open at a time
   const s = document.createElement("summary");
   s.textContent = title;
   const ul = document.createElement("ul");
@@ -228,6 +320,13 @@ function group(title, rows, open = false) {
   d.append(s, ul);
   return d;
 }
+
+document.addEventListener("click", (e) => {
+  for (const d of document.querySelectorAll(".more details[open]")) if (!d.contains(e.target)) d.open = false;
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") for (const d of document.querySelectorAll(".more details[open]")) d.open = false;
+});
 
 try {
   const r = await fetch("download/versions.json", { cache: "no-cache" });
