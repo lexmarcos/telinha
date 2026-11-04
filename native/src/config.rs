@@ -76,10 +76,6 @@ impl Quality {
     }
 }
 
-fn yes() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -91,14 +87,6 @@ pub struct Config {
     pub server: Option<String>,
     #[serde(default)]
     pub position: Option<(f32, f32)>,
-    /// Discord login (done through the Telinha bot): session and name.
-    #[serde(default)]
-    pub discord_session: Option<String>,
-    #[serde(default)]
-    pub discord_name: Option<String>,
-    /// With login: only people in the same voice call can watch.
-    #[serde(default = "yes")]
-    pub call_only: bool,
     /// Capture portal token (Linux) so it does not ask again.
     #[serde(default)]
     pub capture_token: Option<String>,
@@ -106,7 +94,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { quality: Quality::default(), name: String::new(), server: None, position: None, discord_session: None, discord_name: None, call_only: true, capture_token: None }
+        Self { quality: Quality::default(), name: String::new(), server: None, position: None, capture_token: None }
     }
 }
 
@@ -177,5 +165,29 @@ mod tests {
         assert_eq!(mb(q(60, Priority::Nitidez), (3840, 2160)), 49.8);
         assert_eq!(mb(q(60, Priority::Fluidez), (5120, 2880)), 45.0);
         assert_eq!(mb(q(30, Priority::Fluidez), (1280, 720)), 2.5);
+    }
+
+    /// A config.json saved by a version that still had the login: its fields
+    /// are ignored, the rest stays, and the next save leaves them out.
+    #[test]
+    fn config_antiga_com_login_carrega_sem_perder_o_resto() {
+        let old = r#"{
+            "quality": { "resolution": "1080", "fps": 30, "priority": "nitidez", "system_audio": false },
+            "name": "Ana",
+            "server": "exemplo.test",
+            "position": [10.0, 20.0],
+            "discord_session": "abc",
+            "discord_name": "Ana#1",
+            "call_only": false,
+            "capture_token": "token"
+        }"#;
+        let c: Config = serde_json::from_str(old).expect("old config must keep loading");
+        assert_eq!(c.quality, Quality { resolution: Resolution::P1080, fps: 30, priority: Priority::Nitidez, system_audio: false });
+        assert_eq!(c.name, "Ana");
+        assert_eq!(c.server.as_deref(), Some("exemplo.test"));
+        assert_eq!(c.position, Some((10.0, 20.0)));
+        assert_eq!(c.capture_token.as_deref(), Some("token"));
+        let saved = serde_json::to_value(&c).unwrap();
+        assert!(saved.get("discord_session").is_none() && saved.get("discord_name").is_none() && saved.get("call_only").is_none());
     }
 }

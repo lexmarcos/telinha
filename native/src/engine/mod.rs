@@ -1,7 +1,6 @@
 //! Contract between the UI and the streaming engine. The UI sends
 //! `Command`s and receives `Event`s; the engine runs in the background.
 
-pub mod gate;
 pub mod mock;
 pub mod path;
 pub mod peer;
@@ -26,9 +25,8 @@ pub enum Command {
     Create { name: String, server: Option<String> },
     /// Joins a channel by number or invite link.
     Join { input: String, name: String, server: Option<String> },
-    /// `discord`: Discord login session when only people in the call may
-    /// watch (gatekeeper); `None` leaves it open to anyone with the link.
-    StartLive { quality: Quality, discord: Option<String> },
+    /// Starts streaming, open to anyone with the link.
+    StartLive { quality: Quality },
     StopLive,
     SetQuality { quality: Quality },
     Leave,
@@ -54,8 +52,6 @@ pub enum Event {
     /// Size of the screen to be captured (for the resolution options).
     Screen { width: u32, height: u32 },
     Notice(String),
-    /// Positive notice (not a problem).
-    Info(String),
     Left,
 }
 

@@ -39,6 +39,14 @@ enum Kind {
     Windows(PathBuf),
 }
 
+pub fn open_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let r = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    #[cfg(not(target_os = "windows"))]
+    let r = std::process::Command::new("xdg-open").arg(url).spawn();
+    r.map(|_| ()).map_err(|e| format!("não abriu o navegador: {e}"))
+}
+
 /// How this copy was installed (None: development build or unknown).
 fn kind() -> Option<Kind> {
     #[cfg(target_os = "linux")]

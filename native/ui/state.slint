@@ -24,13 +24,13 @@ export global AppState {
     in property <float> update-progress: -1;
 
     // Quality (segmented thumbs come from springs: resolution, fps,
-    // priority, sound, who can watch)
+    // priority, sound)
     in property <[string]> res-options;
     in property <int> res-sel;
     in property <int> fps-sel;
     in property <int> prio-sel;
     in property <int> audio-sel;
-    in property <[float]> thumbs: [0, 0, 0, 0, 0];
+    in property <[float]> thumbs: [0, 0, 0, 0];
     in property <string> screen-note;
     in property <string> prio-note;
     in property <string> encoder-note;
@@ -43,12 +43,7 @@ export global AppState {
     in-out property <string> name;
     in property <bool> joining;
 
-    // Discord
-    in property <bool> discord-logged;
-    in property <string> discord-name;
-    in property <int> call-sel;
-
-    callback open(int); // 1 menu, 2 quality, 3 join, 4 Discord, 5 toast
+    callback open(int); // 1 menu, 2 quality, 3 join, 5 toast
     callback dismiss();
     callback update();
     callback create();
@@ -65,7 +60,4 @@ export global AppState {
     callback set-fps(int);
     callback set-priority(int);
     callback set-audio(int);
-    callback set-call(int);
-    callback discord-login();
-    callback discord-logout();
 }

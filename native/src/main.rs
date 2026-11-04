@@ -112,7 +112,7 @@ fn main() {
     }
     update::cleanup();
 
-    // Engine, Discord and tray on tokio; the UI on the main thread.
+    // Engine and tray on tokio; the UI on the main thread.
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     let _guard = rt.enter();
     app::run();
@@ -206,8 +206,7 @@ async fn headless(link: Option<String>, server: Option<String>, secs: u64) {
                 println!("event: {e:?}");
                 match e {
                     Event::Joined { .. } => {
-                        let discord = std::env::var("TELINHA_DISCORD_SESSAO").ok();
-                        let _ = cmd_tx.send(Command::StartLive { quality: config::Quality::default(), discord }).await;
+                        let _ = cmd_tx.send(Command::StartLive { quality: config::Quality::default() }).await;
                     }
                     Event::Failed(_) | Event::Left => return,
                     _ => {}

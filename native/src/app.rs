@@ -1,5 +1,5 @@
-//! The bubble: UI state, springs and the wiring to the engine, the tray and
-//! Discord. Drawing lives in ui/*.slint (the design system is in DESIGN.md);
+//! The bubble: UI state, springs and the wiring to the engine and the tray.
+//! Drawing lives in ui/*.slint (the design system is in DESIGN.md);
 //! here we only decide what to show and how it moves.
 //!
 //! Animations are springs (ui/spring.rs), not Slint easing curves: a spring
@@ -37,7 +37,6 @@ enum Panel {
     Menu = 1,
     Quality = 2,
     Join = 3,
-    Discord = 4,
     /// A short message beside the bubble that closes on its own.
     Toast = 5,
 }
@@ -47,7 +46,6 @@ impl Panel {
         match i {
             2 => Self::Quality,
             3 => Self::Join,
-            4 => Self::Discord,
             5 => Self::Toast,
             _ => Self::Menu,
         }
@@ -73,9 +71,6 @@ struct Controller {
     /// Title, text and tone of the toast (panel 5).
     toast: (String, String, NoteTone),
     toast_timer: slint::Timer,
-    /// The current stream only lets people in the Discord call watch (the bot
-    /// announces it); otherwise the invite is copied when it starts.
-    live_gated: bool,
     /// A newer version on the server, and its download (0..1, negative when idle).
     update: Option<crate::update::Release>,
     update_progress: f32,
@@ -93,9 +88,8 @@ struct Controller {
     open: Spring,
     press: Spring,
     tally: Spring,
-    /// Segmented-control indicators: resolution, fps, priority, audio and who
-    /// can watch.
-    thumbs: [Spring; 5],
+    /// Segmented-control indicators: resolution, fps, priority and audio.
+    thumbs: [Spring; 4],
     panel_h: Spring,
     fade: Spring,
     /// Height the window reserves for the panel: during a switch, the larger of
@@ -126,7 +120,7 @@ fn with(f: impl FnOnce(&mut Controller)) {
     });
 }
 
-/// Sends work from another thread (engine, tray, Discord) to the UI.
+/// Sends work from another thread (engine, tray) to the UI.
 fn post(f: impl FnOnce(&mut Controller) + Send + 'static) {
     let _ = slint::invoke_from_event_loop(move || with(f));
 }
@@ -150,7 +144,6 @@ pub fn run() {
         notice: None,
         toast: (String::new(), String::new(), NoteTone::Info),
         toast_timer: slint::Timer::default(),
-        live_gated: false,
         update: None,
         update_progress: -1.0,
         join_text: String::new(),
@@ -162,7 +155,7 @@ pub fn run() {
         open: Spring::new(0.0, motion::UI),
         press: Spring::new(0.0, motion::PRESS),
         tally: Spring::new(0.0, motion::TALLY),
-        thumbs: [Spring::new(0.0, motion::UI); 5],
+        thumbs: [Spring::new(0.0, motion::UI); 4],
         panel_h: Spring::new(0.0, motion::UI),
         fade: Spring::new(1.0, motion::FADE),
         hold_h: 0.0,
@@ -213,9 +206,7 @@ impl Controller {
         st.on_start_live(|| {
             with(|c| {
                 let quality = c.config.quality;
-                let discord = if c.config.call_only { c.config.discord_session.clone() } else { None };
-                c.live_gated = discord.is_some();
-                c.send(Command::StartLive { quality, discord });
+                c.send(Command::StartLive { quality });
                 c.close_panel();
             })
         });
@@ -271,23 +262,6 @@ impl Controller {
             with(|c| {
                 c.config.quality.system_audio = i == 1;
                 c.quality_changed();
-            })
-        });
-        st.on_set_call(|i| {
-            with(|c| {
-                c.config.call_only = i == 1;
-                c.config.save();
-                c.sync_thumbs(false);
-                c.render();
-            })
-        });
-        st.on_discord_login(|| with(|c| c.discord_login()));
-        st.on_discord_logout(|| {
-            with(|c| {
-                c.config.discord_session = None;
-                c.config.discord_name = None;
-                c.config.save();
-                c.render();
             })
         });
     }
@@ -584,11 +558,6 @@ impl Controller {
         }
         st.set_joining(self.joining);
 
-        // Discord
-        st.set_discord_logged(self.config.discord_session.is_some());
-        st.set_discord_name(self.config.discord_name.clone().unwrap_or_default().into());
-        st.set_call_sel(i32::from(self.config.call_only));
-
         ui.set_panel_kind(self.panel.map_or(0, |p| p as i32));
         ui.set_panel_shown(self.panel.is_some());
         ui.set_side_left(self.side_left);
@@ -707,7 +676,7 @@ impl Controller {
         if !crate::update::can_install(&r) {
             // This copy cannot replace itself: the download page can.
             if let Some(page) = crate::update::page() {
-                let _ = crate::engine::gate::open_browser(&page);
+                let _ = crate::update::open_browser(&page);
             }
             self.tell("", "Baixe a nova versão na página que abriu no navegador.", NoteTone::Info);
             return;
@@ -782,31 +751,6 @@ impl Controller {
         self.render();
     }
 
-    fn discord_login(&mut self) {
-        let Some(server) = self.config.server.clone() else {
-            self.notice = Some(("Entre num canal uma vez antes, para o app saber qual é o servidor.".into(), NoteTone::Warn));
-            self.render();
-            return;
-        };
-        self.notice = Some(("Termine o login no navegador.".into(), NoteTone::Info));
-        self.render();
-        tokio::spawn(async move {
-            let r = crate::engine::gate::login(server).await;
-            post(move |c| {
-                match r {
-                    Ok((session, name)) => {
-                        c.config.discord_session = Some(session);
-                        c.config.discord_name = Some(name);
-                        c.config.save();
-                        c.notice = None;
-                    }
-                    Err(e) => c.notice = Some((e, NoteTone::Error)),
-                }
-                c.render();
-            });
-        });
-    }
-
     fn on_tray(&mut self, e: crate::tray::TrayEvent) {
         match e {
             crate::tray::TrayEvent::Show => self.show(),
@@ -843,9 +787,9 @@ impl Controller {
                 if let Session::Channel { live, .. } = &mut self.session {
                     *live = on;
                 }
-                // Without the Discord bot announcing it, the invite is how
-                // friends get in: it is ready to paste as soon as the stream starts.
-                if started && !self.live_gated && self.copy_invite() {
+                // The invite is how friends get in: it is ready to paste as
+                // soon as the stream starts.
+                if started && self.copy_invite() {
                     self.tell("Convite copiado", "É só colar no chat da galera.", NoteTone::Info);
                 }
                 self.tally.set_target(if on { 1.0 } else { 0.0 });
@@ -860,7 +804,6 @@ impl Controller {
                 self.sync_thumbs(true);
             }
             Event::Notice(msg) => self.tell("", &msg, NoteTone::Warn),
-            Event::Info(msg) => self.tell("", &msg, NoteTone::Info),
             Event::Left => {
                 self.session = Session::Idle;
                 self.viewers.clear();
@@ -891,7 +834,7 @@ impl Controller {
         let opts = self.resolution_options();
         let res = opts.iter().position(|r| *r == q.resolution).unwrap_or(opts.len() - 1);
         let fps = FPS_OPTIONS.iter().position(|f| *f == q.fps).unwrap_or(1);
-        let values = [res, fps, usize::from(q.priority == Priority::Nitidez), usize::from(q.system_audio), usize::from(self.config.call_only)];
+        let values = [res, fps, usize::from(q.priority == Priority::Nitidez), usize::from(q.system_audio)];
         for (s, v) in self.thumbs.iter_mut().zip(values) {
             if snap { s.snap(v as f32) } else { s.set_target(v as f32) }
         }
@@ -958,10 +901,10 @@ fn shots(dir: PathBuf) {
         ("menu-canal", 700, |c| c.open_panel(Panel::Menu)),
         ("ao-vivo", 1200, |c| {
             let quality = c.config.quality;
-            c.send(Command::StartLive { quality, discord: None });
+            c.send(Command::StartLive { quality });
             c.close_panel();
         }),
-        // The invite toast (no Discord) closes on its own.
+        // The invite toast closes on its own.
         ("aviso-sumiu", 4200, |_| {}),
         ("menu-ao-vivo", 700, |c| c.open_panel(Panel::Menu)),
         ("qualidade", 800, |c| c.open_panel(Panel::Quality)),
@@ -969,7 +912,6 @@ fn shots(dir: PathBuf) {
             c.config.quality.priority = Priority::Nitidez;
             c.quality_changed();
         }),
-        ("discord", 800, |c| c.open_panel(Panel::Discord)),
         ("atualizacao", 900, |c| {
             c.close_panel();
             c.update_found(crate::update::Release::sample("0.3.0"));

@@ -32,9 +32,7 @@ struct Member {
     /// Receives video via WebCodecs (Chrome/Edge; Safari and Firefox paint it
     /// on a canvas). These get the data channel; the rest get RTP.
     wc: bool,
-    /// Streams only to people in the Discord call (requires a pass).
-    discord: bool,
-    /// Discord avatar URL (only from Discord's CDN), passed along in the roster.
+    /// Avatar URL (see the CDN check where guests join), passed along in the roster.
     avatar: String,
     /// Codecs past H.264 the browser decodes in hardware ("hevc", "av1").
     dec: Vec<String>,
@@ -55,8 +53,6 @@ enum Kind {
     Turbo,
     /// I stream: plain RTP video (relay, bad connection, no WebCodecs).
     Media,
-    /// I stream: someone came to hand over the Discord pass.
-    Pass,
 }
 
 struct Conn {
@@ -250,10 +246,6 @@ struct Session {
     relayed: std::collections::HashSet<String>,
     /// Who said they decode HEVC but could not: H.264 for the rest of the stream.
     no_hevc: std::collections::HashSet<String>,
-    /// Discord session for the gatekeeper of the next stream.
-    discord: Option<String>,
-    /// Gatekeeper of the current stream (only people in the call can watch).
-    gate: Option<super::gate::Gate>,
     /// Who was in the channel at the last roster (for the join and leave
     /// chimes). None until the first roster: that one is not news.
     heard: Option<std::collections::HashSet<String>>,
@@ -350,15 +342,13 @@ async fn start(ui: &mpsc::Sender<Event>, name: String, server: Option<String>, c
         demoted: Default::default(),
         relayed: Default::default(),
         no_hevc: Default::default(),
-        discord: None,
-        gate: None,
         heard: None,
     };
     s.spawn_signal_forwarder(sig_rx, peer_rx);
 
     if is_host {
         s.heard = Some([me.clone()].into());
-        s.members = vec![Member { id: me, name, sharing: false, wc: false, discord: false, avatar: String::new(), dec: vec![] }];
+        s.members = vec![Member { id: me, name, sharing: false, wc: false, avatar: String::new(), dec: vec![] }];
         s.joined = true;
         s.announce_joined().await;
     } else {
@@ -457,12 +447,8 @@ impl Session {
             .members
             .iter()
             .filter(|m| m.id != self.me)
-            // With the gatekeeper, only those who showed a pass count (with their Discord name).
-            .filter_map(|m| match &self.gate {
-                Some(g) => g.allowed.get(&m.id).map(|(_, name)| Viewer { name: name.clone(), supported: true }),
-                // Those without WebCodecs receive via RTP: everyone can watch.
-                None => Some(Viewer { name: m.name.clone(), supported: true }),
-            })
+            // Those without WebCodecs receive via RTP: everyone can watch.
+            .map(|m| Viewer { name: m.name.clone(), supported: true })
             .collect();
         let _ = self.ui.send(Event::Viewers(viewers)).await;
     }
@@ -666,33 +652,12 @@ impl Session {
     }
 
     async fn on_offer(&mut self, src: String, payload: Value) {
-        // The host accepts guests joining the channel; a streamer with the
-        // gatekeeper accepts pass deliveries. The app does not yet watch
-        // other people's video.
-        let pass = payload["metadata"]["kind"] == "passe";
-        if payload["type"] != "data" || payload["metadata"]["kind"] == "turbo" {
+        // The host accepts guests joining the channel. The app does not yet
+        // watch other people's video.
+        if !is_join(&payload) || !matches!(self.role, Role::Host) {
             return;
         }
-        if (pass && self.gate.is_none()) || (!pass && !matches!(self.role, Role::Host)) {
-            return;
-        }
-        let mut meta = payload["metadata"].clone();
-        if pass {
-            let gate = self.gate.as_mut().expect("checked above");
-            let verdict = gate.check(meta["passe"].as_str().unwrap_or_default(), &self.code, &self.me);
-            meta = match verdict {
-                Ok((user, name)) => {
-                    tracing::info!(who = %name, "pass accepted");
-                    gate.admit(src.clone(), user, name);
-                    json!({ "ok": true })
-                }
-                Err(why) => {
-                    tracing::info!("pass rejected: {why}");
-                    // Bot has not confirmed yet: the viewer retries shortly.
-                    json!({ "ok": false, "motivo": why, "tentar": !gate.ready() })
-                }
-            };
-        }
+        let meta = payload["metadata"].clone();
         let conn = payload["connectionId"].as_str().unwrap_or_default().to_owned();
         let sdp = payload["sdp"]["sdp"].as_str().unwrap_or_default().to_owned();
         let Ok(pc) = peer::new_connection(&self.ice, &conn, false, self.peers.clone()).await else { return };
@@ -709,7 +674,7 @@ impl Session {
             conn,
             Conn {
                 peer: src,
-                kind: if pass { Kind::Pass } else { Kind::Guest },
+                kind: Kind::Guest,
                 pc,
                 control: None,
                 video: None,
@@ -728,10 +693,6 @@ impl Session {
                 path: None,
             },
         );
-        if pass {
-            self.publish_viewers().await;
-            self.sync_viewers().await;
-        }
     }
 
     /* ---------------- conexões: eventos ---------------- */
@@ -804,7 +765,7 @@ impl Session {
                     let why = if how == "hidden" { "the browser dropped it while in the background" } else { "it crashed" };
                     tracing::warn!(who = %name, why, "viewer's previous page ended without closing");
                 }
-                self.members.push(Member { id, name, sharing: false, wc, discord: false, avatar, dec });
+                self.members.push(Member { id, name, sharing: false, wc, avatar, dec });
                 self.broadcast_roster().await;
             }
             (Kind::Turbo, Which::Video) => {
@@ -814,15 +775,6 @@ impl Session {
                 }
             }
             (Kind::Turbo, Which::Control) => c.open = true,
-            (Kind::Pass, Which::Control) => {
-                // Tell whoever delivered the pass whether it worked (and why not).
-                c.open = true;
-                if let Some(ch) = c.control.clone() {
-                    let mut msg = c.meta.clone();
-                    msg["t"] = json!("passe");
-                    peer::send_json(&ch, &msg).await;
-                }
-            }
             _ => {}
         }
         Ok(())
@@ -842,7 +794,7 @@ impl Session {
                 self.members.retain(|m| m.id != c.peer);
                 self.broadcast_roster().await;
             }
-            Kind::Turbo | Kind::Media | Kind::Pass => {}
+            Kind::Turbo | Kind::Media => {}
         }
     }
 
@@ -864,7 +816,6 @@ impl Session {
                                 sharing: m["sharing"].as_bool().unwrap_or(false),
                                 wc: m["wc"].as_bool().unwrap_or(false),
                                 dec: decoders(&m["dec"]),
-                                discord: m["discord"].as_bool().unwrap_or(false),
                                 avatar: m["avatar"].as_str().unwrap_or_default().to_owned(),
                             })
                             .collect()
@@ -883,7 +834,6 @@ impl Session {
                 let peer = self.conns.get(&conn).map(|c| c.peer.clone()).unwrap_or_default();
                 if let Some(m) = self.members.iter_mut().find(|m| m.id == peer) {
                     m.sharing = v["on"].as_bool().unwrap_or(false);
-                    m.discord = m.sharing && v["discord"].as_bool().unwrap_or(false);
                 }
                 self.broadcast_roster().await;
             }
@@ -926,10 +876,9 @@ impl Session {
     async fn broadcast_roster(&mut self) {
         if let Some(me) = self.members.iter_mut().find(|m| m.id == self.me) {
             me.sharing = self.live.is_some();
-            me.discord = self.gate.is_some();
         }
         let members: Vec<Value> =
-            self.members.iter().map(|m| json!({ "id": m.id, "name": m.name, "avatar": m.avatar, "sharing": m.sharing, "wc": m.wc, "dec": m.dec, "discord": m.discord })).collect();
+            self.members.iter().map(|m| json!({ "id": m.id, "name": m.name, "avatar": m.avatar, "sharing": m.sharing, "wc": m.wc, "dec": m.dec })).collect();
         let msg = json!({ "t": "roster", "members": members });
         for c in self.conns.values().filter(|c| c.kind == Kind::Guest && c.open) {
             if let Some(ch) = &c.control {
@@ -956,9 +905,8 @@ impl Session {
 
     async fn on_command(&mut self, cmd: Command) {
         match cmd {
-            Command::StartLive { quality, discord } => {
+            Command::StartLive { quality } => {
                 self.quality = quality;
-                self.discord = discord;
                 if let Err(e) = self.start_live().await {
                     let _ = self.ui.send(Event::Failed(e)).await;
                 }
@@ -992,9 +940,6 @@ impl Session {
             return Ok(());
         }
         let source = crate::capture::open(self.quality).await?;
-        if let Some(session) = self.discord.clone() {
-            self.gate = Some(super::gate::Gate::open(&self.server, session, &self.code, &self.me));
-        }
         let audio = if self.quality.system_audio {
             crate::audio::start().map_err(|e| tracing::warn!("no computer audio: {e}")).ok()
         } else {
@@ -1031,9 +976,6 @@ impl Session {
 
     async fn stop_live(&mut self) {
         let Some(live) = self.live.take() else { return };
-        if let Some(gate) = self.gate.take() {
-            gate.close();
-        }
         live.control.stop.store(true, Ordering::Relaxed);
         let turbo: Vec<String> = self.conns.iter().filter(|(_, c)| matches!(c.kind, Kind::Turbo | Kind::Media)).map(|(k, _)| k.clone()).collect();
         for id in turbo {
@@ -1048,7 +990,7 @@ impl Session {
             Role::Host => self.broadcast_roster().await,
             Role::Guest { link, .. } => {
                 if let Some(ch) = self.conns.get(link).and_then(|c| c.control.clone()) {
-                    peer::send_json(&ch, &json!({ "t": "sharing", "on": on, "discord": on && self.gate.is_some() })).await;
+                    peer::send_json(&ch, &json!({ "t": "sharing", "on": on })).await;
                 }
             }
         }
@@ -1065,7 +1007,6 @@ impl Session {
             .members
             .iter()
             .filter(|m| m.id != self.me)
-            .filter(|m| self.gate.as_ref().is_none_or(|g| g.allowed.contains_key(&m.id)))
             .map(|m| (m.id.clone(), m.wc && !self.demoted.contains(&m.id)))
             .collect();
         let existing: Vec<(String, String, Kind, bool)> = self
@@ -1110,7 +1051,6 @@ impl Session {
             .members
             .iter()
             .filter(|m| m.id != self.me)
-            .filter(|m| self.gate.as_ref().is_none_or(|g| g.allowed.contains_key(&m.id)))
             .map(|m| (m.wc && !self.demoted.contains(&m.id), m.dec.iter().any(|d| d == "hevc") && !self.no_hevc.contains(&m.id)))
             .collect();
         let wanted = pick_codec(std::env::var_os("TELINHA_HEVC").is_some(), &viewers, rtp);
@@ -1268,21 +1208,6 @@ impl Session {
     }
 
     async fn on_tick(&mut self) {
-        // Discord gatekeeper: bot response and retries.
-        if let Some(change) = match &mut self.gate {
-            Some(g) => g.poll().await,
-            None => None,
-        } {
-            use super::gate::Change;
-            let event = match change {
-                Change::Ready { announced: false, .. } => Event::Notice("O bot não conseguiu postar no chat da call. Usem /telinha lá.".into()),
-                Change::Ready { after_failure: true, .. } => Event::Info("Achei sua call: o Assistir está no chat dela.".into()),
-                Change::Ready { .. } => Event::Info("O Assistir está no chat da sua call.".into()),
-                Change::Failed(e) => Event::Notice(format!("{e} Tento de novo a cada 15 segundos.")),
-            };
-            tracing::info!("gatekeeper: {event:?}");
-            let _ = self.ui.send(event).await;
-        }
         let Some(live) = &mut self.live else { return };
         let st = live.control.stats();
         if video::NVENC_DRIVER_TOO_OLD.swap(false, Ordering::Relaxed) {
@@ -1408,6 +1333,13 @@ impl Session {
     }
 }
 
+/// Is this offer someone joining the channel? Joins carry no `kind`. Anything
+/// else is not for the channel list: video offers, and the pass that a page
+/// still following a stream from an older version of the app may hand over.
+fn is_join(offer: &Value) -> bool {
+    offer["type"] == "data" && offer["metadata"]["kind"].is_null()
+}
+
 /// HEVC needs every viewer on the data channel (RTP is H.264 only) with a
 /// browser that reported a hardware HEVC decoder; anyone else, or nobody,
 /// means H.264. `viewers`: (gets the data channel, decodes HEVC) each.
@@ -1436,6 +1368,15 @@ fn rtp_cap(estimates: &[(String, u32)]) -> (Option<u32>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn so_entrada_no_canal_vira_convidado() {
+        assert!(is_join(&json!({ "type": "data", "metadata": { "name": "Ana", "wc": true } })));
+        assert!(!is_join(&json!({ "type": "media", "metadata": { "name": "Ana" } })));
+        assert!(!is_join(&json!({ "type": "data", "metadata": { "kind": "turbo" } })));
+        // Would otherwise replace the real member with a nameless one.
+        assert!(!is_join(&json!({ "type": "data", "metadata": { "kind": "passe", "passe": "x.y" } })));
+    }
 
     #[test]
     fn escada_de_taxa() {

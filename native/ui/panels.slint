@@ -6,7 +6,7 @@ import { AppState } from "state.slint";
 import { Header, Label } from "surface.slint";
 import { MenuItem, Divider, Tone } from "menu-item.slint";
 import { Segmented } from "segmented.slint";
-import { Pill, PillKind } from "pill.slint";
+import { Pill } from "pill.slint";
 import { Field } from "field.slint";
 import { Note, NoteTone } from "note.slint";
 
@@ -56,10 +56,6 @@ export component MenuPanel inherits VerticalLayout {
         clicked => { AppState.copy-invite(); }
     }
     Divider { }
-    MenuItem {
-        icon: @image-url("icons/profile.svg"); label: "Discord";
-        clicked => { AppState.open(4); }
-    }
     MenuItem {
         icon: @image-url("icons/tray.svg"); label: "Esconder na bandeja";
         clicked => { AppState.hide(); }
@@ -146,38 +142,6 @@ export component JoinPanel inherits VerticalLayout {
         enabled: !AppState.joining;
         clicked => { AppState.join-submit(); }
     }
-    NoticeLine { }
-}
-
-export component DiscordPanel inherits VerticalLayout {
-    Header {
-        title: "Discord";
-        subtitle: AppState.discord-logged ? "Conectado como " + AppState.discord-name : "";
-        back: true;
-        go-back => { AppState.open(1); }
-    }
-    Gap { size: Space.m; }
-    Label { text: "Quem pode assistir"; }
-    Gap { size: Space.s; }
-    if !AppState.discord-logged: Note { text: "Entre com o Discord para deixar só quem está na sua call assistir."; }
-    if !AppState.discord-logged: Gap { size: Space.m; }
-    if !AppState.discord-logged: Pill { label: "Entrar com o Discord"; clicked => { AppState.discord-login(); } }
-    if AppState.discord-logged: Segmented {
-        options: ["Quem tiver o link", "Só a call"];
-        selected: AppState.call-sel;
-        thumb: AppState.thumbs[4];
-        pick(i) => { AppState.set-call(i); }
-    }
-    if AppState.discord-logged: Gap { size: Space.xs + 2px; }
-    if AppState.discord-logged: Note {
-        text: AppState.call-sel == 1
-            ? "Ao transmitir, o bot posta um Assistir no chat da sua call. Só quem está nela consegue abrir."
-            : "Qualquer pessoa com o link do canal assiste.";
-    }
-    if AppState.discord-logged && AppState.live: Gap { size: Space.xs + 2px; }
-    if AppState.discord-logged && AppState.live: Note { text: "Muda a partir da próxima transmissão."; tone: NoteTone.warn; }
-    if AppState.discord-logged: Gap { size: Space.m; }
-    if AppState.discord-logged: Pill { label: "Sair do Discord"; kind: PillKind.quiet; clicked => { AppState.discord-logout(); } }
     NoticeLine { }
 }
 
