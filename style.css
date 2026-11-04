@@ -72,67 +72,40 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
 .icon-btn-leave:hover { background: var(--tally-soft); color: #ffb3ad; }
 
 /* ---------- Entry ---------- */
-/* A color bar test card, the picture a TV shows when nothing is on. The page keeps
-   the card's proportions (bars 8, castellations 1, bottom row 3) and its bottom row
-   holds the form. Colors are the standard 75% bars. */
 .lobby {
-  --bar-white: #c0c0c0; --bar-yellow: #c0c000; --bar-cyan: #00c0c0; --bar-green: #00c000;
-  --bar-magenta: #c000c0; --bar-red: #c00000; --bar-blue: #0000c0;
-  --minus-i: #00214c; --plus-q: #32006a;
-  --lobby-muted: #b4b4b4;
-  --safe-l: max(1.25rem, env(safe-area-inset-left));
-  --safe-r: max(1.25rem, env(safe-area-inset-right));
+  --gap: 2rem;
   height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain;
-  display: grid; grid-template-rows: auto minmax(20rem, 9fr) minmax(10rem, 3fr);
-  background: #000;
-  font-family: "Archivo", var(--font);
+  display: flex; flex-direction: column; align-items: center; gap: var(--gap);
+  padding:
+    max(1.5rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
+    max(1.5rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
 }
+/* The spacers centre the content when it fits and let it scroll from the top when it does not
+   (the negative margins cancel the flex gap next to them). */
+.lobby::before, .lobby::after { content: ""; flex: 1 0 0; }
+.lobby::before { margin-bottom: calc(var(--gap) * -1); }
+.lobby::after { margin-top: calc(var(--gap) * -1); }
 .lobby.leaving { opacity: 0; transition: opacity 260ms ease; pointer-events: none; }
 
-.brand {
-  display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 1.25rem; row-gap: 0.125rem;
-  padding: max(0.875rem, env(safe-area-inset-top)) var(--safe-r) 0.875rem var(--safe-l);
-}
+.brand { text-align: center; max-width: 32rem; }
 .brand h1 {
-  margin: 0; font-size: clamp(1.75rem, 3vw, 2.5rem); line-height: 1.1;
-  font-weight: 800; font-stretch: 125%; letter-spacing: -0.03em;
+  margin: 0; font-size: clamp(2rem, 6vw, 2.75rem); line-height: 1.05;
+  font-weight: 700; letter-spacing: -0.035em;
 }
-.brand p { margin: 0; color: var(--lobby-muted); }
-.get-app {
-  margin-left: auto; align-self: center;
-  display: inline-flex; align-items: center; gap: 0.45rem;
-  min-height: 2.25rem; padding: 0 0.75rem; margin-right: -0.75rem;
-  color: var(--lobby-muted); font-size: 0.9375rem; font-weight: 600; text-decoration: none;
-  transition: color 160ms ease;
-}
-.get-app svg { width: 1.05rem; height: 1.05rem; }
-.get-app:hover { color: #fff; }
+.brand p { margin: 0.5rem 0 0; color: var(--muted); font-size: 1.0625rem; letter-spacing: -0.01em; }
 
-.signal {
-  container-type: size;
-  display: grid; place-items: center;
-  background:
-    linear-gradient(90deg,
-      var(--bar-white) 0 calc(100% / 7), var(--bar-yellow) 0 calc(200% / 7),
-      var(--bar-cyan) 0 calc(300% / 7), var(--bar-green) 0 calc(400% / 7),
-      var(--bar-magenta) 0 calc(500% / 7), var(--bar-red) 0 calc(600% / 7), var(--bar-blue) 0)
-      top / 100% calc(100% * 8 / 9) no-repeat,
-    linear-gradient(90deg,
-      var(--bar-blue) 0 calc(100% / 7), #000 0 calc(200% / 7),
-      var(--bar-magenta) 0 calc(300% / 7), #000 0 calc(400% / 7),
-      var(--bar-cyan) 0 calc(500% / 7), #000 0 calc(600% / 7), var(--bar-white) 0)
-      bottom / 100% calc(100% / 9) no-repeat;
-}
-
-/* The little screen: the only round thing on the card. The channel number shows on it. */
+/* The little screen: the channel number shows on it */
 .tv {
-  container-type: inline-size;
-  position: relative; width: min(34rem, 100% - 3rem); aspect-ratio: 16 / 10;
-  width: min(34rem, 100cqw - 3rem, (100cqh - 3rem) * 1.6);
+  position: relative; width: min(34rem, 100%); aspect-ratio: 16 / 10;
   border-radius: var(--r-lg); overflow: hidden;
-  background: radial-gradient(80% 80% at 50% 45%, #10152c 0%, #000 100%);
-  box-shadow: 0 0 0 10px #000;
-  display: grid; place-items: center; align-content: center; gap: 0.5rem;
+  background: radial-gradient(80% 80% at 50% 45%, #10183a 0%, var(--screen) 100%);
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 0 0 10px rgba(10, 15, 38, 0.9),
+    0 0 0 11px var(--line),
+    0 40px 120px -20px rgba(80, 120, 255, 0.35),
+    0 30px 60px -30px rgba(0, 0, 0, 0.8);
+  display: grid; place-items: center; align-content: center; gap: 0.75rem;
   animation: power-on 900ms var(--ease-out) 120ms both;
   cursor: text;
 }
@@ -154,113 +127,86 @@ svg { width: 1.25rem; height: 1.25rem; flex: none; }
     repeating-linear-gradient(to bottom, rgba(255,255,255,0.025) 0 1px, transparent 1px 3px),
     radial-gradient(120% 70% at 30% 0%, rgba(255,255,255,0.08), transparent 55%);
 }
-/* The red light from the icon: on once the number is complete. */
-.tv::after {
-  content: ""; position: absolute; top: 7%; right: 5%;
-  width: 0.625rem; height: 0.625rem; border-radius: 50%;
-  background: #3a1210; transition: background-color 160ms ease, box-shadow 160ms ease;
-}
-.tv.tuned::after { background: var(--tally); box-shadow: 0 0 12px var(--tally); }
 
 .osd { position: relative; display: grid; justify-items: center; cursor: text; }
 .osd-word {
-  font: 900 clamp(1rem, 3.4vw, 1.5rem)/1 var(--osd);
-  font-size: clamp(1rem, 4.4cqi, 1.5rem);
-  color: var(--phosphor); opacity: 0.9; letter-spacing: 0.04em;
+  font: 700 clamp(1rem, 3.4vw, 1.375rem)/1 var(--osd);
+  color: var(--phosphor); opacity: 0.7; letter-spacing: 0.04em;
 }
 .osd-digits {
   width: 4.6ch; padding: 0; border: 0; background: none; outline: none;
   text-align: center; caret-color: var(--tally);
   font: 900 clamp(4.5rem, 19vw, 8.5rem)/1 var(--osd);
-  font-size: clamp(3rem, 25cqi, 8.5rem);
   letter-spacing: 0.06em; color: var(--phosphor);
   text-shadow: 0 0 18px rgba(150, 190, 255, 0.55), 0 0 2px #fff;
 }
-.osd-digits::placeholder { color: var(--phosphor); opacity: 0.32; text-shadow: none; }
-.tv:focus-within { box-shadow: 0 0 0 3px var(--phosphor), 0 0 0 10px #000; }
+.osd-digits::placeholder { color: var(--phosphor); opacity: 0.18; text-shadow: none; }
+.tv:focus-within { box-shadow:
+    0 0 0 1px rgba(207, 224, 255, 0.5),
+    0 0 0 10px rgba(10, 15, 38, 0.9),
+    0 0 0 11px var(--line),
+    0 40px 120px -20px rgba(80, 120, 255, 0.45),
+    0 30px 60px -30px rgba(0, 0, 0, 0.8); }
 .tv .osd-digits:focus-visible { outline: none; }
 .tv-hint {
   position: relative; margin: 0; padding: 0 1.25rem; text-align: center;
-  color: #c3cbe6; font-size: 0.9375rem; font-size: clamp(0.8125rem, 4.2cqi, 0.9375rem);
+  color: var(--muted); font-size: 0.9375rem;
 }
 .tv.tuned .tv-hint { color: var(--phosphor); }
 
-/* The card's bottom row: -I, white, +Q, then black. The white patch lights up when there is a number to tune to. */
-.controls {
-  display: grid; grid-template-columns: repeat(3, minmax(11rem, 5fr)) 13fr; grid-template-rows: auto 1fr;
-  padding-bottom: env(safe-area-inset-bottom);
+.controls { width: min(26rem, 100%); display: grid; gap: 1rem; }
+.field { display: grid; gap: 0.375rem; }
+.field span { font-size: 0.875rem; font-weight: 600; color: var(--muted); padding-left: 0.25rem; }
+.field input {
+  height: 3rem; padding: 0 1rem; border-radius: var(--r-md);
+  border: 1px solid var(--line); background: rgba(10, 15, 38, 0.6);
+  font-size: 1.0625rem; outline: none;
+  transition: border-color 160ms ease, background-color 160ms ease;
 }
-.controls > .patch { grid-row: 2; }
-.patch {
-  display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start;
-  min-width: 0; margin: 0; padding: 1.25rem; border: 0; border-radius: 0;
-  text-align: left; font-size: clamp(1.25rem, 1.9vw, 1.625rem); line-height: 1.15;
-  font-weight: 700; font-stretch: 112%; letter-spacing: -0.015em;
-  transition: background-color 160ms ease, color 160ms ease;
-}
-button.patch:focus-visible { outline: 3px solid currentColor; outline-offset: -8px; }
-.patch-name { justify-content: space-between; gap: 1rem; padding-left: var(--safe-l); background: var(--minus-i); cursor: text; }
-.patch-name:focus-within { background: #003a80; }
-.patch-name span { font-size: 0.9375rem; font-weight: 600; font-stretch: 100%; letter-spacing: 0; color: #c7d7ee; }
-.patch-name input {
-  width: 100%; padding: 0 0 0.375rem; border: 0; border-bottom: 2px solid #7f9cc6; border-radius: 0;
-  background: none; outline: none;
-  font-size: 1.25rem; font-weight: 600; font-stretch: 100%; letter-spacing: 0;
-  transition: border-color 160ms ease;
-}
-.patch-name input:focus { border-bottom-color: #fff; }
-.patch-name input::placeholder { color: #9db4d6; opacity: 1; font-size: 1.0625rem; font-weight: 400; }
-.patch-tune { background: #fff; color: #000; }
-.patch-tune:hover:not(:disabled) { background: var(--bar-yellow); }
-.patch-tune:disabled { background: #1d1d1d; color: #a0a0a0; cursor: default; }
-.patch-create { background: var(--plus-q); color: #fff; }
-.patch-create:hover:not(:disabled) { background: #48009a; }
-.patch-create:disabled { color: #a79bb8; cursor: default; }
-.patch-about {
-  padding-right: var(--safe-r);
-  max-width: 34rem; font-size: 0.9375rem; line-height: 1.5; font-weight: 400; font-stretch: 100%; letter-spacing: 0;
-  color: var(--lobby-muted);
-}
+.field input::placeholder { color: rgba(140, 149, 189, 0.6); }
+.field input:focus { border-color: rgba(207, 224, 255, 0.55); background: rgba(10, 15, 38, 0.85); }
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.625rem; }
 .error {
-  grid-row: 1; grid-column: 1 / -1; margin: 0; padding: 0.75rem var(--safe-r) 0.75rem var(--safe-l);
-  background: var(--bar-red); color: #fff; font-size: 0.9375rem; font-weight: 600;
+  margin: 0; padding: 0.75rem 1rem; border-radius: var(--r-md);
+  background: var(--tally-soft); color: #ffcfcb; font-size: 0.9375rem;
 }
+.footnote { margin: 0; max-width: 26rem; text-align: center; color: var(--muted); font-size: 0.875rem; }
+/* Only shows when this server publishes the desktop app (app.js checks). */
+.get-app {
+  position: fixed; top: max(1rem, env(safe-area-inset-top)); right: 1rem;
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  min-height: 2.25rem; padding: 0 0.9rem; border-radius: 999px;
+  color: var(--muted); font-size: 0.875rem; font-weight: 600; text-decoration: none;
+  animation: fade 400ms ease both;
+  transition: color 160ms ease, background-color 160ms ease, transform 120ms ease-out;
+}
+.get-app svg { width: 1.05rem; height: 1.05rem; }
+.get-app:hover { color: var(--text); background: rgba(200, 212, 255, 0.08); }
+.get-app:active { transform: scale(0.96); transition-duration: 60ms; }
 
-/* Tablets and phones: the bottom row stacks; the bars take what is left. */
-@media (max-width: 899px) {
-  .lobby { grid-template-rows: auto minmax(15rem, 1fr) auto; }
-  .controls { grid-template-columns: 1fr 1fr; grid-template-rows: none; }
-  .controls > .patch { grid-row: auto; }
-  .patch { padding: 1rem 1.25rem; min-height: 5rem; font-size: 1.25rem; }
-  .patch-name, .patch-about { grid-column: 1 / -1; }
-  .patch-name { min-height: 0; gap: 0.375rem; padding-right: var(--safe-r); }
-  .patch-tune { padding-left: var(--safe-l); }
-  .patch-create { padding-right: var(--safe-r); }
-  .patch-about { min-height: 0; max-width: none; padding-left: var(--safe-l); font-size: 0.875rem; }
-  .brand p { font-size: 0.9375rem; }
+/* Short screens: the entry gets tighter, and a phone on its side puts the TV next to the form. */
+@media (max-height: 700px) {
+  .lobby { --gap: 1.25rem; }
+  .tv { aspect-ratio: 16 / 9; }
+  .osd-digits { font-size: clamp(3.75rem, 17vw, 8.5rem); }
 }
-@media (max-width: 899px) and (max-height: 640px) {
-  .patch-about { display: none; }
-  .patch { min-height: 4rem; }
-}
-
-/* A phone on its side: the card on the left, the form on the right. */
-@media (orientation: landscape) and (max-height: 520px) and (min-width: 560px) {
+@media (orientation: landscape) and (max-height: 520px) {
   .lobby {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 24rem);
-    grid-template-rows: auto 1fr;
+    --gap: 1rem;
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 22rem);
+    grid-template-areas: "tv brand" "tv controls" "tv foot";
+    column-gap: 2rem; row-gap: 0.75rem; justify-items: center;
   }
-  .signal { grid-column: 1; grid-row: 1 / -1; min-height: 100%; }
-  .tv { aspect-ratio: 16 / 9; width: min(100cqw - 3rem, (100cqh - 3rem) * 1.78); }
+  .lobby::before, .lobby::after { display: none; }
+  .brand { grid-area: brand; align-self: end; }
+  .brand h1 { font-size: 1.75rem; }
+  .brand p { margin-top: 0.25rem; font-size: 0.9375rem; }
+  .tv { grid-area: tv; align-self: center; aspect-ratio: 4 / 3; gap: 0.5rem; }
+  .osd-digits { font-size: clamp(3.25rem, 17vh, 5.5rem); }
   .tv-hint { font-size: 0.8125rem; }
-  .brand { grid-column: 2; grid-row: 1; padding: max(0.625rem, env(safe-area-inset-top)) var(--safe-r) 0.5rem 1.25rem; }
-  .brand h1 { font-size: 1.5rem; }
-  .brand p { font-size: 0.875rem; }
-  .controls { grid-column: 2; grid-row: 2; }
-  .patch { min-height: 3.5rem; padding: 0.625rem 1.25rem; font-size: 1.0625rem; }
-  .patch-name { padding-left: 1.25rem; gap: 0.25rem; }
-  .patch-tune { padding-left: 1.25rem; }
-  .patch-about { display: none; }
+  .controls { grid-area: controls; align-self: center; gap: 0.75rem; }
+  .actions { grid-template-columns: 1fr 1fr; }
+  .footnote { grid-area: foot; align-self: start; font-size: 0.8125rem; }
 }
 
 /* ---------- Room ---------- */
