@@ -32,6 +32,8 @@ pub enum StreamFlow {
     Idle,
     /// The app's own picker is open: nothing has started, not even a channel.
     Choosing,
+    /// Something was picked there: the `begin` right after it starts, without asking again.
+    Chosen,
     /// The channel for this stream is being opened.
     Creating,
     /// The capture was asked for. `created`: the channel was opened by this flow.
@@ -55,7 +57,7 @@ impl StreamFlow {
     pub fn chosen(&mut self) -> bool {
         let waiting = *self == Self::Choosing;
         if waiting {
-            *self = Self::Idle;
+            *self = Self::Chosen;
         }
         waiting
     }
@@ -70,9 +72,10 @@ impl StreamFlow {
     /// The button was clicked, or the channel it asked for has just joined.
     pub fn begin(&mut self, place: Place) -> Step {
         let (next, step) = match (*self, place) {
-            (Self::Idle, Place::Outside) => (Self::Creating, Step::Create),
-            (Self::Idle, Place::Channel) => (Self::Starting { created: false }, Step::Capture),
+            (Self::Idle | Self::Chosen, Place::Outside) => (Self::Creating, Step::Create),
+            (Self::Idle | Self::Chosen, Place::Channel) => (Self::Starting { created: false }, Step::Capture),
             (Self::Creating, Place::Channel) => (Self::Starting { created: true }, Step::Capture),
+            (Self::Chosen, _) => (Self::Idle, Step::Wait),
             (current, _) => (current, Step::Wait),
         };
         *self = next;
@@ -122,8 +125,8 @@ impl StreamFlow {
             Self::Choosing => "Transmitir",
             Self::Leaving => "Saindo do canal…",
             Self::Creating => "Conectando…",
-            Self::Idle if place == Place::Connecting => "Conectando…",
-            Self::Idle => "Transmitir",
+            Self::Idle | Self::Chosen if place == Place::Connecting => "Conectando…",
+            Self::Idle | Self::Chosen => "Transmitir",
         }
     }
 }
@@ -251,6 +254,25 @@ mod tests {
         assert!(!flow.choose(Place::Channel));
         assert_eq!(flow.begin(Place::Channel), Step::Capture);
         assert_eq!(flow, StreamFlow::Starting { created: true });
+    }
+
+    /// `begin_stream` asks first and starts after: the pick has to get past the
+    /// question, or the picker just opens again and the click seems to do nothing.
+    #[test]
+    fn escolher_nao_pergunta_de_novo() {
+        for (place, step) in [(Place::Outside, Step::Create), (Place::Channel, Step::Capture)] {
+            let mut flow = StreamFlow::default();
+            assert!(flow.choose(place));
+            assert!(flow.chosen());
+            assert!(!flow.choose(place), "already answered");
+            assert_eq!(flow.begin(place), step);
+        }
+        // The place changed under the pick: nothing starts, and nothing stays stuck.
+        let mut flow = StreamFlow::default();
+        flow.choose(Place::Channel);
+        flow.chosen();
+        assert_eq!(flow.begin(Place::Live), Step::Wait);
+        assert_eq!(flow, StreamFlow::Idle);
     }
 
     #[test]

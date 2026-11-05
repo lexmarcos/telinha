@@ -1099,8 +1099,12 @@ fn shots(dir: PathBuf) {
             // The third row: the first window. The channel only opens now, and the
             // stream starts on it (the fake engine takes 900 ms and then 1000).
             c.pick_source(2);
+            assert_eq!(c.flow, StreamFlow::Creating, "a pick starts the stream, it does not ask again");
         }),
-        ("janela-qualidade", 800, |c| c.open_panel(Panel::Quality)),
+        ("janela-qualidade", 800, |c| {
+            assert_eq!(c.stream_place(), Place::Live, "a pick starts the stream");
+            c.open_panel(Panel::Quality);
+        }),
         // A window from the Linux portal: nothing heard until someone says what.
         ("som-pergunta", 900, |c| {
             c.on_engine(Event::AudioApps { apps: crate::engine::mock::audio_apps(), selected: None, ask: true });
