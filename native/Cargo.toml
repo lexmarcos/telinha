@@ -73,7 +73,8 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2-zli
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 # The monitors in the capture picker: DXGI is COM, which windows-sys does not cover.
 # The version wasapi already pulls in.
-windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
+# And asking Windows to capture a window without its yellow border.
+windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Graphics_Capture", "Security_Authorization_AppCapabilityAccess"] }
 
 [build-dependencies]
 slint-build = "1.18"

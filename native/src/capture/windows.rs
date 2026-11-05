@@ -268,12 +268,43 @@ impl Drop for WindowCapture {
 
 impl WindowCapture {
     fn start(hwnd: u64) -> Result<Self, String> {
+        allow_borderless();
         let shared = Arc::new(Shared { mailbox: Mailbox::default(), ended: Mutex::new(None), stop: AtomicBool::new(false) });
         let reader = Reader::start(hwnd, shared.clone())?;
         let s = shared.clone();
         std::thread::Builder::new().name("telinha-janela".into()).spawn(move || watch(hwnd, reader, s)).map_err(|e| e.to_string())?;
         Ok(Self { shared })
     }
+}
+
+/// How long to wait for Windows to answer the request for a capture without the border.
+const BORDERLESS_WAIT: Duration = Duration::from_secs(2);
+
+/// Windows draws a yellow border around a window being captured. `gfxcapture`
+/// already turns it off for its session, but Windows only honours that once the
+/// app has asked for borderless capture, which nothing did. Asked once per run.
+/// On Windows 10 the request does not exist and the border stays.
+fn allow_borderless() {
+    use windows::Graphics::Capture::{GraphicsCaptureAccess, GraphicsCaptureAccessKind};
+    use windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
+    static ASKED: std::sync::Once = std::sync::Once::new();
+    ASKED.call_once(|| {
+        // On a thread of its own, so a request that never answers cannot hold the stream.
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new().name("telinha-borda".into()).spawn(move || {
+            let _ = tx.send(GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless).and_then(|op| op.join()));
+        });
+        if let Err(e) = spawned {
+            tracing::warn!("could not ask for a capture without the yellow border: {e}");
+            return;
+        }
+        match rx.recv_timeout(BORDERLESS_WAIT) {
+            Ok(Ok(AppCapabilityAccessStatus::Allowed)) => tracing::info!("window capture without the yellow border"),
+            Ok(Ok(status)) => tracing::warn!(status = status.0, "Windows refused a capture without the yellow border"),
+            Ok(Err(e)) => tracing::warn!("no capture without the yellow border on this Windows: {e}"),
+            Err(_) => tracing::warn!("Windows did not answer the request for a capture without the yellow border"),
+        }
+    });
 }
 
 /// Follows the window from outside the readers, which may be blocked: reopens
