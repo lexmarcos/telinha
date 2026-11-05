@@ -252,7 +252,7 @@ async fn headless(link: Option<String>, server: Option<String>, secs: u64) {
 }
 
 /// Logs to the terminal and to a file (so Windows testers can send it back):
-/// Linux ~/.local/share/telinha/telinha.log, Windows %LOCALAPPDATA%\\Telinha\\telinha\\data\\telinha.log.
+/// Linux ~/.local/share/telinha/telinha.log, Windows %APPDATA%\\Telinha\\telinha\\data\\telinha.log.
 fn init_logs() {
     use tracing_subscriber::prelude::*;
     let filter = || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "telinha=info".into());
@@ -263,5 +263,11 @@ fn init_logs() {
     let stderr = tracing_subscriber::fmt::layer().with_writer(std::io::stderr).with_filter(filter());
     let file = file.map(|f| tracing_subscriber::fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(f)).with_filter(filter()));
     tracing_subscriber::registry().with(stderr).with(file).init();
+    // On Windows there is no console to show a panic: without this it leaves no trace.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("panic: {info}");
+        default_hook(info);
+    }));
     tracing::info!(version = env!("CARGO_PKG_VERSION"), os = std::env::consts::OS, "Telinha started");
 }
