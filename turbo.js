@@ -58,20 +58,48 @@ const REPORT_MS = 1000;       // report from viewer to streamer
 const MAX_ENCODE_QUEUE = 3;
 const CHANNEL = { negotiated: true, id: 100, ordered: false, maxPacketLifeTime: PACKET_LIFETIME_MS };
 
-// How decoded frames reach the screen. Chrome and Edge feed a regular video
-// track (MediaStreamTrackGenerator, or the standard VideoTrackGenerator where
-// a browser exposes it on the page); Safari 16.4+ and Firefox 130+ have
-// VideoDecoder but neither, so they paint the newest frame on a canvas once
-// per display refresh. ?render=canvas forces the canvas and ?render=rtp turns
+// How decoded frames reach the screen. A canvas comes first where the browser
+// grants it a low latency context: it paints the newest frame once per display
+// refresh and skips the compositor's extra delay (filmed at about 22 ms screen to
+// screen on a local network, where the video track reported 45). Otherwise Chrome
+// and Edge feed a regular video track (MediaStreamTrackGenerator, or the standard
+// VideoTrackGenerator where a browser exposes it on the page), and Safari 16.4+ and
+// Firefox 130+, which have VideoDecoder but neither, stay on the plain canvas.
+// ?render=canvas and ?render=video force one where it exists; ?render=rtp turns
 // the mode off for this viewer (for testing).
-function renderMode() {
-  if (/[?&]render=rtp\b/.test(globalThis.location?.search ?? "")) return null;
-  const forced = /[?&]render=canvas\b/.test(globalThis.location?.search ?? "");
-  if (!forced && typeof MediaStreamTrackGenerator === "function") return "track";
-  if (!forced && typeof VideoTrackGenerator === "function") return "generator";
-  const canvas = typeof HTMLCanvasElement === "function" && typeof VideoFrame === "function"
+function videoTrackMode() {
+  if (typeof MediaStreamTrackGenerator === "function") return "track";
+  if (typeof VideoTrackGenerator === "function") return "generator";
+  return null;
+}
+
+function canvasAvailable() {
+  return typeof HTMLCanvasElement === "function" && typeof VideoFrame === "function"
     && typeof CanvasRenderingContext2D === "function";
-  return canvas ? "canvas" : null;
+}
+
+let lowLatency;
+function lowLatencyCanvas() {
+  if (lowLatency === undefined) {
+    try {
+      const ctx = document.createElement("canvas").getContext("2d", { alpha: false, desynchronized: true });
+      lowLatency = ctx?.getContextAttributes?.().desynchronized === true;
+    } catch {
+      lowLatency = false;
+    }
+  }
+  return lowLatency;
+}
+
+function renderMode() {
+  const query = globalThis.location?.search ?? "";
+  if (/[?&]render=rtp\b/.test(query)) return null;
+  const canvas = canvasAvailable();
+  const video = videoTrackMode();
+  if (/[?&]render=video\b/.test(query) && video) return video;
+  if (/[?&]render=canvas\b/.test(query) && canvas) return "canvas";
+  if (canvas && lowLatencyCanvas()) return "canvas";
+  return video ?? (canvas ? "canvas" : null);
 }
 
 class KeyBackoff {
@@ -434,23 +462,17 @@ export class TurboSender {
 /* ---------------- Viewer ---------------- */
 
 export class TurboReceiver {
-  constructor(channel, { requestKey, onUnsupported, report, ping, render = turboSupport().render }) {
+  constructor(channel, { requestKey, onUnsupported, onRenderChange, report, ping, render = turboSupport().render }) {
     this.generator = null;
     this.writer = null;
     this.canvas = null;
-    if (render === "track" || render === "generator") {
-      try {
-        this.generator = render === "track" ? new MediaStreamTrackGenerator({ kind: "video" }) : new VideoTrackGenerator();
-        this.writer = this.generator.writable.getWriter();
-      } catch (err) {
-        console.warn("[turbo] video track unavailable, painting on a canvas", err);
-        this.generator = null;
-      }
-    }
+    this.onRenderChange = onRenderChange;
+    if (render !== "canvas") this.#openTrack(render);
     if (!this.writer) {
       this.canvas = new CanvasView();
       // Painted inside the animation frame that shows it.
       this.canvas.onPaint = (frame) => this.displayed(frame.timestamp, Date.now());
+      this.canvas.onFail = () => this.#canvasFailed();
     }
     // Glass to glass: capture (streamer's clock) to display (here).
     this.clock = ping ? new PeerClock(ping) : null;
@@ -496,9 +518,33 @@ export class TurboReceiver {
     channel.addEventListener("message", (e) => this.#onPacket(e.data));
   }
 
-  /** The video track (Chrome, Edge), or null when frames go to `view`. */
+  /** Feeds a video track from here on. `false` where the browser has none to give. */
+  #openTrack(render) {
+    try {
+      this.generator = render === "track" ? new MediaStreamTrackGenerator({ kind: "video" }) : new VideoTrackGenerator();
+      this.writer = this.generator.writable.getWriter();
+      return true;
+    } catch (err) {
+      console.warn("[turbo] video track unavailable", err);
+      this.generator = this.writer = null;
+      return false;
+    }
+  }
+
+  /** The canvas cannot paint: the frames go to a video track, if this browser has one. */
+  #canvasFailed() {
+    const render = videoTrackMode();
+    if (this.closed || !this.canvas || !render || !this.#openTrack(render)) return;
+    console.warn("[turbo] the canvas failed to paint, moving to the video track");
+    const canvas = this.canvas;
+    this.canvas = null;
+    canvas.close();
+    this.onRenderChange?.();
+  }
+
+  /** The video track, or null when frames go to `view`. */
   get track() { return this.generator ? (this.generator.track ?? this.generator) : null; }
-  /** Canvas painter (Safari, Firefox), or null when frames go to `track`. */
+  /** Canvas painter, or null when frames go to `track`. */
   get view() { return this.canvas; }
 
   /// A retransmission takes one round trip: the wait for a missing frame tracks the connection.
@@ -760,7 +806,7 @@ export class TurboReceiver {
   }
 }
 
-/* ---------------- Canvas painting (Safari, Firefox) ---------------- */
+/* ---------------- Canvas painting ---------------- */
 
 // Paints the newest decoded frame on every attached canvas, once per display
 // refresh: a frame replaced before its turn is closed unseen, so a slow
@@ -780,6 +826,8 @@ export class CanvasView {
     this.superseded = 0;
     this.closed = false;
     this.onPaint = null;
+    this.onFail = null;
+    this.failed = false; // the stage canvas could not paint
   }
 
   get width() { return this.shown?.displayWidth ?? 0; }
@@ -791,7 +839,7 @@ export class CanvasView {
     // others ignore it. No alpha: the video is opaque.
     let ctx = null;
     try { ctx = canvas.getContext("2d", { alpha: false, desynchronized: !thumb }); } catch {}
-    if (!ctx) return;
+    if (!ctx) { this.failed ||= !thumb; return; }
     this.targets.set(canvas, { ctx, thumb });
     if (this.shown) this.#draw(canvas, this.targets.get(canvas), this.shown);
   }
@@ -818,7 +866,8 @@ export class CanvasView {
     }
     this.shown?.close();
     this.shown = frame;
-    this.onPaint?.(frame);
+    if (this.failed) this.onFail?.();
+    if (!this.closed) this.onPaint?.(frame);
   }
 
   #draw(canvas, t, frame) {
@@ -826,7 +875,7 @@ export class CanvasView {
     const scale = t.thumb ? Math.min(1, THUMB_WIDTH / w) : 1;
     const cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
     if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
-    try { t.ctx.drawImage(frame, 0, 0, cw, ch); } catch (err) { console.warn("[turbo] painting", err); }
+    try { t.ctx.drawImage(frame, 0, 0, cw, ch); } catch (err) { console.warn("[turbo] painting", err); this.failed ||= !t.thumb; }
   }
 
   close() {

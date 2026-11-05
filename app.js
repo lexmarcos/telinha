@@ -63,7 +63,7 @@ const state = {
   audioPc: new Map(),          // peerId -> the connection that audio comes on (for lip sync)
   demoted: new Set(),          // peers moved back to WebRTC due to congestion
   featured: null,
-  canvasView: null,            // CanvasView painting on the stage (Safari, Firefox), if any
+  canvasView: null,            // CanvasView painting on the stage, if any
   inRoom: false,
 };
 
@@ -391,6 +391,7 @@ function acceptTurbo(conn) {
     requestKey: () => { if (conn.open) conn.send({ t: "key" }); },
     ping: (msg) => { if (conn.open) conn.send(msg); },
     onUnsupported: () => { if (conn.open) conn.send({ t: "unsupported" }); },
+    onRenderChange: () => showTurbo(id),
     report: (r) => { if (conn.open) conn.send({ t: "rx", ...r, relay: entry.relay }); },
   });
   // The wait for a lost frame tracks the connection's real round trip; and

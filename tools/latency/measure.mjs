@@ -8,8 +8,8 @@
 // Requires --server. E.g.: --nativo ../../native/target/release/telinha
 //
 // --canvas makes the viewer paint frames on a canvas (?render=canvas, the
-// Safari/Firefox path of the minimum delay mode) instead of feeding a video
-// track; the probe then reads each frame as it is painted. Use with --turbo.
+// default path of the minimum delay mode); the probe then reads each frame as it
+// is painted. Without it the viewer feeds a video track (?render=video). Use with --turbo.
 //
 // --chrome-remetente <exe> opens the sender page in a second Chrome (--porta <n> fixes the
 // static server's port; with --server host:port the sender needs to reach both).
@@ -574,7 +574,7 @@ async function nativeSender(viewer, code) {
 async function setup() {
   const checkFallback = () => { if (attemptState.fallback) throw new Error(`app fell back off the signaling server (${attemptState.fallback})`); };
   // A: creates the channel, watches.
-  const query = [opt.canvas ? "render=canvas" : "", opt.query ?? ""].filter(Boolean).join("&");
+  const query = [opt.canvas ? "render=canvas" : "render=video", opt.query ?? ""].filter(Boolean).join("&");
   const viewerUrl = query ? `${URL_}${URL_.includes("?") ? "&" : "?"}${query}` : URL_;
   const viewer = await mkPage("Viewer", { sender: false, url: viewerUrl });
   await viewer.click("#create");
