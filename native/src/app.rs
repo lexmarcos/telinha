@@ -187,7 +187,6 @@ pub fn run() {
     ui.show().expect("mostrar a bolha");
     c.place();
     CTRL.with(|x| *x.borrow_mut() = Some(c));
-    place_when_ready(0);
 
     if let Some(dir) = std::env::var_os("TELINHA_SHOTS").map(PathBuf::from) {
         shots(dir);
@@ -196,22 +195,6 @@ pub fn run() {
     }
     // The window hides to the tray without quitting: only "Fechar o Telinha" quits.
     slint::run_event_loop_until_quit().expect("laço da interface");
-}
-
-/// The system window only exists a little after the loop starts: only then can
-/// the saved spot be checked against the monitors, so the bubble is placed again.
-fn place_when_ready(tries: u32) {
-    let ready = std::cell::Cell::new(false);
-    with(|c| {
-        ready.set(c.ui.window().with_winit_window(|_| ()).is_some());
-        if ready.get() {
-            c.place();
-        }
-    });
-    let ready = ready.get();
-    if !ready && tries < 100 {
-        slint::Timer::single_shot(Duration::from_millis(20), move || place_when_ready(tries + 1));
-    }
 }
 
 impl Controller {
@@ -629,57 +612,15 @@ impl Controller {
                 })
             })
             .flatten();
-        let (x, y) = match (self.saved_position(), self.monitor) {
+        let (x, y) = match (self.config.position, self.monitor) {
             (Some(p), _) => p,
             // First time: at the top, near the right.
             (None, Some((w, _))) => (w - BUBBLE - 2.0 * SHADOW_ROOM - 48.0, 120.0),
             (None, None) => (200.0, 120.0),
         };
         self.set_window_position(x, y);
-        tracing::info!(x, y, saved = ?self.config.position, screen = ?self.monitor, "bubble placed");
         self.sync_thumbs(true);
         self.render();
-    }
-
-    /// The saved spot, if the bubble would still show there. A monitor that was
-    /// unplugged, a lower resolution, or a spot saved while Windows had the window
-    /// minimized (it moves it to -32000) would open the bubble where no one sees it.
-    fn saved_position(&self) -> Option<(f32, f32)> {
-        let p = self.config.position?;
-        if self.on_screen(p) {
-            return Some(p);
-        }
-        tracing::warn!(x = p.0, y = p.1, "the saved bubble position is off every screen, using the default");
-        None
-    }
-
-    /// Whether the middle of the bubble at this window position falls on a monitor.
-    /// Without a list of monitors (Wayland), it is taken as visible.
-    fn on_screen(&self, (x, y): (f32, f32)) -> bool {
-        let s = self.ui.window().scale_factor() as f64;
-        let middle = |v: f32| (v + SHADOW_ROOM + BUBBLE / 2.0) as f64 * s;
-        let (mx, my) = (middle(x), middle(y));
-        self.ui
-            .window()
-            .with_winit_window(|w| {
-                let mut monitors = w.available_monitors().peekable();
-                monitors.peek().is_none()
-                    || monitors.any(|m| {
-                        let (p, z) = (m.position(), m.size());
-                        let (left, top) = (p.x as f64, p.y as f64);
-                        mx >= left && mx < left + z.width as f64 && my >= top && my < top + z.height as f64
-                    })
-            })
-            .unwrap_or(true)
-    }
-
-    /// Keeps where the bubble is for the next run, unless it is off screen right now.
-    fn remember_position(&mut self) {
-        let p = self.bubble_position();
-        if self.on_screen(p) {
-            self.config.position = Some(p);
-        }
-        self.config.save();
     }
 
     fn window_position(&self) -> (f32, f32) {
@@ -705,7 +646,8 @@ impl Controller {
 
     fn hide(&mut self) {
         self.cancel_source();
-        self.remember_position();
+        self.config.position = Some(self.bubble_position());
+        self.config.save();
         // Hide at once: whoever asks to hide doesn't want to watch the panel close.
         self.open.snap(0.0);
         self.finish_close();
@@ -714,13 +656,14 @@ impl Controller {
 
     fn show(&mut self) {
         let _ = self.ui.show();
-        // Clicking it in the Windows taskbar minimizes it: "Mostrar a bolha" brings it back.
-        self.ui.window().with_winit_window(|w| w.set_minimized(false));
-        self.place();
+        if let Some((x, y)) = self.config.position {
+            self.set_window_position(x, y);
+        }
     }
 
     fn quit(&mut self) {
-        self.remember_position();
+        self.config.position = Some(self.bubble_position());
+        self.config.save();
         let _ = slint::quit_event_loop();
     }
 
