@@ -1429,12 +1429,18 @@ function wake() {
   ui.stage.classList.remove("idle-cursor");
   clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
-    const busy = ui.stageBar.matches(touchOnly.matches ? ":focus-visible" : ":hover, :focus-within")
-      || ui.stageBar.querySelector(":focus-visible");
-    if (!ui.stage.classList.contains("idle") && !busy) ui.stage.classList.add("idle-cursor");
+    // Only a resting pointer or keyboard focus keeps the bar up: focus left
+    // behind by a mouse click (volume, mute…) must not pin it over subtitles.
+    const busy = (!touchOnly.matches && ui.stageBar.matches(":hover"))
+      || ui.stageBar.matches(":focus-visible") || ui.stageBar.querySelector(":focus-visible");
+    if (busy) return wake(); // check again later rather than staying up for good
+    if (!ui.stage.classList.contains("idle")) ui.stage.classList.add("idle-cursor");
   }, touchOnly.matches ? 3600 : 2600);
 }
 ui.stage.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") wake(); });
+// Leaving the bar or the whole stage restarts the countdown so the bar still hides.
+ui.stageBar.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") wake(); });
+ui.stage.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") wake(); });
 let hiddenAtTouch = false; // the pointer down already wakes the controls; the tap needs to know what it found
 ui.stage.addEventListener("pointerdown", () => { hiddenAtTouch = ui.stage.classList.contains("idle-cursor"); wake(); });
 ui.stage.addEventListener("focusin", wake);
