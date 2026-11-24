@@ -35,6 +35,7 @@
   <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-perk" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-github" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="5" width="7" height="6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="5" width="7" height="6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="7" height="6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="7" height="6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
   <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4.5 9.5h3l4-3.5v12l-4-3.5h-3z" fill="currentColor"/><path d="m15.5 9.5 5 5m0-5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
 </svg>
 
@@ -102,45 +103,38 @@
       </button>
     </div>
 
-    <button class="unmute" id="unmute" type="button" hidden>
-      <svg><use href="#i-sound"/></svg>Ativar o som
-    </button>
-
-    <div class="channel" title="Número do canal">
-      <span class="channel-word">Canal</span>
-      <span class="channel-digits" id="channelDigits">0000</span>
-    </div>
+    <ul class="grid" id="grid" aria-label="Transmissões"></ul>
 
     <button class="icon-btn exit-fs" id="exitFsBtn" type="button" aria-label="Sair da tela cheia" title="Sair da tela cheia (Esc)" hidden>
       <svg><use href="#i-close"/></svg>
     </button>
 
-    <div class="stage-bar" id="stageBar" hidden>
-      <span class="live-chip"><i class="tally"></i><span id="featureName"></span></span>
-      <div class="stage-tools">
-        <label class="volume" id="volumeWrap">
-          <button class="icon-btn" id="muteBtn" type="button" aria-label="Silenciar">
-            <svg><use href="#i-sound"/></svg>
-          </button>
-          <input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
-        </label>
-        <button class="icon-btn" id="statsBtn" type="button" aria-label="Conexão" aria-pressed="false" title="Conexão e atraso (I)">
-          <svg><use href="#i-stats"/></svg>
+    <div class="notice-slot" id="noticeSlot" aria-live="polite"></div>
+
+    <div class="stage-tools" id="stageTools" hidden>
+      <button class="icon-btn" id="gridBtn" type="button" aria-label="Ver todas as transmissões" title="Ver todas as transmissões" hidden>
+        <svg><use href="#i-grid"/></svg>
+      </button>
+      <div class="volume" id="volumeWrap">
+        <button class="icon-btn" id="muteBtn" type="button" aria-label="Silenciar">
+          <svg><use href="#i-sound"/></svg>
         </button>
-        <button class="icon-btn" id="pipBtn" type="button" aria-label="Janela flutuante" title="Janela flutuante">
-          <svg><use href="#i-pip"/></svg>
-        </button>
-        <button class="icon-btn" id="rotateBtn" type="button" aria-label="Girar a imagem" aria-pressed="true" title="Girar a imagem" hidden>
-          <svg><use href="#i-rotate"/></svg>
-        </button>
-        <button class="icon-btn" id="fullBtn" type="button" aria-label="Tela cheia" title="Tela cheia (F)">
-          <svg><use href="#i-full"/></svg>
-        </button>
+        <input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
       </div>
+      <button class="icon-btn" id="statsBtn" type="button" aria-label="Conexão" aria-pressed="false" title="Conexão e atraso (I)">
+        <svg><use href="#i-stats"/></svg>
+      </button>
+      <button class="icon-btn" id="pipBtn" type="button" aria-label="Janela flutuante" title="Janela flutuante">
+        <svg><use href="#i-pip"/></svg>
+      </button>
+      <button class="icon-btn" id="rotateBtn" type="button" aria-label="Girar a imagem" aria-pressed="true" title="Girar a imagem" hidden>
+        <svg><use href="#i-rotate"/></svg>
+      </button>
+      <button class="icon-btn" id="fullBtn" type="button" aria-label="Tela cheia" title="Tela cheia (F)">
+        <svg><use href="#i-full"/></svg>
+      </button>
     </div>
   </div>
-
-  <ul class="strip" id="strip" aria-label="Transmissões"></ul>
 
   <nav class="dock" aria-label="Controles">
     <div class="people-wrap">

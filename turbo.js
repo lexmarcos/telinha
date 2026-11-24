@@ -920,14 +920,17 @@ export class CanvasView {
   get width() { return this.shown?.displayWidth ?? 0; }
   get height() { return this.shown?.displayHeight ?? 0; }
 
-  attach(canvas, { thumb = false } = {}) {
+  // A thumb is any canvas besides the stage's: it never makes the view fail.
+  // `every` and `width` let a bigger one (a tile in the grid) paint every
+  // frame at a size that still looks sharp.
+  attach(canvas, { thumb = false, every = thumb ? THUMB_EVERY : 1, width = thumb ? THUMB_WIDTH : Infinity } = {}) {
     if (this.closed || this.targets.has(canvas)) return;
     // desynchronized: Chrome may skip the compositor's extra frame of delay;
     // others ignore it. No alpha: the video is opaque.
     let ctx = null;
     try { ctx = canvas.getContext("2d", { alpha: false, desynchronized: !thumb }); } catch {}
     if (!ctx) { this.failed ||= !thumb; return; }
-    this.targets.set(canvas, { ctx, thumb });
+    this.targets.set(canvas, { ctx, thumb, every, width });
     if (this.shown) this.#draw(canvas, this.targets.get(canvas), this.shown);
   }
 
@@ -949,7 +952,7 @@ export class CanvasView {
     this.pending = null;
     this.painted++;
     for (const [canvas, t] of this.targets) {
-      if (!t.thumb || this.painted % THUMB_EVERY === 1) this.#draw(canvas, t, frame);
+      if (t.every === 1 || this.painted % t.every === 1) this.#draw(canvas, t, frame);
     }
     this.shown?.close();
     this.shown = frame;
@@ -959,7 +962,7 @@ export class CanvasView {
 
   #draw(canvas, t, frame) {
     const w = frame.displayWidth, h = frame.displayHeight;
-    const scale = t.thumb ? Math.min(1, THUMB_WIDTH / w) : 1;
+    const scale = Math.min(1, t.width / w);
     const cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
     if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
     try { t.ctx.drawImage(frame, 0, 0, cw, ch); } catch (err) { console.warn("[turbo] painting", err); this.failed ||= !t.thumb; }

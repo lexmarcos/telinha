@@ -38,16 +38,16 @@ const $ = (id) => document.getElementById(id);
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 // Phones and tablets can watch but not share: no screen capture API there.
 const CAN_SHARE = !!navigator.mediaDevices?.getDisplayMedia;
-// A finger instead of a mouse: the stream bar needs a tap to come back, there is no hover.
+// A finger instead of a mouse: the controls need a tap to come back, there is no hover.
 const touchOnly = matchMedia("(hover: none) and (pointer: coarse)");
 
 const ui = {
   lobby: $("lobby"), tv: $("tv"), code: $("code"), name: $("name"), tune: $("tune"),
   create: $("create"), controls: $("controls"), lobbyError: $("lobbyError"), tvHint: $("tvHint"),
-  room: $("room"), stage: $("stage"), feature: $("feature"), featureCanvas: $("featureCanvas"), strip: $("strip"),
-  stageBar: $("stageBar"), featureName: $("featureName"), unmute: $("unmute"),
+  room: $("room"), stage: $("stage"), feature: $("feature"), featureCanvas: $("featureCanvas"), grid: $("grid"),
+  stageTools: $("stageTools"), gridBtn: $("gridBtn"), noticeSlot: $("noticeSlot"),
   volume: $("volume"), muteBtn: $("muteBtn"), pipBtn: $("pipBtn"), fullBtn: $("fullBtn"), rotateBtn: $("rotateBtn"), exitFsBtn: $("exitFsBtn"),
-  channelDigits: $("channelDigits"), emptyDigits: $("emptyDigits"),
+  emptyDigits: $("emptyDigits"),
   emptyTitle: $("emptyTitle"), emptyText: $("emptyText"),
   people: $("people"), peopleBtn: $("peopleBtn"), peoplePanel: $("peoplePanel"), roster: $("roster"),
   shareBtn: $("shareBtn"), leaveBtn: $("leaveBtn"),
@@ -68,13 +68,17 @@ const state = {
   localStream: null,
   outgoing: new Map(),         // peerId -> MediaConnection (my screen going to them)
   incoming: new Map(),         // peerId -> MediaConnection (their screen coming to me)
-  streams: new Map(),          // peerId -> { stream, name, local, thumb }
+  streams: new Map(),          // peerId -> { stream, name, local, tile, view }
+  waiting: new Map(),          // peerId -> grid tile of a screen on the air whose picture has not arrived
+  announce: new Map(),         // peerId -> when they went on the air, while their picture is on its way
   turboOut: null,              // TurboSender when sharing in minimum-latency mode
   turboIn: new Map(),          // peerId -> { conn, rx } (their video arriving via WebCodecs)
   audioIn: new Map(),          // peerId -> MediaStream with only their audio (minimum-latency mode)
   audioPc: new Map(),          // peerId -> the connection that audio comes on (for lip sync)
   demoted: new Set(),          // peers moved back to WebRTC due to congestion
   featured: null,
+  view: "focus",               // "focus": one screen fills the stage; "grid": every screen side by side
+  audioLocked: false,          // the browser refused sound before any click or key press
   canvasView: null,            // CanvasView painting on the stage, if any
   inRoom: false,
 };
@@ -175,6 +179,7 @@ function setLobbyFailed(failed) {
 /* ---------------- Open channel (host) ---------------- */
 
 async function host(attempt = 0) {
+  primeAudio();
   state.name = displayName();
   setBusy(ui.create, "Abrindo…");
   const code = String(1000 + Math.floor(Math.random() * 9000));
@@ -245,6 +250,7 @@ function broadcastRoster() {
 /* ---------------- Tune in (guest) ---------------- */
 
 async function join(code) {
+  primeAudio();
   state.name = displayName();
   setBusy(ui.tune, "Sintonizando…");
   let peer;
@@ -481,12 +487,13 @@ async function syncAudio() {
   }
 }
 
-function closeIncoming(id) {
+// `final`: they left or stopped sharing (otherwise their picture may be on its way back).
+function closeIncoming(id, final = false) {
   state.turboIn.get(id)?.close();
   state.turboIn.delete(id);
   state.audioIn.delete(id);
   state.audioPc.delete(id);
-  removeStream(id);
+  removeStream(id, final);
 }
 
 function applyRoster(list) {
@@ -502,19 +509,28 @@ function applyRoster(list) {
     if (!next.has(id)) {
       state.outgoing.get(id)?.close(); state.outgoing.delete(id);
       state.demoted.delete(id);
-      closeIncoming(id);
+      closeIncoming(id, true);
     } else if (prev.sharing && !next.get(id).sharing) {
-      closeIncoming(id);
+      closeIncoming(id, true);
     }
+    if (!next.get(id)?.sharing) state.announce.delete(id);
   }
-  // The first roster received is the initial state, not news.
-  if (state.members.size) {
+  // The first roster received is the initial state, not news. Arriving while
+  // two or more are on the air, the screens show side by side.
+  if (!state.members.size) {
+    if (people.filter((m) => m.id !== me && m.sharing).length > 1) state.view = "grid";
+  } else {
     let joined = false, left = false;
     for (const [id, m] of next) {
       const prev = state.members.get(id);
       if (id === me) continue;
       if (!prev) { toast(`${m.name} entrou`); joined = true; }
-      else if (m.sharing && !prev.sharing) toast(`${m.name} começou a transmitir`);
+      else if (m.sharing && !prev.sharing) {
+        // Watching someone else's screen: the news waits for the picture, so it can show it.
+        const watching = state.view === "focus" && [...state.streams].some(([k, st]) => k !== id && !st.local);
+        if (watching) state.announce.set(id, performance.now());
+        else toast(`${m.name} começou a transmitir`);
+      }
     }
     for (const [id, m] of state.members) if (id !== me && !next.has(id)) { toast(`${m.name} saiu`); left = true; }
     if (joined) playChime("join");
@@ -1101,39 +1117,59 @@ function renderShareButton() {
   ui.shareBtn.setAttribute("aria-label", live ? "Parar de transmitir" : "Compartilhar tela");
   ui.qualityBtn.hidden = !live;
   if (!live) closeQuality();
+  fitChrome();
 }
 
 /* ---------------- Screens in the room ---------------- */
 
-// `view`: the CanvasView with the picture, when it does not come as a video track.
+// Each screen has a tile for the grid, kept while it is on the air so its
+// video does not start over each time the grid comes back. The tile's own
+// video carries that screen's sound while the grid shows. `view`: the
+// CanvasView with the picture, when it does not come as a video track.
 function addStream(id, stream, name, local, view = null) {
   const existing = state.streams.get(id);
   if (existing?.stream === stream) return;
-  if (existing) dropThumb(existing);
+  if (existing) dropTile(existing);
+  if (notice?.id === id) closeNotice();
 
-  const thumb = document.createElement("li");
-  thumb.innerHTML = `<button class="thumb" type="button">${view ? "<canvas></canvas>" : "<video autoplay playsinline muted></video>"}<span class="thumb-name"><i class="tally"></i><span></span></span></button>`;
-  if (view) view.attach(thumb.querySelector("canvas"), { thumb: true });
-  else {
-    const v = thumb.querySelector("video");
-    v.srcObject = stream;
-    v.play().catch(() => {});
-  }
-  thumb.querySelector("button").addEventListener("click", () => feature(id));
+  const tile = document.createElement("li");
+  tile.innerHTML = `<button class="tile" type="button"><span class="tile-media"><video autoplay playsinline muted></video>${view ? "<canvas></canvas>" : ""}</span><span class="tile-name"></span></button>`;
+  const v = tile.querySelector("video");
+  v.srcObject = stream;
+  if (view) v.classList.add("audio-only"); // the canvas shows the picture; the video only plays the sound
+  else v.play().catch(() => {});
+  tile.querySelector("button").addEventListener("click", (e) => {
+    // The second click of a double click that began on a focused screen: that screen goes fullscreen, not this one.
+    if (e.detail > 1) return;
+    feature(id, tile);
+  });
 
-  state.streams.set(id, { stream, name, local, thumb, view });
+  state.streams.set(id, { stream, name, local, tile, view });
   if (!view) stream.addEventListener("removetrack", () => { if (!stream.getVideoTracks().length) removeStream(id); });
 
-  // Someone else's screen takes priority over our own preview.
+  // Someone else's screen takes priority over our own preview. A screen
+  // whose picture is on its way back keeps its place (removeStream).
   const cur = state.streams.get(state.featured);
-  if (!cur || (cur.local && !local)) state.featured = id;
+  const held = !cur && state.featured !== id && !!refocusTimer;
+  if ((!cur && !held) || (cur?.local && !local)) state.featured = id;
   renderStreams();
+
+  // Someone went on the air while another screen was being watched: say so, with their picture.
+  const since = state.announce.get(id);
+  if (since !== undefined && !local) {
+    state.announce.delete(id);
+    const fresh = performance.now() - since < 20000;
+    if (fresh && state.view === "focus" && state.featured !== id) showNotice(id);
+    else if (fresh && state.view === "focus") toast(`${name} começou a transmitir`);
+  }
 }
 
 // Empty stage: says whether a picture is on its way.
 function renderEmpty() {
   const me = state.peer?.id;
-  const sharing = [...state.members].find(([id, m]) => id !== me && m.sharing);
+  const waitingFor = state.members.get(state.featured);
+  const sharing = waitingFor?.sharing && state.featured !== me ? [state.featured, waitingFor]
+    : [...state.members].find(([id, m]) => id !== me && m.sharing);
   if (sharing) {
     // Someone is on the air and the picture is on its way (joining, or
     // switching how it travels): not an empty channel.
@@ -1147,74 +1183,214 @@ function renderEmpty() {
     : "Quando alguém transmitir, a imagem aparece aqui.";
 }
 
-function dropThumb(s) {
-  const canvas = s.thumb.querySelector("canvas");
+function dropTile(s) {
+  const canvas = s.tile.querySelector("canvas");
   if (canvas) s.view?.detach(canvas);
-  s.thumb.remove();
+  s.tile.querySelector("video").srcObject = null;
+  s.tile.remove();
 }
 
-function removeStream(id) {
+// `final`: its owner left or stopped sharing.
+let refocusTimer = 0;
+function removeStream(id, final = false) {
   const s = state.streams.get(id);
-  if (!s) return;
-  dropThumb(s);
+  if (!s) {
+    // Its picture had already gone and the stage was waiting for it: no longer.
+    if (final && state.featured === id && refocusTimer) { clearTimeout(refocusTimer); refocusTimer = 0; leaveFeatured(); renderStreams(); }
+    return;
+  }
+  dropTile(s);
   state.streams.delete(id);
+  if (notice?.id === id) closeNotice();
   if (state.featured === id) {
-    const others = [...state.streams].sort((a, b) => a[1].local - b[1].local);
-    state.featured = others[0]?.[0] ?? null;
+    clearTimeout(refocusTimer);
+    refocusTimer = 0;
+    if (!final && !s.local && state.members.get(id)?.sharing) {
+      // Still on the air: the picture is coming back (a connection opened again, or
+      // switching how it travels). The stage waits for it a moment instead of jumping.
+      refocusTimer = setTimeout(() => {
+        refocusTimer = 0;
+        if (state.featured !== id || state.streams.has(id)) return;
+        leaveFeatured();
+        renderStreams();
+      }, 8000);
+    } else leaveFeatured();
   }
   renderStreams();
 }
+// The screen being watched is gone: with two or more left all of them show, otherwise the one left.
+function leaveFeatured() {
+  const others = [...state.streams].sort((a, b) => a[1].local - b[1].local);
+  state.featured = others[0]?.[0] ?? null;
+  if (state.view === "focus" && gridOrder().length > 1) state.view = "grid";
+}
 
-function feature(id) {
+// One screen fills the stage. `from`: the tile it grows out of.
+function feature(id, from = null) {
   if (!state.streams.has(id)) return;
+  const fromRect = from && contentRect(from.querySelector(".tile-media"), mediaSize(state.streams.get(id)));
   state.featured = id;
+  state.view = "focus";
   renderStreams();
+  if (fromRect) zoom(state.canvasView ? ui.featureCanvas : ui.feature, fromRect);
+}
+
+// Every screen side by side; the one that was on the stage shrinks back into its tile.
+function showGrid() {
+  clearTimeout(gridTimer);
+  const s = state.streams.get(state.featured);
+  const fromRect = s && contentRect(ui.stage, mediaSize(s));
+  state.view = "grid";
+  renderStreams();
+  if (state.view !== "grid") return;
+  if (s && fromRect) zoom(s.tile, fromRect, s.tile.querySelector(".tile-media"));
+  if (!reducedMotion.matches) {
+    for (const li of ui.grid.children) if (li !== s?.tile) li.animate([{ opacity: 0, transform: "scale(0.96)" }, { opacity: 1, transform: "none" }], { duration: 320, easing: "cubic-bezier(0.32, 0.72, 0, 1)" });
+  }
+}
+
+// Screens in the grid, in the order people came in, our own last. A sharer
+// whose picture is still on its way already has a place.
+function gridOrder() {
+  const me = state.peer?.id;
+  const ids = [];
+  for (const [id, m] of state.members) if (id !== me && (m.sharing || state.streams.has(id))) ids.push(id);
+  for (const id of state.streams.keys()) if (id !== me && !ids.includes(id)) ids.push(id);
+  if (state.streams.has(me)) ids.push(me);
+  return ids;
 }
 
 function renderStreams() {
-  const s = state.streams.get(state.featured);
+  if (state.streams.has(state.featured)) { clearTimeout(refocusTimer); refocusTimer = 0; }
+  const order = gridOrder();
+  if (order.length < 2) state.view = "focus";
+  const grid = state.view === "grid";
+  const s = grid ? null : state.streams.get(state.featured);
+  const onStage = grid || !!s;
   const wasIdle = ui.stage.classList.contains("idle");
-  ui.stage.classList.toggle("idle", !s);
-  if (s && wasIdle) wake(); // a picture just arrived: the controls rest after a moment
-  ui.stageBar.hidden = !s;
+  ui.stage.classList.toggle("idle", !onStage);
+  ui.stage.classList.toggle("is-grid", grid);
+  if (onStage && wasIdle) wake(); // a picture just arrived: the controls rest after a moment
+  ui.stageTools.hidden = !onStage;
+  ui.gridBtn.hidden = grid || order.length < 2;
   renderEmpty();
 
   showCanvas(s?.view ?? null);
   if (!s) {
-    setImmersive(false);
+    if (!onStage) setImmersive(false);
     ui.feature.srcObject = null;
-    ui.unmute.hidden = true;
   } else {
-    if (ui.feature.srcObject !== s.stream) {
-      ui.feature.srcObject = s.stream;
-      ui.feature.muted = s.local || state.muted;
-      ui.feature.volume = state.volume;
-      ui.feature.play().catch(() => {
-        // autoplay with sound blocked: play muted and offer the button
-        ui.feature.muted = true;
-        ui.feature.play().catch(() => {});
-        if (!s.local && s.stream.getAudioTracks().length) ui.unmute.hidden = false;
-      });
-    }
+    if (ui.feature.srcObject !== s.stream) ui.feature.srcObject = s.stream;
     syncAspect();
-    ui.featureName.textContent = s.local ? "Sua tela" : s.name;
-    const hasAudio = !s.local && s.stream.getAudioTracks().length > 0;
-    $("volumeWrap").hidden = !hasAudio;
-    // On a canvas, picture in picture goes through a captured copy of it.
-    ui.pipBtn.hidden = !document.pictureInPictureEnabled || (!!s.view && !ui.featureCanvas.captureStream);
   }
+  const remote = grid ? [...state.streams.values()].filter((x) => !x.local) : s && !s.local ? [s] : [];
+  $("volumeWrap").hidden = !remote.some((x) => x.stream.getAudioTracks().length > 0);
+  // On a canvas, picture in picture goes through a captured copy of it.
+  ui.pipBtn.hidden = grid || !document.pictureInPictureEnabled || (!!s?.view && !ui.featureCanvas.captureStream);
 
-  const showStrip = state.streams.size > 1;
-  const items = showStrip ? [...state.streams] : [];
-  for (const [id, item] of items) {
-    item.thumb.querySelector(".thumb").setAttribute("aria-current", String(id === state.featured));
-    item.thumb.querySelector(".thumb-name > span").textContent = item.local ? "Você" : item.name;
-    if (item.thumb.parentNode !== ui.strip) {
-      ui.strip.append(item.thumb);
-      item.thumb.querySelector("video")?.play().catch(() => {}); // leaving the DOM pauses the video (a canvas thumb has none)
-    }
+  // The floating window shows the stage, which the grid empties.
+  if (grid && document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
+  renderGrid(order, grid);
+  syncPlayback();
+  fitChrome();
+}
+
+function renderGrid(order, grid) {
+  for (const [id, li] of state.waiting) {
+    if (state.streams.has(id) || !order.includes(id)) { li.remove(); state.waiting.delete(id); }
   }
-  if (!showStrip) for (const item of state.streams.values()) item.thumb.remove();
+  const items = order.map((id) => {
+    const s = state.streams.get(id);
+    if (s) {
+      const label = s.local ? "Você" : s.name;
+      s.tile.querySelector(".tile-name").textContent = label;
+      s.tile.querySelector("button").setAttribute("aria-label", s.local ? "Ver a sua tela" : `Ver a tela de ${s.name}`);
+      const canvas = s.tile.querySelector("canvas");
+      // A tile's canvas paints only while the grid shows.
+      if (canvas) grid ? s.view.attach(canvas, { thumb: true, every: 1, width: 1280 }) : s.view.detach(canvas);
+      return s.tile;
+    }
+    let li = state.waiting.get(id);
+    if (!li) {
+      li = document.createElement("li");
+      li.innerHTML = `<div class="tile is-waiting"><span class="tile-wait">Conectando…</span><span class="tile-name"></span></div>`;
+      state.waiting.set(id, li);
+    }
+    li.querySelector(".tile-name").textContent = state.members.get(id)?.name ?? "Alguém";
+    return li;
+  });
+  // Moving a video in the page pauses it: only what is out of place moves.
+  items.forEach((li, i) => { if (ui.grid.children[i] !== li) ui.grid.insertBefore(li, ui.grid.children[i] ?? null); });
+  while (ui.grid.children.length > items.length) ui.grid.lastChild.remove();
+  layoutGrid();
+}
+
+// The biggest 16:9 tiles that fit the stage, rows centred like on a table.
+const GRID_GAP = 12;
+function layoutGrid() {
+  if (!ui.stage.classList.contains("is-grid")) return;
+  const n = ui.grid.children.length;
+  const cs = getComputedStyle(ui.grid);
+  const w = ui.grid.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const h = ui.grid.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  let best = 0;
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    best = Math.max(best, Math.min((w - GRID_GAP * (cols - 1)) / cols, ((h - GRID_GAP * (rows - 1)) / rows) * 16 / 9));
+  }
+  ui.grid.style.setProperty("--tile-w", `${Math.max(0, Math.floor(best))}px`);
+}
+new ResizeObserver(() => { layoutGrid(); fitChrome(); }).observe(ui.stage);
+
+// The dock and the tools share the bottom edge of the picture. When they would
+// touch (a narrow window, a full channel, the quality button while sharing),
+// the volume slider goes first, then the share button's words.
+function fitChrome() {
+  ui.room.classList.remove("tight", "tighter");
+  if (ui.stageTools.hidden || ui.room.hidden) return;
+  const touching = () => {
+    const a = ui.dock.getBoundingClientRect(), b = ui.stageTools.getBoundingClientRect();
+    return a.right + 8 > b.left && b.right + 8 > a.left && a.bottom > b.top && b.bottom > a.top;
+  };
+  if (!touching()) return;
+  ui.room.classList.add("tight");
+  if (touching()) ui.room.classList.add("tighter");
+}
+
+// Width and height of a screen's picture, for the zoom between a tile and the stage.
+function mediaSize(s) {
+  if (s.view) return { w: s.view.width, h: s.view.height };
+  const v = s.tile.querySelector("video");
+  return { w: v.videoWidth || ui.feature.videoWidth, h: v.videoHeight || ui.feature.videoHeight };
+}
+// Where the picture sits inside a box that shows it whole (object-fit: contain).
+function contentRect(el, { w, h }) {
+  const r = el.getBoundingClientRect();
+  if (!w || !h || !r.width || !r.height) return null;
+  const scale = Math.min(r.width / w, r.height / h);
+  const cw = w * scale, ch = h * scale;
+  return { left: r.left + (r.width - cw) / 2, top: r.top + (r.height - ch) / 2, width: cw, height: ch };
+}
+// Moves `el` so the picture inside `box` (el itself by default) starts where `from` was, then
+// lets it settle in place: the same picture, travelling between the tile and the stage.
+function zoom(el, from, box = el) {
+  if (reducedMotion.matches || !from) return;
+  const s = state.streams.get(state.featured);
+  const to = s && contentRect(box, mediaSize(s));
+  if (!to) return;
+  const r = el.getBoundingClientRect();
+  const k = from.width / to.width;
+  const dx = from.left - (r.left + (to.left - r.left) * k);
+  const dy = from.top - (r.top + (to.top - r.top) * k);
+  for (const a of el.getAnimations()) a.cancel();
+  const anim = el.animate(
+    [{ transformOrigin: "0 0", transform: `translate(${dx}px, ${dy}px) scale(${k})` }, { transformOrigin: "0 0", transform: "none" }],
+    { duration: 420, easing: "cubic-bezier(0.32, 0.72, 0, 1)" },
+  );
+  if (box !== el) { // a tile flies over its neighbours
+    el.style.zIndex = "1";
+    anim.finished.catch(() => {}).then(() => { el.style.zIndex = ""; });
+  }
 }
 
 // On a tall screen the stage is only as tall as the picture (style.css, --ar):
@@ -1266,28 +1442,89 @@ ui.volume.value = state.volume;
 ui.volume.addEventListener("input", () => {
   state.volume = Number(ui.volume.value);
   state.muted = state.volume === 0;
-  ui.feature.volume = state.volume;
-  ui.feature.muted = state.muted || !!state.streams.get(state.featured)?.local;
   safeSet("telinha:volume", state.volume);
+  applyAudio();
   renderMute();
 });
 ui.muteBtn.addEventListener("click", () => {
+  // The press that brought the sound back (unlockAudio) does only that.
+  if (performance.now() - unlockedAt < 1000) return;
   state.muted = !state.muted;
-  if (!state.muted && state.volume === 0) { state.volume = 1; ui.volume.value = 1; ui.feature.volume = 1; }
-  ui.feature.muted = state.muted;
+  if (!state.muted && state.volume === 0) { state.volume = 1; ui.volume.value = 1; }
+  applyAudio();
   renderMute();
 });
 function renderMute() {
-  ui.muteBtn.querySelector("use").setAttribute("href", state.muted ? "#i-mute" : "#i-sound");
-  ui.muteBtn.setAttribute("aria-label", state.muted ? "Ativar o som" : "Silenciar");
+  const off = state.muted || state.audioLocked;
+  ui.muteBtn.querySelector("use").setAttribute("href", off ? "#i-mute" : "#i-sound");
+  ui.muteBtn.setAttribute("aria-label", off ? "Ativar o som" : "Silenciar");
 }
-ui.unmute.addEventListener("click", () => {
-  ui.feature.muted = false;
-  state.muted = false;
-  ui.feature.play().catch(() => {});
-  ui.unmute.hidden = true;
+
+/* Sound. What is on the stage is what is heard: the screen in focus through
+ * the stage video, or in the grid every screen through its tile. Joining is a
+ * click or a key press, which lets the page play sound: Chrome and Firefox
+ * remember the page was touched, and Safari unlocks the stage video because
+ * it is played right then (primeAudio). Opened straight from a link there was
+ * no touch yet: if the browser refuses, the picture plays silent and the sound
+ * comes on with the first click, tap or key press anywhere, with no button. */
+function primeAudio() { ui.feature.play().catch(() => {}); }
+
+// Elements that carry sound right now.
+function audibleMedia() {
+  if (state.view === "grid") return [...state.streams.values()].filter((s) => !s.local).map((s) => s.tile.querySelector("video"));
+  const s = state.streams.get(state.featured);
+  return s && !s.local ? [ui.feature] : [];
+}
+function applyAudio() {
+  const audible = new Set(audibleMedia());
+  const silent = state.muted || state.audioLocked;
+  for (const v of [ui.feature, ...[...state.streams.values()].map((s) => s.tile.querySelector("video"))]) {
+    v.volume = state.volume;
+    v.muted = silent || !audible.has(v);
+  }
+}
+// Plays what should be playing; a refusal of sound turns it off until the first touch.
+function syncPlayback() {
+  applyAudio();
+  const media = state.view === "grid" ? [...state.streams.values()].map((s) => s.tile.querySelector("video")) : [ui.feature];
+  for (const v of media) {
+    // One that should be heard is asked again even while playing: unmuting it
+    // without a touch first may have been refused, or have paused it.
+    if (!v.srcObject || (!v.paused && v.muted)) continue;
+    v.play().catch((err) => {
+      if (err?.name !== "NotAllowedError" || v.muted) return;
+      lockAudio();
+      v.play().catch(() => {});
+    });
+  }
+}
+const UNLOCK_EVENTS = ["pointerup", "click", "keydown"];
+function lockAudio() {
+  if (state.audioLocked) return;
+  state.audioLocked = true;
+  applyAudio();
   renderMute();
-});
+  for (const ev of UNLOCK_EVENTS) addEventListener(ev, unlockAudio, { capture: true });
+}
+let unlockedAt = -Infinity;
+function unlockAudio() {
+  if (!state.audioLocked) return;
+  state.audioLocked = false;
+  unlockedAt = performance.now();
+  applyAudio();
+  renderMute();
+  const media = audibleMedia().filter((v) => v.srcObject && !v.muted);
+  Promise.all(media.map((v) => v.play())).then(() => {
+    for (const ev of UNLOCK_EVENTS) removeEventListener(ev, unlockAudio, { capture: true });
+  }, () => {
+    // Not a press that counts (a modifier key, say): silent again until the next one.
+    if (state.audioLocked) return;
+    state.audioLocked = true;
+    applyAudio();
+    renderMute();
+    for (const v of media) v.play().catch(() => {});
+  });
+}
 
 const statsBtn = $("statsBtn");
 const stats = createStatsPanel({
@@ -1303,9 +1540,11 @@ ui.stage.addEventListener("statstoggle", (e) => statsBtn.setAttribute("aria-pres
 
 ui.fullBtn.addEventListener("click", toggleFullscreen);
 ui.exitFsBtn.addEventListener("click", () => setImmersive(false));
+ui.gridBtn.addEventListener("click", () => showGrid());
 // Double click or double tap on the picture; a touch double tap raises both events, so only one counts.
 let lastFullscreenGesture = 0;
 function fullscreenGesture() {
+  clearTimeout(gridTimer);
   const now = performance.now();
   if (now - lastFullscreenGesture < 500) return;
   lastFullscreenGesture = now;
@@ -1422,22 +1661,57 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "i" || e.key === "I") stats.toggle();
 });
 
-// Hides the floating controls when the pointer rests over the screen. On touch
-// a tap on the picture brings them back, and another tap sends them away.
+// With two or more screens on the air, a click on the one in focus goes back
+// to the grid. A double click still means fullscreen, so the single click
+// waits to see whether a second one follows: only then, and only with a mouse
+// (a tap shows and hides the controls; the grid button is there for touch and
+// keyboard). The wait is about as long as a double click on most systems.
+const DOUBLE_CLICK_MS = 300;
+let gridTimer = 0;
+let downPointer = "mouse", panelAtDown = false;
+ui.stage.addEventListener("pointerdown", (e) => {
+  downPointer = e.pointerType;
+  // A click that closes an open panel only closes it.
+  panelAtDown = !ui.peoplePanel.hidden || "open" in qp.dataset;
+}, { capture: true });
+ui.stage.addEventListener("click", (e) => {
+  if (downPointer === "touch" || (e.target !== ui.feature && e.target !== ui.featureCanvas)) return;
+  if (e.detail > 1) { clearTimeout(gridTimer); return; }
+  if (panelAtDown || state.view !== "focus" || gridOrder().length < 2) return;
+  clearTimeout(gridTimer);
+  gridTimer = setTimeout(showGrid, DOUBLE_CLICK_MS);
+});
+
+// The controls over the picture (the tools in its corner and the dock) show
+// while the pointer moves over it and rest when it stops or leaves. On touch a
+// tap on the picture brings them back, and another tap sends them away.
+// Keyboard focus and an open panel keep them up.
 let idleTimer;
+const chrome = [ui.stageTools, ui.dock, ui.noticeSlot];
+function chromeBusy() {
+  if (!ui.peoplePanel.hidden || "open" in qp.dataset) return true;
+  return chrome.some((el) => el.querySelector(":focus-visible") || (!touchOnly.matches && el.matches(":hover")));
+}
 function wake() {
   ui.stage.classList.remove("idle-cursor");
   clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => {
-    const busy = ui.stageBar.matches(touchOnly.matches ? ":focus-visible" : ":hover, :focus-within")
-      || ui.stageBar.querySelector(":focus-visible");
-    if (!ui.stage.classList.contains("idle") && !busy) ui.stage.classList.add("idle-cursor");
-  }, touchOnly.matches ? 3600 : 2600);
+  idleTimer = setTimeout(rest, touchOnly.matches ? 3600 : 2600);
 }
-ui.stage.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") wake(); });
+function rest() {
+  clearTimeout(idleTimer);
+  if (ui.stage.classList.contains("idle")) return;
+  if (chromeBusy()) idleTimer = setTimeout(rest, 1200); // looked at again in a moment
+  else ui.stage.classList.add("idle-cursor");
+}
+const overChrome = (el) => !!el && (ui.stage.contains(el) || ui.dock.contains(el) || ui.peoplePanel.contains(el) || ui.qualityPanel.contains(el));
+for (const el of [ui.stage, ui.dock]) {
+  el.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") wake(); });
+  // From the picture to the dock floating over it is not leaving.
+  el.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse" && !overChrome(e.relatedTarget)) rest(); });
+  el.addEventListener("focusin", wake);
+}
 let hiddenAtTouch = false; // the pointer down already wakes the controls; the tap needs to know what it found
 ui.stage.addEventListener("pointerdown", () => { hiddenAtTouch = ui.stage.classList.contains("idle-cursor"); wake(); });
-ui.stage.addEventListener("focusin", wake);
 ui.dock.addEventListener("pointerdown", wake);
 ui.stage.addEventListener("click", (e) => {
   if (!touchOnly.matches || e.target.closest("button, input, label, .stats-panel")) return;
@@ -1450,11 +1724,68 @@ ui.stage.addEventListener("click", (e) => {
 let lastTap = { t: 0, x: 0, y: 0 };
 // A click, not a pointer event: the system player on iPhone only opens from one.
 ui.stage.addEventListener("click", (e) => {
-  if (!touchOnly.matches || e.target.closest("button, input, label, .stats-panel, .unmute") || !state.streams.get(state.featured)) return;
+  if (!touchOnly.matches || e.target.closest("button, input, label, .stats-panel") || !state.streams.get(state.featured) || state.view === "grid") return;
   const now = performance.now();
   if (now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 40) fullscreenGesture();
   lastTap = { t: now, x: e.clientX, y: e.clientY };
 });
+
+/* "Fulano iniciou uma transmissão": someone went on the air while another
+ * screen was being watched. In the corner, with their live picture; a click
+ * goes to it. It leaves by itself, but not while the pointer or focus is on it. */
+const NOTICE_MS = 6000;
+let notice = null;
+function showNotice(id) {
+  const s = state.streams.get(id);
+  if (!s) return;
+  closeNotice();
+  const el = document.createElement("button");
+  el.type = "button";
+  el.className = "notice";
+  el.title = "Assistir";
+  el.innerHTML = `<span class="notice-media"></span><span class="notice-text"><strong></strong> iniciou uma transmissão</span>`;
+  el.querySelector("strong").textContent = s.name;
+  const media = el.querySelector(".notice-media");
+  let release;
+  if (s.view) {
+    const c = media.appendChild(document.createElement("canvas"));
+    s.view.attach(c, { thumb: true });
+    release = () => s.view.detach(c);
+  } else {
+    const v = media.appendChild(Object.assign(document.createElement("video"), { muted: true, playsInline: true, autoplay: true }));
+    v.srcObject = s.stream;
+    v.play().catch(() => {});
+    release = () => { v.srcObject = null; };
+  }
+  const n = { id, el, release, timer: 0 };
+  const hold = () => clearTimeout(n.timer);
+  const resume = () => { clearTimeout(n.timer); n.timer = setTimeout(() => { if (!el.matches(":hover, :focus-visible")) closeNotice(); }, NOTICE_MS / 2); };
+  el.addEventListener("pointerenter", hold);
+  el.addEventListener("pointerleave", resume);
+  el.addEventListener("focus", hold);
+  el.addEventListener("blur", resume);
+  el.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); closeNotice(); } });
+  // Opens that stream in fullscreen (still inside the click, so the browser allows it).
+  el.addEventListener("click", () => {
+    closeNotice();
+    feature(id);
+    if (!fullscreenApi().element && !state.immersive) toggleFullscreen();
+  });
+  n.timer = setTimeout(() => closeNotice(), NOTICE_MS);
+  ui.noticeSlot.append(el);
+  notice = n;
+}
+function closeNotice() {
+  const n = notice;
+  if (!n) return;
+  notice = null;
+  clearTimeout(n.timer);
+  const done = () => { n.release(); n.el.remove(); };
+  if (reducedMotion.matches || document.hidden) { done(); return; }
+  n.el.classList.add("out");
+  n.el.addEventListener("animationend", done, { once: true });
+  setTimeout(done, 500); // in case the animation never runs
+}
 
 /* ---------------- People ---------------- */
 
@@ -1515,6 +1846,7 @@ function renderPeople() {
   const label = `${list.length} ${list.length === 1 ? "pessoa" : "pessoas"} no canal`;
   ui.people.setAttribute("aria-label", label);
   ui.peopleBtn.setAttribute("aria-label", `${label}. Ver quem está no canal`);
+  fitChrome();
 
   // The same people by name, for touch screens that have no tooltips.
   ui.roster.replaceChildren(...list.map(([id, m]) => {
@@ -1563,7 +1895,6 @@ function enterRoom() {
   safeSession("telinha:watching", "visible");
   history.replaceState(null, "", "#" + state.code);
   document.title = `Canal ${state.code} · Telinha`;
-  ui.channelDigits.textContent = state.code;
   ui.emptyDigits.textContent = state.code;
   ui.shareBtn.hidden = !CAN_SHARE;
   renderPeople();
